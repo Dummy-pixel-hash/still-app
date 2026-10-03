@@ -1,0 +1,173 @@
+# Still — Windows ARM64 CI / real build validation gate.
+#
+# Purpose: build the actual Still desktop application (React + Vite + Tauri 2)
+# on a REAL hosted Windows ARM64 runner, produce the real ARM64 Windows
+# binary/package, and PROVE the executable is PE ARM64 by inspecting the
+# PE header (not by trusting the Rust target name).
+#
+# Runner: `windows-11-arm` is the standard GitHub-hosted Windows ARM64 image
+# (see https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job).
+# Do NOT change this to windows-latest / windows-x64 / ubuntu-* / macos-*,
+# QEMU, Wine, or a Linux cross-compile job: those do not validate Windows ARM64.
+#
+# Build success here proves compile+package for Windows ARM64 only.
+# It does NOT prove GUI/WebView2/SSH/keyring runtime behaviour — runtime
+# items remain UNVERIFIED by this workflow by design.
+
+name: still-windows-arm64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-arm64:
+    name: build + verify (Windows ARM64)
+    # REAL hosted Windows ARM64 runner. See header comment.
+    runs-on: windows-11-arm
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build metadata (pre)
+        run: |
+          Write-Host "commit=$env:GITHUB_SHA"
+          Write-Host "ref=$env:GITHUB_REF"
+          Write-Host "runner_os=$env:RUNNER_OS"
+          Write-Host "runner_arch=$env:RUNNER_ARCH"
+          Write-Host "image=$env:ImageOS"
+          [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture | ForEach-Object { Write-Host "dotnet_os_arch=$_" }
+          systeminfo | Select-String 'OS Name','OS Version' | ForEach-Object { Write-Host $_ }
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+          rustup target list --installed
+          $tauriLine = Select-String -Path src-tauri/Cargo.lock -Pattern '^name = "tauri"$' -Context 0,1 | Select-Object -First 1
+          Write-Host "tauri_crate_lock=$($tauriLine.Context.PostContext)"
+          node -p "console.log('tauri_cli_npm=' + require('./node_modules/@tauri-apps/cli/package.json').version)"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Rust (stable + ARM64 Windows target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Install npm dependencies (locked)
+        run: npm ci
+
+      - name: Frontend typecheck
+        run: npm run typecheck
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Rust check (locked)
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust tests (locked)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri app (Windows ARM64)
+        run: npx tauri build --target aarch64-pc-windows-msvc
+
+      - name: Verify PE architecture is ARM64 + collect metadata
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Get-PeInfo([string]$Path) {
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $dos = $br.ReadUInt16()
+              if ($dos -ne 0x5A4D) { throw "Not a PE file (bad MZ): $Path" }
+              $fs.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $peOffset = $br.ReadInt32()
+              $fs.Seek($peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $peSig = $br.ReadUInt32()
+              if ($peSig -ne 0x00004550) { throw "Not a PE file (bad PE sig): $Path" }
+              $machine = $br.ReadUInt16()
+              # Optional-header magic follows COFF header (20 bytes): 0x10b=PE32, 0x20b=PE32+.
+              $fs.Seek($peOffset + 4 + 20, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $magic = $br.ReadUInt16()
+              return @{ Machine = $machine; Magic = $magic }
+            } finally {
+              $fs.Close()
+            }
+          }
+
+          $exe = Get-ChildItem -Path 'src-tauri\target\aarch64-pc-windows-msvc\release\*.exe' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -notmatch '\.(pdb|lib)$' } |
+                 Select-Object -First 1
+          if (-not $exe) {
+            $exe = Get-ChildItem -Path 'src-tauri\target\release\*.exe' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          }
+          if (-not $exe) { throw 'No release .exe found under src-tauri\target' }
+          Write-Host "exe_path=$($exe.FullName)"
+          Write-Host "exe_size_bytes=$($exe.Length)"
+
+          $info = Get-PeInfo $exe.FullName
+          $machineHex = ('0x{0:X4}' -f $info.Machine)
+          $magicHex = ('0x{0:X4}' -f $info.Magic)
+          Write-Host "pe_machine=$machineHex"
+          Write-Host "pe_optional_magic=$magicHex"
+          # 0xAA64 = ARM64 (AArch64), 0x8664 = x64, 0x014C = x86.
+          # 0x20b = PE32+ (64-bit). ARM64 Windows binaries must be PE32+ / ARM64.
+          if ($info.Machine -ne 0xAA64) { throw "ARCH MISMATCH: expected ARM64 (0xAA64), got $machineHex" }
+          if ($info.Magic -ne 0x020B) { throw "FORMAT MISMATCH: expected PE32+ (0x20B), got $magicHex" }
+          Write-Host 'PE ARCHITECTURE VERIFIED: PE32+ / ARM64 (AArch64)'
+
+          $msi = Get-ChildItem -Recurse -Path 'src-tauri\target' -Filter '*.msi' -ErrorAction SilentlyContinue
+          $nsis = Get-ChildItem -Recurse -Path 'src-tauri\target' -Filter '*setup*.exe' -ErrorAction SilentlyContinue
+          $msi | ForEach-Object { Write-Host "msi=$($_.FullName) size=$($_.Length)" }
+          $nsis | ForEach-Object { Write-Host "nsis=$($_.FullName) size=$($_.Length)" }
+          if (-not $msi -and -not $nsis) { Write-Host 'NOTE: no msi/nsis bundle found; exe is the primary artifact' }
+
+          $manifest = @(
+            "commit=$env:GITHUB_SHA",
+            "ref=$env:GITHUB_REF",
+            "runner_os=$env:RUNNER_OS",
+            "runner_arch=$env:RUNNER_ARCH",
+            "rustc=$(rustc --version)",
+            "cargo=$(cargo --version)",
+            "node=$(node --version)",
+            "exe=$($exe.FullName)",
+            "exe_size_bytes=$($exe.Length)",
+            "pe_machine=$machineHex",
+            "pe_optional_magic=$magicHex",
+            "pe_arch=PE32+ / ARM64 (AArch64)"
+          )
+          $msi | ForEach-Object { $manifest += "msi=$($_.FullName) size=$($_.Length)" }
+          $nsis | ForEach-Object { $manifest += "nsis=$($_.FullName) size=$($_.Length)" }
+          $manifest | Out-File -FilePath 'still-windows-arm64-manifest.txt' -Encoding utf8
+          Get-Content 'still-windows-arm64-manifest.txt'
+
+      - name: Upload Windows ARM64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: still-windows-arm64
+          if-no-files-found: error
+          path: |
+            src-tauri/target/aarch64-pc-windows-msvc/release/*.exe
+            src-tauri/target/release/*.exe
+            src-tauri/target/**/bundle/**/*.msi
+            src-tauri/target/**/bundle/**/*.exe
+            still-windows-arm64-manifest.txt
