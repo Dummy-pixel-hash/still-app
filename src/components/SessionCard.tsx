@@ -8,7 +8,7 @@ import {
 import { transcriptSnapshot } from "../session/connections"
 
 const statusMeta: Record<
-  ConnState | "never" | "reconnecting",
+  ConnState | "never",
   { label: string; dot: string; pulse: boolean }
 > = {
   connected: {
@@ -18,11 +18,6 @@ const statusMeta: Record<
   },
   connecting: {
     label: "Connecting",
-    dot: "bg-[#e8c4a0]",
-    pulse: true,
-  },
-  reconnecting: {
-    label: "Reconnecting",
     dot: "bg-[#e8c4a0]",
     pulse: true,
   },

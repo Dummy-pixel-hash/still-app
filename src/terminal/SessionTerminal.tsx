@@ -3,6 +3,8 @@ import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import {
+  needsReattachMarker,
+  noteTranscriptRendered,
   resizeSession,
   subscribeSessionData,
   transcriptSnapshot,
@@ -87,10 +89,17 @@ export default function SessionTerminal({
     fitRef.current = fit
 
     // Repaint recent transcript instantly (reconnect/reopen continuity).
+    // The synthetic marker is painted only when the transcript GREW since
+    // this surface last rendered it (bytes arrived while the overlay was
+    // closed, e.g. across a disconnect/reconnect) — repeated opens of the
+    // same live session repaint silently instead of stacking markers.
     const snapshot = transcriptSnapshot(localRef.current)
     if (snapshot.length > 0) {
       terminal.write(snapshot)
-      terminal.write("\r\n\x1b[90m[reattached — live output resumes below]\x1b[0m\r\n")
+      if (needsReattachMarker(localRef.current)) {
+        terminal.write("\r\n\x1b[90m[reattached — live output resumes below]\x1b[0m\r\n")
+      }
+      noteTranscriptRendered(localRef.current)
     }
 
     const pushResize = () => {
@@ -173,6 +182,9 @@ export default function SessionTerminal({
       observer.disconnect()
       window.removeEventListener("resize", debounced)
       unsub()
+      // Remember how much transcript this surface rendered, so the next
+      // mount can tell growth (marker) from a plain reopen (silent repaint).
+      noteTranscriptRendered(localRef.current)
       terminalRef.current = null
       fitRef.current = null
       terminal.dispose()

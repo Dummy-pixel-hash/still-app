@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
-    "test:regressions": "node tests-m3/regressions.mjs && node tests-m5/regressions.mjs",
+    "test:regressions": "node tests-m3/regressions.mjs && node tests-m5/regressions.mjs && node tests-m6/regressions.mjs",
     "test:hostkey": "node tests-m5/regressions.mjs"
   },
   "dependencies": {

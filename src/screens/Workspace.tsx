@@ -19,7 +19,7 @@ import {
 import {
   connectSession,
   connectionState,
-  disconnectSession,
+  releaseSession,
   useConnections,
 } from "../session/connections"
 import type { ConnState, Session, SessionDraft } from "../types"
@@ -157,6 +157,11 @@ export default function Workspace() {
       setShowNew(null)
       // Auto-connect the new card so the typed bridge path is exercised
       // immediately; secrets stay transient.
+      // Single-owner rule: when a secret was just typed, THIS flow owns the
+      // initial connection (the overlay auto-connect must not fire a second
+      // one — it skips non-disconnected/pending sessions, and the registry
+      // epoch-supersedes any overlap). When there is no secret, ownership
+      // stays with the overlay auto-connect, which will prompt for auth.
       requestAnimationFrame(() => {
         const el = document.querySelector(
           `[data-card="${session.id}"]`,
@@ -378,7 +383,7 @@ export default function Workspace() {
                           if (store.settings.confirmRemove)
                             setRemoving(sess)
                           else {
-                            void disconnectSession(sess.id).finally(() =>
+                            void releaseSession(sess.id).finally(() =>
                               removeSession(sess.id),
                             )
                           }

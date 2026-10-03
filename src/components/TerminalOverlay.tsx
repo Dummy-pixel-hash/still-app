@@ -6,7 +6,9 @@ import {
   connectionError,
   connectionState,
   disconnectSession,
+  forgetStoredHostKey,
   hostKeyPromptFor,
+  isConnectPending,
   reconnectSession,
   useConnections,
   type ConnectRequest,
@@ -65,6 +67,7 @@ export default function TerminalOverlay({
   // refused BEFORE auth; trust is an explicit user action, persisted by Rust.
   const hostPrompt = session ? hostKeyPromptFor(session.id) : null
   const [trustBusy, setTrustBusy] = useState(false)
+  const [forgetBusy, setForgetBusy] = useState(false)
   const trustHost = useCallback(async () => {
     if (!session || !hostPrompt || trustBusy) return
     setTrustBusy(true)
@@ -81,6 +84,21 @@ export default function TerminalOverlay({
     }
   }, [session, hostPrompt, trustBusy])
   const doConnectRef = useRef<() => Promise<void>>(async () => {})
+  const forgetStoredKey = useCallback(async () => {
+    if (!session || !hostPrompt || forgetBusy) return
+    setForgetBusy(true)
+    try {
+      // Changed-key recovery only: remove the STORED old key, nothing else.
+      // The replacement is never trusted here — the next connect re-enters
+      // the normal unknown-host flow and still requires explicit Trust.
+      await forgetStoredHostKey(session.id, hostPrompt.host, hostPrompt.port)
+    } catch (e) {
+      // Leave the prompt up; the registry keeps the changed-key error.
+      console.error("forgetHost refused:", e)
+    } finally {
+      setForgetBusy(false)
+    }
+  }, [session, hostPrompt, forgetBusy])
 
   const show = useCallback((ms = 2000) => {
     setChrome(true)
@@ -166,6 +184,11 @@ export default function TerminalOverlay({
         setPrompt(null)
         await reconnectSession(req)
       }
+    } catch (e) {
+      // connectSession records failures in the registry (error state), but
+      // stay rejection-safe here too: no unhandled promise rejections from
+      // any button, and the error panel (not the terminal) shows the cause.
+      console.error("connect failed:", e)
     } finally {
       setBusy(false)
     }
@@ -180,9 +203,14 @@ export default function TerminalOverlay({
   // Auto-connect on first open: if a password was pre-filled inline, use it;
   // otherwise immediately run the auth flow so an unconnected session never
   // sits silently with input paused. doConnect internally prompts when needed.
+  // Single-owner rule: a connect attempt owned elsewhere (e.g. the creation
+  // flow's direct connect, which already carries the freshly typed secret)
+  // is already in flight or resolved by the time the overlay opens — the
+  // registry tracks it via isConnectPending, and any non-disconnected state
+  // means this overlay must NOT start a second attempt. No delays involved.
   const autoTried = useRef<string | null>(null)
   useEffect(() => {
-    if (full && session && connectionState(session.id) === "disconnected" && !busy && autoTried.current !== session.id) {
+    if (full && session && connectionState(session.id) === "disconnected" && !isConnectPending(session.id) && !busy && autoTried.current !== session.id) {
       autoTried.current = session.id
       void doConnect()
     }
@@ -281,6 +309,12 @@ export default function TerminalOverlay({
                     Contact the server admin out-of-band before doing anything.
                   </p>
                 )}
+                {hostPrompt.changed && (
+                  <p className="font-mono text-[11px] text-amber-200/90">
+                    If you verified the change out-of-band, remove the stored key,
+                    then Retry to review the new key as unknown — Trust is still required.
+                  </p>
+                )}
                 <div className="flex items-center gap-2">
                   {!hostPrompt.changed && (
                     <button
@@ -290,6 +324,16 @@ export default function TerminalOverlay({
                       className="rounded-full bg-amber-400 px-4 py-1.5 text-[12px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
                     >
                       {trustBusy ? "Trusting…" : "Trust this server"}
+                    </button>
+                  )}
+                  {hostPrompt.changed && (
+                    <button
+                      type="button"
+                      disabled={forgetBusy}
+                      onClick={() => void forgetStoredKey()}
+                      className="rounded-full bg-amber-400 px-4 py-1.5 text-[12px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
+                    >
+                      {forgetBusy ? "Removing…" : "Remove stored key"}
                     </button>
                   )}
                   <button

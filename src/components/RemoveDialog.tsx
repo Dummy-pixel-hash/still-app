@@ -2,7 +2,7 @@ import { useState } from "react"
 import { createPortal } from "react-dom"
 import type { Session } from "../types"
 import { removeSession, useStore } from "../session/store"
-import { disconnectSession } from "../session/connections"
+import { releaseSession } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
 
 /**
@@ -23,7 +23,10 @@ export default function RemoveDialog({
   const confirm = async () => {
     setBusy(true)
     try {
-      await disconnectSession(session.id)
+      // Full local release: drops our channel if live AND frees the
+      // renderer's transcript/registry state for the id. Remote tmux keeps
+      // running server-side.
+      await releaseSession(session.id)
       removeSession(session.id)
       // Drop any remembered per-connection credential handle only on
       // explicit user intent — keep key-library secrets untouched.

@@ -6,7 +6,13 @@
 // NOT a disconnect: the worker keeps running until explicit Disconnect.
 
 import { useSyncExternalStore } from "react"
-import { nativeBridge, type ConnectArgs, type HostKeyPrompt } from "../bridge/nativeBridge"
+import {
+  nativeBridge,
+  type ConnectArgs,
+  type ConnectResult,
+  type HostKeyPrompt,
+  type StatusResult,
+} from "../bridge/nativeBridge"
 import type { ConnState } from "../types"
 
 export type LiveState = ConnState
@@ -73,6 +79,32 @@ export function clearHostKeyPrompt(localId: string) {
   }
 }
 
+/**
+ * Changed-key recovery: explicitly remove the STORED trust for this session's
+ * endpoint, then clear the prompt so the error/Retry panel takes over.
+ * Never trusts anything: the next connect re-enters the normal unknown-host
+ * flow (fresh prompt, explicit Trust required). Rejects when the native
+ * store cannot remove the key, leaving the prompt up.
+ */
+export async function forgetStoredHostKey(
+  localId: string,
+  host: string,
+  port: number,
+): Promise<void> {
+  await nativeBridge.forgetHost(host, port)
+  const e = entries.get(localId)
+  if (e) {
+    entries.set(localId, {
+      ...e,
+      hostKeyPrompt: null,
+      lastError:
+        "[host_key_forgotten] Stored key removed. Retry to review the server's current key as an unknown host — Trust is still required.",
+      updatedAt: Date.now(),
+    })
+    emit()
+  }
+}
+
 function setEntry(localId: string, patch: Partial<Entry>) {
   const prev = entries.get(localId) ?? {
     nativeId: null,
@@ -95,7 +127,6 @@ function mapNativeStatus(
     case "live":
       return "connected"
     case "connecting":
-    case "reconnecting":
       return "connecting"
     case "error":
       return "error"
@@ -123,46 +154,237 @@ export function clearTranscript(localId: string) {
   transcripts.delete(localId)
 }
 
+// Per-surface render cursor: how many transcript bytes the mounted terminal
+// surface has already painted for a local session. The synthetic
+// "[reattached …]" marker is shown only when the transcript GREW since the
+// surface last rendered it (bytes arrived while the overlay was closed, e.g.
+// across a disconnect/reconnect) — repeated opens of the same live session
+// must not accumulate markers.
+const announcedLengths = new Map<string, number>()
+
+/** True when the transcript gained bytes since this surface last rendered. */
+export function needsReattachMarker(localId: string): boolean {
+  const cur = transcripts.get(localId)?.length ?? 0
+  return cur > (announcedLengths.get(localId) ?? 0)
+}
+
+/** Record that the surface has rendered the current transcript in full. */
+export function noteTranscriptRendered(localId: string) {
+  announcedLengths.set(localId, transcripts.get(localId)?.length ?? 0)
+}
+
+// --- Connection attempt ownership -------------------------------------------
+// Exactly one attempt may own a local session at a time. Every
+// connectSession() call mints an epoch; an older attempt that is still in
+// flight observes the mismatch after its next await and must stop WITHOUT
+// touching shared registry state — reaping only the native session it
+// created itself. Explicit disconnectSession() also invalidates in-flight
+// attempts, so a late connect resolution can never resurrect a session the
+// user just closed, and two overlapping attempts can never both publish.
+
+let epochCounter = 0
+const attemptEpoch = new Map<string, number>()
+const pendingOwners = new Map<string, number>()
+
+function beginAttempt(localId: string): {
+  epoch: number
+  isCurrent: () => boolean
+  finish: () => void
+} {
+  const epoch = ++epochCounter
+  attemptEpoch.set(localId, epoch)
+  pendingOwners.set(localId, epoch)
+  return {
+    epoch,
+    isCurrent: () => attemptEpoch.get(localId) === epoch,
+    finish: () => {
+      if (pendingOwners.get(localId) === epoch) pendingOwners.delete(localId)
+    },
+  }
+}
+
+/** True while a connect attempt for this local session is still setting up. */
+export function isConnectPending(localId: string): boolean {
+  return pendingOwners.has(localId)
+}
+
+function invalidateAttempts(localId: string) {
+  attemptEpoch.set(localId, ++epochCounter)
+}
+
+/** Best-effort orphan reap: drop a native session we created but cannot use. */
+async function reapOrphan(nativeId: string): Promise<void> {
+  try {
+    await nativeBridge.disconnect(nativeId)
+  } catch {
+    // Already gone server-side.
+  }
+}
+
+/** Normalize any connect/setup rejection into the typed UI error format. */
+function formatSetupError(e: unknown): string {
+  if (e && typeof e === "object") {
+    const rec = e as { code?: unknown; message?: unknown }
+    const code = typeof rec.code === "string" && rec.code ? rec.code : "connect_failed"
+    const message =
+      typeof rec.message === "string" && rec.message ? rec.message : String(e)
+    return `[${code}] ${message}`
+  }
+  return `[connect_failed] ${e instanceof Error ? e.message : String(e)}`
+}
+
+/**
+ * Adopt authoritative terminal outcomes that the worker may have reached
+ * BEFORE our event subscription registered (Tauri events have no replay).
+ * Only states carrying new information are adopted: "connecting"/"idle"
+ * mean the worker is still starting, and "disconnected" is what the dev
+ * adapter always reports — adopting any of those could clobber the live
+ * event stream, so they are ignored.
+ */
+function adoptAuthoritativeStatus(
+  localId: string,
+  wireStatus: string,
+  wireError: StatusResult["lastError"],
+) {
+  if (wireStatus === "connected" || wireStatus === "live") {
+    setEntry(localId, { state: "connected" })
+  } else if (wireStatus === "error") {
+    setEntry(localId, {
+      state: "error",
+      lastError: wireError
+        ? `[${wireError.code}] ${wireError.message}`
+        : (entries.get(localId)?.lastError ??
+          "[connect_failed] The session ended before connecting."),
+    })
+  } else if (wireStatus === "closed") {
+    // Worker already finished (e.g. immediate remote exit) before we
+    // subscribed: reflect it instead of idling in "connecting".
+    setEntry(localId, { state: "disconnected" })
+  }
+}
+
 export interface ConnectRequest extends Omit<ConnectArgs, "tmuxSession"> {
   localId: string
   tmuxSession: string
 }
 
 export async function connectSession(req: ConnectRequest): Promise<void> {
+  // Never rejects for connect/setup failures: the registry entry IS the
+  // error channel (state + lastError), so the UI can never strand in
+  // "connecting". Superseded attempts exit silently after reaping orphans.
   const { localId, ...args } = req
-  // Tear down any previous native session for this local id first.
+  // Tear down any previous native session for this local id first. This
+  // also invalidates older in-flight attempts; OUR epoch is minted after it
+  // so the newest attempt always wins.
   await disconnectSession(localId, { silent: true })
-  setEntry(localId, { state: "connecting", lastError: null, nativeId: null })
+  const attempt = beginAttempt(localId)
+  try {
+    setEntry(localId, { state: "connecting", lastError: null, nativeId: null })
 
-  const res = await nativeBridge.connect({ ...args })
-  setEntry(localId, { nativeId: res.sessionId, hostKeyPrompt: null })
+    let res: ConnectResult
+    try {
+      res = await nativeBridge.connect({ ...args })
+    } catch (e) {
+      if (!attempt.isCurrent()) return
+      // No native session exists: record the typed error and stop. Errors
+      // stay connection/UI state — never injected into xterm.
+      setEntry(localId, {
+        state: "error",
+        lastError: formatSetupError(e),
+        nativeId: null,
+      })
+      return
+    }
+    if (!attempt.isCurrent()) {
+      await reapOrphan(res.sessionId)
+      return
+    }
+    setEntry(localId, { nativeId: res.sessionId, hostKeyPrompt: null })
 
-  const unlisten = await nativeBridge.subscribeToSession(
-    res.sessionId,
-    (event) => {
-      if (event.type === "data") {
-        pushTranscript(localId, event.data)
-        sessionDataListeners.get(localId)?.forEach((fn) => fn(event.data))
-      } else if (event.type === "status") {
-        setEntry(localId, { state: mapNativeStatus(event.status) })
-      } else if (event.type === "hostKeyPrompt") {
-        // M5: untrusted/changed key — worker refused BEFORE auth. Surface the
-        // fingerprint for explicit Trust/Reject; never auto-accept.
-        setEntry(localId, { hostKeyPrompt: event.prompt })
-      } else if (event.type === "error") {
-        // Client-side errors belong to Still's UI, never to the remote PTY
-        // transcript: the terminal shows ONLY bytes received from the
-        // remote SSH/tmux channel. Host-key prompts, auth failures, and
-        // transport errors surface via connection state + the host-key
-        // dialog, so they must NOT be injected into sessionDataListeners.
-        setEntry(localId, {
-          state: "error",
-          lastError: `[${event.error.code}] ${event.error.message}`,
-        })
+    const epoch = attempt.epoch
+    let unlisten: (() => void) | null = null
+    try {
+      unlisten = await nativeBridge.subscribeToSession(
+        res.sessionId,
+        (event) => {
+          // Defense in depth: a superseded attempt's listener stays silent.
+          if (attemptEpoch.get(localId) !== epoch) return
+          if (event.type === "data") {
+            pushTranscript(localId, event.data)
+            sessionDataListeners.get(localId)?.forEach((fn) => fn(event.data))
+          } else if (event.type === "status") {
+            setEntry(localId, { state: mapNativeStatus(event.status) })
+          } else if (event.type === "hostKeyPrompt") {
+            // M5: untrusted/changed key — worker refused BEFORE auth. Surface the
+            // fingerprint for explicit Trust/Reject; never auto-accept.
+            setEntry(localId, { hostKeyPrompt: event.prompt })
+          } else if (event.type === "error") {
+            // Client-side errors belong to Still's UI, never to the remote PTY
+            // transcript: the terminal shows ONLY bytes received from the
+            // remote SSH/tmux channel. Host-key prompts, auth failures, and
+            // transport errors surface via connection state + the host-key
+            // dialog, so they must NOT be injected into sessionDataListeners.
+            setEntry(localId, {
+              state: "error",
+              lastError: `[${event.error.code}] ${event.error.message}`,
+            })
+          }
+        },
+      )
+    } catch (e) {
+      if (!attempt.isCurrent()) {
+        await reapOrphan(res.sessionId)
+        return
       }
-    },
-  )
-  unsubscribers.set(localId, unlisten)
+      // A native session exists but we cannot observe it: reap it so no
+      // live worker is left without a listener, and report the failure.
+      await reapOrphan(res.sessionId)
+      setEntry(localId, {
+        state: "error",
+        lastError: formatSetupError(e),
+        nativeId: null,
+      })
+      return
+    }
+    if (!attempt.isCurrent() || !unlisten) {
+      if (unlisten) {
+        try {
+          unlisten()
+        } catch {
+          // ignore
+        }
+      }
+      await reapOrphan(res.sessionId)
+      return
+    }
+    const prev = unsubscribers.get(localId)
+    if (prev && prev !== unlisten) {
+      try {
+        prev()
+      } catch {
+        // ignore
+      }
+    }
+    unsubscribers.set(localId, unlisten)
+
+    // Reconciliation: the worker may have emitted terminal events
+    // (HostKeyPrompt/Error/Status) in the gap between native connection
+    // creation and our subscription — Tauri events are fire-and-forget with
+    // no replay. True subscribe-before-connect is impossible here: the event
+    // topic contains the server-generated session id, which only exists
+    // after connect returns. The Rust side mirrors authoritative worker
+    // state regardless of listeners, so read it back explicitly instead of
+    // relying on timing. No sleeps, no host-key bypass: this only observes.
+    try {
+      const snap = await nativeBridge.status(res.sessionId)
+      if (!attempt.isCurrent()) return
+      adoptAuthoritativeStatus(localId, snap.status as string, snap.lastError)
+    } catch {
+      // Best-effort only (e.g. dev adapter): the live stream stays primary.
+    }
+  } finally {
+    attempt.finish()
+  }
 }
 
 const sessionDataListeners = new Map<string, Set<(data: number[]) => void>>()
@@ -198,6 +420,11 @@ export async function disconnectSession(
   localId: string,
   opts?: { silent?: boolean },
 ): Promise<void> {
+  // Invalidate any in-flight connect attempt first: a late connect
+  // resolution must never resurrect a session the user just closed. The
+  // attempt observes the epoch mismatch after its next await and reaps only
+  // the native session it created itself.
+  invalidateAttempts(localId)
   const entry = entries.get(localId)
   const unlisten = unsubscribers.get(localId)
   if (unlisten) {
@@ -217,8 +444,47 @@ export async function disconnectSession(
   }
   if (!opts?.silent) {
     // Keep transcript so reopen shows recent scrollback until reconnect.
+    // Full transcript release happens only in releaseSession() (explicit
+    // session removal) — never on plain disconnect. Remote tmux is
+    // untouched either way.
   }
-  setEntry(localId, { state: "disconnected", nativeId: null })
+  // Explicit disconnect leaves a genuinely clean state: no stale prompt,
+  // no stale error. A later connect re-emits a fresh prompt if the host is
+  // still untrusted, and records a fresh error if it fails — reconnect,
+  // trust/reject, retry, and epoch invalidation are unaffected.
+  setEntry(localId, {
+    state: "disconnected",
+    nativeId: null,
+    hostKeyPrompt: null,
+    lastError: null,
+  })
+}
+
+/**
+ * Full local release for explicit session REMOVAL (not disconnect).
+ * Drops the native channel if any, then frees ALL renderer-side state for
+ * the id: registry entry, transcript ring, reattach-marker cursor, data
+ * listeners, event subscription, and attempt epochs. Idempotent.
+ * Remote tmux is untouched (plain disconnect semantics) — only the local
+ * view cache is freed, so persistence guarantees are unchanged.
+ */
+export async function releaseSession(localId: string): Promise<void> {
+  await disconnectSession(localId, { silent: true })
+  invalidateAttempts(localId)
+  const unlisten = unsubscribers.get(localId)
+  if (unlisten) {
+    try {
+      unlisten()
+    } catch {
+      // ignore
+    }
+    unsubscribers.delete(localId)
+  }
+  sessionDataListeners.delete(localId)
+  clearTranscript(localId)
+  announcedLengths.delete(localId)
+  entries.delete(localId)
+  emit()
 }
 
 export async function reconnectSession(req: ConnectRequest): Promise<void> {

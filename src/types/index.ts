@@ -4,7 +4,6 @@ export type ConnectionStatus =
   | "disconnected"
   | "connecting"
   | "connected"
-  | "reconnecting"
   | "error"
 
 /** Typed response for the `still_ping` IPC probe. */
@@ -27,7 +26,6 @@ export type ConnState =
   | "disconnected"
   | "connecting"
   | "connected"
-  | "reconnecting"
   | "error"
 
 export interface Session {

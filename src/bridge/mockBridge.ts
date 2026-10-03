@@ -85,10 +85,12 @@ export const mockBridge: NativeBridge = {
 
   async disconnect(sessionId) {
     window.setTimeout(() => {
-      // Mirror production: after disconnect the channel is gone, so stale
-      // input must not echo into a future subscriber of the same id.
-      sessionSubscribers.delete(sessionId)
+      // Notify while the subscriber still exists (the production worker's
+      // terminal outcomes are likewise observable via status()), then drop
+      // the channel: after disconnect stale input must not echo into a
+      // future subscriber of the same id.
       emit(sessionId, { type: "status", status: "disconnected" })
+      sessionSubscribers.delete(sessionId)
     }, 10)
   },
 
