@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import TitleBar from "../components/TitleBar"
+import WindowNav from "../components/WindowNav"
 import SessionCard from "../components/SessionCard"
 import TerminalOverlay, { type OpenState } from "../components/TerminalOverlay"
 import SessionForm from "../components/SessionForm"
@@ -227,7 +227,7 @@ export default function Workspace() {
           background: "radial-gradient(closest-side, #b3161c, transparent)",
         }}
       />
-      <TitleBar subtitle="persistent remote terminal" />
+      <WindowNav />
 
       <div
         className="relative z-10 min-h-0 flex-1 overflow-y-auto scroll-quiet transition-all duration-[650ms]"
@@ -238,7 +238,7 @@ export default function Workspace() {
           pointerEvents: open ? "none" : "auto",
         }}
       >
-        <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:px-6">
+        <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-16 sm:px-6">
           <section className="rise flex flex-wrap items-end justify-between gap-4">
             <div>
               <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-faint">
