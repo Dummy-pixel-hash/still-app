@@ -28,7 +28,53 @@ use russh::keys::PrivateKeyWithHashAlg;
 use russh::{ChannelMsg, Disconnect};
 use russh::keys::PublicKeyOrCertificate;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+// ---------------------------------------------------------------------------
+// Bounded connection phases.
+//
+// Every stage of connection establishment that can otherwise wait
+// indefinitely on a stalled peer is wrapped in an explicit timeout, so a
+// silent endpoint surfaces a typed transport failure instead of hanging the
+// worker (and the UI's "connecting" state) forever. Timeout messages keep
+// the words "timed out" and avoid auth vocabulary, so the existing
+// `StillError::from_transport` taxonomy files them as `unreachable` without
+// any taxonomy change.
+// ---------------------------------------------------------------------------
+
+/// TCP SYN/connect gets this long (well under OS defaults, so the app —
+/// not the platform — reports the failure first).
+const TCP_CONNECT_SECS: u64 = 10;
+/// SSH KEX + host-key verification must complete within this long.
+const HANDSHAKE_SECS: u64 = 20;
+/// Per-attempt bounds for the credential-free host-key probe path.
+const PROBE_TCP_SECS: u64 = 10;
+const PROBE_HANDSHAKE_SECS: u64 = 15;
+/// Authentication may involve slow PAM stacks; still strictly bounded.
+const AUTH_SECS: u64 = 30;
+/// Post-auth channel/PTY/shell establishment (normally milliseconds).
+const CHANNEL_SECS: u64 = 15;
+/// Spacing between handshake STARTS (sshd throttles rapid unauthenticated
+/// KEX). Held only for this delay — never across network I/O.
+const HANDSHAKE_PACING: Duration = Duration::from_millis(300);
+
+/// Run `fut` with an explicit deadline. Inner errors keep their existing
+/// context; only a true stall produces the timeout error.
+async fn bounded<F, T, E>(secs: u64, what: &str, fut: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    match tokio::time::timeout(Duration::from_secs(secs), fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => {
+            let err: anyhow::Error = e.into();
+            Err(err.context(format!("{what} failed")))
+        }
+        Err(_) => Err(anyhow!("{what} timed out after {secs}s")),
+    }
+}
 
 /// Decode the presented server key into (key_type, openssh_line, fingerprint).
 /// `openssh_line` is the trust identity; the fingerprint is its SHA-256.
@@ -179,11 +225,16 @@ impl client::Handler for CaptureClient {
 
 static HANDSHAKE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn handshake_permit() -> tokio::sync::MutexGuard<'static, ()> {
-    let g = HANDSHAKE_SERIAL.lock().await;
-    // Pace handshakes: the system sshd throttles rapid unauthenticated KEX.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    g
+/// Pace the START of SSH handshakes: the system sshd throttles rapid
+/// unauthenticated KEX, so beginnings stay serialized at least
+/// `HANDSHAKE_PACING` apart. The mutex is held ONLY for this short delay —
+/// never across network I/O — so a stalled peer can neither wedge later
+/// attempts behind the mutex nor serialize bounded handshakes longer than
+/// necessary. (Handshake starts remain ordered; each handshake itself is
+/// bounded by the phase timeouts above.)
+async fn pace_handshake() {
+    let _guard = HANDSHAKE_SERIAL.lock().await;
+    tokio::time::sleep(HANDSHAKE_PACING).await;
 }
 
 /// Fetch the server's presented host-key identity WITHOUT authenticating.
@@ -194,18 +245,24 @@ pub async fn probe_host_key(host: &str, port: u16) -> anyhow::Result<(String, St
 }
 
 async fn probe_host_key_once(host: &str, port: u16) -> anyhow::Result<(String, String, String)> {
-    let _permit = handshake_permit().await;
+    pace_handshake().await;
     let addr = format!("{host}:{port}");
-    let tcp = tokio::net::TcpStream::connect(&addr)
-        .await
-        .with_context(|| format!("dial {addr}"))?;
+    // Each phase bounded: a silent peer stalls neither this attempt nor
+    // (via the pacing mutex, which is already released) any other attempt.
+    let tcp = bounded(PROBE_TCP_SECS, &format!("TCP probe of {addr}"), tokio::net::TcpStream::connect(&addr)).await?;
     tcp.set_nodelay(true).ok();
     let config = Arc::new(client::Config::default());
     let captured: Arc<std::sync::Mutex<Option<(String, String, String)>>> =
         Arc::new(std::sync::Mutex::new(None));
     let client = CaptureClient { captured: captured.clone() };
     // Handshake is EXPECTED to fail (we return false); the capture is the product.
-    let _ = client::connect(config, &addr, client).await;
+    // Bounded so a banner-stalled peer cannot hang the probe (or the trust flow).
+    let _ = bounded(
+        PROBE_HANDSHAKE_SECS,
+        &format!("SSH probe of {addr}"),
+        client::connect_stream(config, tcp, client),
+    )
+    .await;
     captured
         .lock()
         .unwrap()
@@ -294,9 +351,26 @@ async fn run_session_inner(
         verified: verified.clone(),
         prompt: prompt_cell.clone(),
     };
-    let _permit = handshake_permit().await;
-    let connect_result = client::connect(config, &addr, verifier).await;
-    drop(_permit);
+    // Pace handshake starts, then run every phase under an explicit
+    // deadline: a silent peer surfaces a typed transport failure instead of
+    // hanging the worker (and holds no mutex while doing so). Fast failures
+    // keep their exact existing shape via the match arms below.
+    pace_handshake().await;
+    let connect_result = async {
+        let tcp = bounded(
+            TCP_CONNECT_SECS,
+            &format!("TCP connect to {addr}"),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await?;
+        bounded(
+            HANDSHAKE_SECS,
+            &format!("SSH handshake with {addr}"),
+            client::connect_stream(config, tcp, verifier),
+        )
+        .await
+    }
+    .await;
     let prompt = prompt_cell.lock().unwrap().clone();
     let verified_id = verified.lock().unwrap().clone();
     match (connect_result, verified_id, prompt) {
@@ -371,6 +445,10 @@ async fn run_authenticated<H: client::Handler>(
     shutdown_rx: &mut tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     // ---- auth: private key first if provided, else password ----
+    // Every network round-trip below is bounded: a peer that stalls
+    // mid-auth surfaces a typed failure instead of hanging the worker.
+    // Existing error contexts are preserved so failure classification is
+    // unchanged; only true stalls produce the new timeout errors.
     let mut authed = false;
     if let Some(pem) = private_key_pem {
         let pem = pem.trim().to_string();
@@ -379,33 +457,44 @@ async fn run_authenticated<H: client::Handler>(
                 .map_err(|e| anyhow!("decode private key: {e}"))?;
             let alg = PrivateKeyWithHashAlg::new(
                 Arc::new(key),
-                handle.best_supported_rsa_hash().await?.flatten(),
+                bounded(AUTH_SECS, "RSA hash negotiation", handle.best_supported_rsa_hash())
+                    .await?
+                    .flatten(),
             );
-            let res = handle
-                .authenticate_publickey(&cfg.username, alg)
-                .await
-                .with_context(|| "publickey auth")?;
+            let res = bounded(
+                AUTH_SECS,
+                "publickey auth",
+                handle.authenticate_publickey(&cfg.username, alg),
+            )
+            .await
+            .with_context(|| "publickey auth")?;
             authed = res.success();
         }
     }
     if !authed
         && let Some(pw) = password
     {
-        let res = handle
-            .authenticate_password(&cfg.username, &pw)
-            .await
-            .with_context(|| "password auth")?;
+        let res = bounded(
+            AUTH_SECS,
+            "password auth",
+            handle.authenticate_password(&cfg.username, &pw),
+        )
+        .await
+        .with_context(|| "password auth")?;
         authed = res.success();
     }
     if !authed {
         return Err(anyhow!("authentication failed (auth fail)"));
     }
 
-    let mut channel = handle.channel_open_session().await?;
-    channel
-        .request_pty(false, "xterm-256color", cfg.cols, cfg.rows, 0, 0, &[])
-        .await?;
-    channel.request_shell(false).await?;
+    let mut channel = bounded(CHANNEL_SECS, "SSH channel open", handle.channel_open_session()).await?;
+    bounded(
+        CHANNEL_SECS,
+        "PTY request",
+        channel.request_pty(false, "xterm-256color", cfg.cols, cfg.rows, 0, 0, &[]),
+    )
+    .await?;
+    bounded(CHANNEL_SECS, "shell request", channel.request_shell(false)).await?;
 
     // Invisible tmux infrastructure: attach-or-create, same name => persistence.
     let plan = TmuxPlan::new(&cfg.tmux_session);
@@ -476,6 +565,44 @@ mod tests {
             fp,
             "SHA256:WhtE49oN6vdnXy0pvOKD+s+ep9UTO3280LQmWk5NcJk"
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_passes_fast_values_through() {
+        let v = bounded(5, "noop", async { Ok::<_, std::io::Error>(42u32) }).await.unwrap();
+        assert_eq!(v, 42);
+    }
+
+    #[tokio::test]
+    async fn bounded_keeps_inner_error_context() {
+        // Inner failures keep their message (plus phase context) — no
+        // reclassification into timeouts.
+        let e = bounded(5, "dial x", async {
+            Err::<u32, _>(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"))
+        })
+        .await
+        .expect_err("refused must propagate");
+        let s = format!("{e:#}");
+        assert!(s.contains("refused"), "unexpected: {s}");
+        assert!(s.contains("dial x failed"), "unexpected: {s}");
+        assert!(!s.contains("timed out"), "must not look like a timeout: {s}");
+    }
+
+    #[tokio::test]
+    async fn bounded_stall_returns_typed_timeout() {
+        // A never-resolving phase surfaces a timeout error quickly (1s test
+        // bound, not the production constant) instead of hanging forever.
+        let e = bounded(1, "SSH handshake with stall", async {
+            std::future::pending::<Result<u32, std::io::Error>>().await
+        })
+        .await
+        .expect_err("stall must time out");
+        let s = format!("{e:#}");
+        assert!(s.contains("timed out after 1s"), "unexpected: {s}");
+        // And the existing taxonomy files it as `unreachable` with no new
+        // error kinds introduced.
+        let typed = StillError::from_transport(&e);
+        assert_eq!(typed.code, "unreachable", "unexpected: {typed:?}");
     }
 
     fn iso(tag: &str) -> std::path::PathBuf {
