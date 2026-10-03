@@ -56,7 +56,6 @@ jobs:
           rustup target list --installed
           $tauriLine = Select-String -Path src-tauri/Cargo.lock -Pattern '^name = "tauri"$' -Context 0,1 | Select-Object -First 1
           Write-Host "tauri_crate_lock=$($tauriLine.Context.PostContext)"
-          node -p "console.log('tauri_cli_npm=' + require('./node_modules/@tauri-apps/cli/package.json').version)"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -72,6 +71,11 @@ jobs:
 
       - name: Install npm dependencies (locked)
         run: npm ci
+
+      - name: Toolchain versions (post-install)
+        run: |
+          node -p "console.log('tauri_cli_npm=' + require('./node_modules/@tauri-apps/cli/package.json').version)"
+          npx tauri --version
 
       - name: Frontend typecheck
         run: npm run typecheck
