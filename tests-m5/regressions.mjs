@@ -68,5 +68,14 @@ ok("probe client is capture-only (never authenticates)",
 ok("connect path has no unverified bypass",
   !/client::connect\([^)]*StillClient/.test(worker));
 
+// UX BUGFIX: client-side errors must never leak into the PTY transcript.
+// The terminal shows ONLY bytes from the remote SSH/tmux channel; host-key
+// prompts and transport errors belong to Still's UI (state + dialog).
+ok("error events are NOT injected into the terminal transcript",
+  !conns.includes("TextEncoder") &&
+  conns.includes("never to the remote PTY"));
+ok("generic error panel is suppressed while a host-key prompt is active",
+  overlay.includes("!hostPrompt && (state === \"disconnected\" || state === \"error\")"));
+
 console.log(`\n==== ${pass}/${pass + fail} M5 regression checks passed ====`);
 process.exit(fail ? 1 : 0);

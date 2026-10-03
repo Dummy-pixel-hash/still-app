@@ -302,7 +302,7 @@ export default function TerminalOverlay({
                 </div>
               </div>
             )}
-            {(state === "disconnected" || state === "error") && (
+            {!hostPrompt && (state === "disconnected" || state === "error") && (
               <div className="flex shrink-0 flex-col gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-3">
                 <p className="font-mono text-[11px] text-dim">
                   {state === "error"

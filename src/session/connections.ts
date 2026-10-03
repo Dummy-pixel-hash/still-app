@@ -150,15 +150,15 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
         // fingerprint for explicit Trust/Reject; never auto-accept.
         setEntry(localId, { hostKeyPrompt: event.prompt })
       } else if (event.type === "error") {
+        // Client-side errors belong to Still's UI, never to the remote PTY
+        // transcript: the terminal shows ONLY bytes received from the
+        // remote SSH/tmux channel. Host-key prompts, auth failures, and
+        // transport errors surface via connection state + the host-key
+        // dialog, so they must NOT be injected into sessionDataListeners.
         setEntry(localId, {
           state: "error",
           lastError: `[${event.error.code}] ${event.error.message}`,
         })
-        sessionDataListeners
-          .get(localId)
-          ?.forEach((fn) =>
-            fn(Array.from(new TextEncoder().encode(`\r\n[${event.error.code}] ${event.error.message}\r\n`))),
-          )
       }
     },
   )
