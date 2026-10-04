@@ -21,16 +21,24 @@ pub struct PingResponse {
 
 #[tauri::command]
 fn still_ping(state: tauri::State<'_, AppState>) -> PingResponse {
+    // DIAG-ONLY: IPC health-check boundaries (answers "can the packaged
+    // WebView invoke ANY Tauri command?"). No behavior change, no gating.
+    let t0 = std::time::Instant::now();
+    crate::diag::record("rust", "STILL_PING_ENTERED", "", "", true, "", "", None);
     let ping_no = state.record_ping();
-    PingResponse {
+    let res = PingResponse {
         status: format!("ok (native runtime, ping #{ping_no})"),
         app: "still-app".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-    }
+    };
+    crate::diag::ok_elapsed("rust", "STILL_PING_RETURNED", "", "", t0.elapsed().as_millis());
+    res
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // DIAG-ONLY: first native record — proves the diagnostic build runs.
+    crate::diag::app_start();
     tauri::Builder::default()
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![

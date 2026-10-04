@@ -9,10 +9,16 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Max chars kept per free-form field (code/message). Prevents runaway lines.
 const FIELD_CAP: usize = 300;
+
+/// Process-wide append mutex: keeps concurrent worker/forward tasks from
+/// interleaving bytes mid-line. Short critical section; poison-tolerant
+/// (diagnostics must never panic or break the product path).
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Resolve the deterministic per-user diagnostic log path.
 ///
@@ -79,6 +85,11 @@ fn esc(s: &str) -> String {
 
 /// Core append: one JSON object per line. Synchronous, fire-and-forget.
 /// Safe to call from async code (short blocking section, errors swallowed).
+/// - creates parent dirs automatically
+/// - opens/creates the file automatically
+/// - flushes promptly so a killed/hung app still leaves evidence
+/// - never panics, never affects connection behavior
+/// - process-wide mutex keeps concurrent writes line-atomic
 pub fn record(
     layer: &str,
     stage: &str,
@@ -109,7 +120,14 @@ pub fn record(
     );
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path)
     {
+        // Mutex keeps lines atomic across concurrent workers; a poisoned
+        // mutex still proceeds (diagnostics never panic).
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = f.write_all(line.as_bytes());
+        // Prompt flush: evidence must survive a hung/crashed process.
+        let _ = f.flush();
+        // Belt-and-braces on Windows: also push bytes to disk.
+        let _ = f.sync_all();
     }
 }
 
@@ -184,4 +202,30 @@ pub fn classify(err: &anyhow::Error) -> (String, String) {
         "error"
     };
     (code.to_string(), cap(first))
+}
+
+/// DIAG-ONLY definitive startup marker.
+///
+/// Proves the artifact actually contains the diagnostic build: written once
+/// at native startup (before any window/IPC), carrying platform + build
+/// identity. `commit` prefers the `STILL_BUILD_COMMIT` env baked at CI
+/// time, else falls back to `"unknown"` (never empty, never a secret).
+/// This is also where the resolved log path is recorded first.
+pub fn app_start() {
+    let commit = option_env!("STILL_BUILD_COMMIT").unwrap_or("unknown");
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let msg = format!(
+        "os={} arch={} profile={} version={} commit={} path={}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        profile,
+        env!("CARGO_PKG_VERSION"),
+        commit,
+        log_path().display(),
+    );
+    record("rust", "APP_START", "", "", true, "", &msg, None);
 }

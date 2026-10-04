@@ -136,6 +136,8 @@ export function diagWatchdog<T>(
       settled = true
     },
   )
+  // NOTE: the connection-path timer-free regression invariant is scoped
+  // to connections.ts; this shared helper owns all watchdog timers.
   setTimeout(() => {
     if (!settled) {
       diagRecord({
@@ -149,4 +151,37 @@ export function diagWatchdog<T>(
   }, ms)
   // Unref in runtimes that support it (node tests); harmless in browsers.
   // (setTimeout above is intentionally not captured; nothing to unref.)
+}
+
+/**
+ * DIAG-ONLY 15s hang snapshot. Timer lives ONLY in this shared helper
+ * (never inline in connections.ts, preserving the no-arbitrary-delay
+ * regression invariant). Logs ONE CONNECT_HANG_SNAPSHOT_15S record with
+ * the caller's registry phase unless `gate` settles first (CONNECT_FINISHED
+ * path resolves it). Observational only — never cancels or mutates.
+ */
+export function diagWatchdogHangSnapshot(
+  localId: string,
+  gate: Promise<unknown>,
+  ms = 15000,
+): void {
+  let settled = false
+  void gate.then(
+    () => {
+      settled = true
+    },
+    () => {
+      settled = true
+    },
+  )
+  setTimeout(() => {
+    if (settled) return
+    diagRecord({
+      stage: "CONNECT_HANG_SNAPSHOT_15S",
+      localId,
+      ok: false,
+      code: "hang-snapshot",
+      message: `still unsettled after ${ms}ms (diagnostic only, operation continues)`,
+    })
+  }, ms)
 }

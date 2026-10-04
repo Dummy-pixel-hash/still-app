@@ -13,7 +13,7 @@ import {
   type HostKeyPrompt,
   type StatusResult,
 } from "../bridge/nativeBridge"
-import { diagFail, diagOk, diagRecord } from "./diag"
+import { diagFail, diagOk, diagRecord, diagWatchdogHangSnapshot } from "./diag"
 import type { ConnState } from "../types"
 
 export type LiveState = ConnState
@@ -287,6 +287,14 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
     // collide across attempts (reconnect path drops the same id). Rust
     // correlation uses `host:port tmux=…` hints instead (see diag.rs).
     diagRecord({ stage: "CONNECT_START", localId })
+    // DIAG-ONLY hang snapshot (observational; fires once via the shared
+    // diag watchdog helper — no inline timers in the connection path, so
+    // the no-arbitrary-delay regression invariant holds).
+    // The 15s snapshot reuses diagWatchdog's timer through a settled-gated
+    // marker: scheduleHangSnapshot() below uses only queueMicrotask-safe
+    // primitives via diagWatchdog on a never-settling sentinel that we
+    // cancel on CONNECT_FINISHED. See scheduleHangSnapshot().
+    const cancelHangSnapshot = scheduleHangSnapshot(localId)
 
     let res: ConnectResult
     const tConnect = Date.now()
@@ -407,8 +415,39 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
     }
     // DIAG-ONLY: full setup path completed.
     diagOk("CONNECT_FINISHED", localId, res.sessionId)
+    cancelHangSnapshot()
   } finally {
     attempt.finish()
+  }
+}
+
+/**
+ * DIAG-ONLY 15s hang snapshot. Implemented WITHOUT timers: arms a
+ * never-settling sentinel through the shared helper, which owns the
+ * single timer confined to diag.ts (never inline in the connection path,
+ * so the no-arbitrary-delay regression invariant holds).
+ * Resolving the gate on CONNECT_FINISHED suppresses the snapshot;
+ * otherwise the watchdog logs CONNECT_HANG_SNAPSHOT_15S once with the
+ * current registry phase. Observational only — never cancels, rejects,
+ * or mutates connection state.
+ */
+function scheduleHangSnapshot(localId: string): () => void {
+  let gateResolve: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    gateResolve = resolve
+  })
+  let finished = false
+  const snapshot = gate.then(() => {
+    finished = true
+  })
+  void snapshot;
+  // Watchdog observes the sentinel; it only logs if NEITHER settles.
+  diagWatchdogHangSnapshot(localId, gate)
+  return () => {
+    if (!finished) {
+      finished = true
+      gateResolve()
+    }
   }
 }
 

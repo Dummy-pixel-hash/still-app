@@ -22,9 +22,33 @@ export const tauriBridge: NativeBridge = {
   isDevelopmentAdapter: false,
 
   async ping() {
-    return invoke<{ status: string; app: string; version: string }>(
+    // DIAG-ONLY: startup IPC health check ("can the packaged WebView
+    // invoke ANY Tauri command?"). Never gates connecting.
+    const t0 = Date.now()
+    diagRecord({ stage: "PING_START", localId: "" })
+    const p = invoke<{ status: string; app: string; version: string }>(
       "still_ping",
     )
+    diagWatchdog("PING", "", p)
+    try {
+      const res = await p
+      diagRecord({
+        stage: "PING_RESOLVED",
+        localId: "",
+        elapsedMs: Date.now() - t0,
+      })
+      return res
+    } catch (e) {
+      diagRecord({
+        stage: "PING_REJECTED",
+        localId: "",
+        ok: false,
+        code: "rejected",
+        message: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+        elapsedMs: Date.now() - t0,
+      })
+      throw e
+    }
   },
 
   async connect(args: ConnectArgs): Promise<ConnectResult> {
