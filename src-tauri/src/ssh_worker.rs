@@ -21,6 +21,7 @@
 //! Reconnect = fresh TCP+channel, same tmux -A session name (re-verified).
 
 use crate::core::{HostKeyPrompt, SessionEvent, SessionStatus, SshConfig, StillError, TmuxPlan};
+use crate::diag;
 use crate::hostkeys;
 use anyhow::{anyhow, Context};
 use russh::client::{self};
@@ -298,6 +299,10 @@ pub async fn run_session(
     mut resize_rx: mpsc::UnboundedReceiver<(u32, u32)>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    // DIAG-ONLY: worker lifecycle boundaries. No behavior change.
+    // No secrets: host/port are connection identity, never credentials.
+    let native_hint = format!("{}:{} tmux={}", cfg.host, cfg.port, cfg.tmux_session);
+    diag::record("rust", "WORKER_ENTERED", "", &native_hint, true, "", "", None);
     let result = run_session_inner(
         &cfg,
         password,
@@ -310,11 +315,14 @@ pub async fn run_session(
     .await;
     match result {
         Ok(()) => {
+            diag::record("rust", "WORKER_EXITED_OK", "", &native_hint, true, "", "", None);
             let _ = event_tx.send(SessionEvent::Status {
                 status: SessionStatus::Closed,
             });
         }
         Err(e) => {
+            let (code, msg) = diag::classify(&e);
+            diag::record("rust", "WORKER_EXITED_ERR", "", &native_hint, false, &code, &msg, None);
             let _ = event_tx.send(SessionEvent::Error {
                 error: StillError::from_transport(&e),
             });
@@ -356,6 +364,8 @@ async fn run_session_inner(
     // hanging the worker (and holds no mutex while doing so). Fast failures
     // keep their exact existing shape via the match arms below.
     pace_handshake().await;
+    diag::record("rust", "TCP_CONNECT_START", "", &addr, true, "", "", None);
+    let t_tcp = std::time::Instant::now();
     let connect_result = async {
         let tcp = bounded(
             TCP_CONNECT_SECS,
@@ -363,12 +373,23 @@ async fn run_session_inner(
             tokio::net::TcpStream::connect(&addr),
         )
         .await?;
-        bounded(
+        diag::ok_elapsed("rust", "TCP_CONNECTED", "", &addr, t_tcp.elapsed().as_millis());
+        diag::record("rust", "HANDSHAKE_START", "", &addr, true, "", "", None);
+        let t_hs = std::time::Instant::now();
+        let hs = bounded(
             HANDSHAKE_SECS,
             &format!("SSH handshake with {addr}"),
             client::connect_stream(config, tcp, verifier),
         )
-        .await
+        .await;
+        match &hs {
+            Ok(_) => diag::ok_elapsed("rust", "HANDSHAKE_COMPLETED", "", &addr, t_hs.elapsed().as_millis()),
+            Err(e) => {
+                let (code, msg) = diag::classify(e);
+                diag::record("rust", "HANDSHAKE_FAILED", "", &addr, false, &code, &msg, Some(t_hs.elapsed().as_millis()));
+            }
+        }
+        hs
     }
     .await;
     let prompt = prompt_cell.lock().unwrap().clone();
@@ -449,6 +470,10 @@ async fn run_authenticated<H: client::Handler>(
     // mid-auth surfaces a typed failure instead of hanging the worker.
     // Existing error contexts are preserved so failure classification is
     // unchanged; only true stalls produce the new timeout errors.
+    // DIAG-ONLY: auth/channel/Live checkpoints (no secrets, no behavior change).
+    let addr = format!("{}:{}", cfg.host, cfg.port);
+    diag::record("rust", "AUTH_START", "", &addr, true, "", "", None);
+    let t_auth = std::time::Instant::now();
     let mut authed = false;
     if let Some(pem) = private_key_pem {
         let pem = pem.trim().to_string();
@@ -484,10 +509,15 @@ async fn run_authenticated<H: client::Handler>(
         authed = res.success();
     }
     if !authed {
+        diag::fail("rust", "AUTH_FAILED", "", &addr, "auth", "authentication failed");
         return Err(anyhow!("authentication failed (auth fail)"));
     }
+    diag::ok_elapsed("rust", "AUTH_COMPLETED", "", &addr, t_auth.elapsed().as_millis());
 
+    diag::record("rust", "CHANNEL_OPEN_START", "", &addr, true, "", "", None);
+    let t_ch = std::time::Instant::now();
     let mut channel = bounded(CHANNEL_SECS, "SSH channel open", handle.channel_open_session()).await?;
+    diag::ok_elapsed("rust", "CHANNEL_OPENED", "", &addr, t_ch.elapsed().as_millis());
     bounded(
         CHANNEL_SECS,
         "PTY request",
@@ -503,6 +533,8 @@ async fn run_authenticated<H: client::Handler>(
     let _ = event_tx.send(SessionEvent::Status {
         status: SessionStatus::Live,
     });
+    // DIAG-ONLY: first Live emission marker (no behavior change).
+    diag::ok("rust", "LIVE_EMITTED", "", &addr);
 
     // ---- pump loop ----
     loop {

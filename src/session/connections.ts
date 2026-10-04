@@ -13,6 +13,7 @@ import {
   type HostKeyPrompt,
   type StatusResult,
 } from "../bridge/nativeBridge"
+import { diagFail, diagOk, diagRecord } from "./diag"
 import type { ConnState } from "../types"
 
 export type LiveState = ConnState
@@ -280,11 +281,19 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
   const attempt = beginAttempt(localId)
   try {
     setEntry(localId, { state: "connecting", lastError: null, nativeId: null })
+    // DIAG-ONLY: first connection boundary (no semantics change).
+    // NOTE: clientId is deliberately NOT forwarded: Rust treats client_id
+    // as the native session id, and reusing the stable local id would
+    // collide across attempts (reconnect path drops the same id). Rust
+    // correlation uses `host:port tmux=…` hints instead (see diag.rs).
+    diagRecord({ stage: "CONNECT_START", localId })
 
     let res: ConnectResult
+    const tConnect = Date.now()
     try {
       res = await nativeBridge.connect({ ...args })
     } catch (e) {
+      diagFail("CONNECT_REJECTED", localId, e, undefined, Date.now() - tConnect)
       if (!attempt.isCurrent()) return
       // No native session exists: record the typed error and stop. Errors
       // stay connection/UI state — never injected into xterm.
@@ -300,9 +309,15 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
       return
     }
     setEntry(localId, { nativeId: res.sessionId, hostKeyPrompt: null })
+    // DIAG-ONLY: native connect resolved (invoke boundary OK).
+    // (Unsettled-connect watchdog lives inside tauriBridge.connect so the
+    // exact `res = await nativeBridge.connect(...)` contract is untouched.)
+    diagOk("CONNECT_RESOLVED", localId, res.sessionId, Date.now() - tConnect)
 
     const epoch = attempt.epoch
     let unlisten: (() => void) | null = null
+    diagRecord({ stage: "SUBSCRIBE_START", localId, nativeId: res.sessionId })
+    const tSub = Date.now()
     try {
       unlisten = await nativeBridge.subscribeToSession(
         res.sessionId,
@@ -332,6 +347,7 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
         },
       )
     } catch (e) {
+      diagFail("SUBSCRIBE_REJECTED", localId, e, res.sessionId, Date.now() - tSub)
       if (!attempt.isCurrent()) {
         await reapOrphan(res.sessionId)
         return
@@ -366,6 +382,8 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
       }
     }
     unsubscribers.set(localId, unlisten)
+    // DIAG-ONLY: listen resolved (Tauri event IPC OK).
+    diagOk("SUBSCRIBE_RESOLVED", localId, res.sessionId, Date.now() - tSub)
 
     // Reconciliation: the worker may have emitted terminal events
     // (HostKeyPrompt/Error/Status) in the gap between native connection
@@ -375,13 +393,20 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
     // after connect returns. The Rust side mirrors authoritative worker
     // state regardless of listeners, so read it back explicitly instead of
     // relying on timing. No sleeps, no host-key bypass: this only observes.
+    // DIAG-ONLY: status reconciliation boundaries (no semantics change).
+    diagRecord({ stage: "STATUS_START", localId, nativeId: res.sessionId })
+    const tStatus = Date.now()
     try {
       const snap = await nativeBridge.status(res.sessionId)
       if (!attempt.isCurrent()) return
+      diagOk("STATUS_RESOLVED", localId, res.sessionId, Date.now() - tStatus)
       adoptAuthoritativeStatus(localId, snap.status as string, snap.lastError)
-    } catch {
+    } catch (e) {
       // Best-effort only (e.g. dev adapter): the live stream stays primary.
+      diagFail("STATUS_REJECTED", localId, e, res.sessionId, Date.now() - tStatus)
     }
+    // DIAG-ONLY: full setup path completed.
+    diagOk("CONNECT_FINISHED", localId, res.sessionId)
   } finally {
     attempt.finish()
   }

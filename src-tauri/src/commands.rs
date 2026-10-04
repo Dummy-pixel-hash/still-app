@@ -19,6 +19,7 @@
 use crate::core::{
     LiveSession, SessionEvent, SessionStatus, SshConnectArgs, StillError,
 };
+use crate::diag;
 use crate::hostkeys;
 use crate::ssh_worker;
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,44 @@ pub async fn still_connect(
     app: AppHandle,
     state: State<'_, AppState>,
     args: SshConnectArgs,
+) -> Result<ConnectResult, StillError> {
+    // DIAG-ONLY: native command entry. `client_id` doubles as the local
+    // session id for correlation (no secrets logged — ids + stages only).
+    let diag_local = args
+        .client_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default();
+    let t0 = std::time::Instant::now();
+    diag::record("rust", "STILL_CONNECT_ENTERED", &diag_local, "", true, "", "", None);
+    let res = still_connect_inner(app, state, args, diag_local.clone()).await;
+    match &res {
+        Ok(ok) => diag::ok_elapsed(
+            "rust",
+            "STILL_CONNECT_EXITED_OK",
+            &diag_local,
+            &ok.session_id,
+            t0.elapsed().as_millis(),
+        ),
+        Err(e) => diag::record(
+            "rust",
+            "STILL_CONNECT_EXITED_ERR",
+            &diag_local,
+            "",
+            false,
+            &e.code,
+            &e.message,
+            Some(t0.elapsed().as_millis()),
+        ),
+    }
+    res
+}
+
+async fn still_connect_inner(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: SshConnectArgs,
+    diag_local: String,
 ) -> Result<ConnectResult, StillError> {
     let cfg = args.validate()?;
     // M5: host-key verification happens inside the worker handshake, BEFORE
@@ -213,6 +252,8 @@ pub async fn still_connect(
         abort_handle: tauri::async_runtime::spawn(async {}),
     }));
     // Replace placeholder with the real worker task.
+    // DIAG-ONLY: log spawn + trace forwarded session events (type only).
+    diag::ok("rust", "WORKER_SPAWNED", &diag_local, &session_id);
     {
         let mut live_guard = live.lock().await;
         live_guard.abort_handle.abort(); // kill no-op placeholder
@@ -220,6 +261,7 @@ pub async fn still_connect(
         let live_clone = live.clone();
         let app_e = app.clone();
         let sid_e = session_id.clone();
+        let diag_local_e = diag_local.clone();
         let handle = tauri::async_runtime::spawn(async move {
             // Forward worker events -> window events + mirror status.
             let forward = async move {
@@ -227,15 +269,56 @@ pub async fn still_connect(
                     match &event {
                         SessionEvent::Status { status } => {
                             live_clone.lock().await.status = *status;
+                            diag::record(
+                                "rust",
+                                "EVENT_EMITTED_STATUS",
+                                &diag_local_e,
+                                &sid_e,
+                                true,
+                                "",
+                                &format!("{status:?}"),
+                                None,
+                            );
                         }
                         SessionEvent::Error { error } => {
-                            live_clone.lock().await.last_error = Some(error.clone());
+                            live_clone.lock().await.last_error =
+                                Some(error.clone());
+                            diag::record(
+                                "rust",
+                                "EVENT_EMITTED_ERROR",
+                                &diag_local_e,
+                                &sid_e,
+                                false,
+                                &error.code,
+                                &error.message,
+                                None,
+                            );
                         }
-                        _ => {}
+                        SessionEvent::Data { data } => {
+                            diag::record(
+                                "rust",
+                                "EVENT_EMITTED_DATA",
+                                &diag_local_e,
+                                &sid_e,
+                                true,
+                                "",
+                                &format!("{} bytes", data.len()),
+                                None,
+                            );
+                        }
+                        SessionEvent::HostKeyPrompt { .. } => {
+                            diag::ok(
+                                "rust",
+                                "EVENT_EMITTED_HOSTKEY_PROMPT",
+                                &diag_local_e,
+                                &sid_e,
+                            );
+                        }
                     }
                     let topic = format!("still://session-event/{sid_e}");
                     let _ = app_e.emit(&topic, &event);
                 }
+                diag::ok("rust", "FORWARD_LOOP_ENDED", &diag_local_e, &sid_e);
             };
             let run = ssh_worker::run_session(
                 cfg,
@@ -305,15 +388,31 @@ pub async fn still_status(
     state: State<'_, AppState>,
     args: IdArgs,
 ) -> Result<StatusResult, StillError> {
+    // DIAG-ONLY: native command entry/exit + elapsed. No behavior change.
+    let t0 = std::time::Instant::now();
+    let sid = args.session_id.clone();
+    diag::record("rust", "STILL_STATUS_ENTERED", "", &sid, true, "", "", None);
     let map = state.sessions.lock().await;
     let live = map.get(&args.session_id).ok_or_else(|| {
+        diag::fail("rust", "STILL_STATUS_EXITED_ERR", "", &sid, "no_session", "Unknown session.");
         StillError::friendly("no_session", "Unknown session.")
     })?;
     let live = live.lock().await;
-    Ok(StatusResult {
+    let out = StatusResult {
         status: live.status,
         last_error: live.last_error.clone(),
-    })
+    };
+    diag::record(
+        "rust",
+        "STILL_STATUS_EXITED_OK",
+        "",
+        &sid,
+        true,
+        "",
+        &format!("{:?}", out.status),
+        Some(t0.elapsed().as_millis()),
+    );
+    Ok(out)
 }
 
 #[tauri::command]
@@ -321,14 +420,61 @@ pub async fn still_disconnect(
     state: State<'_, AppState>,
     args: IdArgs,
 ) -> Result<(), StillError> {
+    // DIAG-ONLY: native command entry/exit. No behavior change.
+    let t0 = std::time::Instant::now();
+    let sid = args.session_id.clone();
+    diag::record("rust", "STILL_DISCONNECT_ENTERED", "", &sid, true, "", "", None);
     let mut map = state.sessions.lock().await;
     if let Some(live) = map.remove(&args.session_id) {
         live.lock().await.abort_handle.abort();
         // tmux keeps running server-side: we only dropped OUR channel.
+        diag::ok_elapsed("rust", "STILL_DISCONNECT_EXITED_OK", "", &sid, t0.elapsed().as_millis());
         Ok(())
     } else {
+        diag::fail("rust", "STILL_DISCONNECT_EXITED_ERR", "", &sid, "no_session", "Unknown session.");
         Err(StillError::friendly("no_session", "Unknown session."))
     }
+}
+
+/// DIAG-ONLY: fire-and-forget frontend checkpoint sink.
+/// Writes one JSONL record to the same append-only diagnostic log so the
+/// packaged Windows WebView can report reached stages without a console.
+/// Never fails (returns unit); args are ids/stages only — never secrets.
+#[tauri::command]
+pub async fn still_diag_record(args: DiagRecordArgs) -> () {
+    diag::record(
+        "webview",
+        &args.stage,
+        &args.local_id,
+        &args.native_id,
+        args.ok,
+        &args.code,
+        &args.message,
+        args.elapsed_ms,
+    );
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagRecordArgs {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub local_id: String,
+    #[serde(default)]
+    pub native_id: String,
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub elapsed_ms: Option<u128>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow } from "@tauri-apps/api/window"
+import { diagRecord, diagWatchdog } from "../session/diag"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -27,7 +28,32 @@ export const tauriBridge: NativeBridge = {
   },
 
   async connect(args: ConnectArgs): Promise<ConnectResult> {
-    return invoke<ConnectResult>("still_connect", { args })
+    // DIAG-ONLY: trace invoke entry/exit + watchdog for unsettled invoke.
+    // Semantics unchanged: single invoke, same return/throw.
+    const t0 = Date.now()
+    diagRecord({ stage: "INVOKE_CONNECT_START", localId: "" })
+    const p = invoke<ConnectResult>("still_connect", { args })
+    diagWatchdog("CONNECT", "", p)
+    try {
+      const res = await p
+      diagRecord({
+        stage: "INVOKE_CONNECT_RESOLVED",
+        localId: "",
+        nativeId: res.sessionId,
+        elapsedMs: Date.now() - t0,
+      })
+      return res
+    } catch (e) {
+      diagRecord({
+        stage: "INVOKE_CONNECT_REJECTED",
+        localId: "",
+        ok: false,
+        code: "rejected",
+        message: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+        elapsedMs: Date.now() - t0,
+      })
+      throw e
+    }
   },
 
   async write(sessionId: string, data: string | Uint8Array): Promise<void> {
@@ -47,15 +73,76 @@ export const tauriBridge: NativeBridge = {
   },
 
   async status(sessionId: string): Promise<StatusResult> {
-    return invoke<StatusResult>("still_status", { args: { sessionId } })
+    // DIAG-ONLY: trace invoke entry/exit + watchdog. Semantics unchanged.
+    const t0 = Date.now()
+    diagRecord({ stage: "INVOKE_STATUS_START", localId: "", nativeId: sessionId })
+    const p = invoke<StatusResult>("still_status", { args: { sessionId } })
+    diagWatchdog("STATUS", "", p)
+    try {
+      const res = await p
+      diagRecord({
+        stage: "INVOKE_STATUS_RESOLVED",
+        localId: "",
+        nativeId: sessionId,
+        elapsedMs: Date.now() - t0,
+      })
+      return res
+    } catch (e) {
+      diagRecord({
+        stage: "INVOKE_STATUS_REJECTED",
+        localId: "",
+        nativeId: sessionId,
+        ok: false,
+        code: "rejected",
+        message: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+        elapsedMs: Date.now() - t0,
+      })
+      throw e
+    }
   },
 
   async subscribeToSession(sessionId, callback) {
-    const unlisten = await listen<NativeSessionEvent>(
-      `still://session-event/${sessionId}`,
-      (event) => callback(event.payload),
-    )
-    return unlisten
+    // DIAG-ONLY: trace listen start/resolve + every received SessionEvent
+    // type so we can tell "Rust never emitted" from "WebView never got it".
+    const t0 = Date.now()
+    diagRecord({ stage: "SUBSCRIBE_START", localId: "", nativeId: sessionId })
+    let unlisten: () => void
+    try {
+      const p = listen<NativeSessionEvent>(
+        `still://session-event/${sessionId}`,
+        (event) => {
+          // Count + type only; data payloads (byte counts) stay Rust-side.
+          diagRecord({
+            stage: `EVENT_RECEIVED_${event.payload?.type ?? "unknown"}`,
+            localId: "",
+            nativeId: sessionId,
+          })
+          callback(event.payload)
+        },
+      )
+      diagWatchdog("SUBSCRIBE", "", p)
+      unlisten = await p
+    } catch (e) {
+      diagRecord({
+        stage: "SUBSCRIBE_REJECTED",
+        localId: "",
+        nativeId: sessionId,
+        ok: false,
+        code: "rejected",
+        message: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+      })
+      throw e
+    }
+    diagRecord({
+      stage: "SUBSCRIBE_RESOLVED",
+      localId: "",
+      nativeId: sessionId,
+      elapsedMs: Date.now() - t0,
+    })
+    return () => {
+      diagRecord({ stage: "LISTENER_CLEANUP", localId: "", nativeId: sessionId })
+      unlisten()
+    }
   },
 
   async probeHost(host: string, port: number) {

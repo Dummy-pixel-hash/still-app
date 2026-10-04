@@ -5,6 +5,7 @@
 
 mod commands;
 pub mod core;
+pub mod diag;
 pub mod hostkeys;
 pub mod ssh_worker;
 
@@ -47,6 +48,7 @@ pub fn run() {
             commands::still_probe_host,
             commands::still_trust_host,
             commands::still_forget_host,
+            commands::still_diag_record,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Still");
