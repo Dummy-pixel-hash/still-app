@@ -121,9 +121,10 @@ function setEntry(localId: string, patch: Partial<Entry>) {
 function mapNativeStatus(
   status: string,
 ): ConnState {
-  // Native wire statuses are lowercase (idle/connecting/live/closed/error);
-  // the bridge also forwards UI-style values from the mock adapter.
-  switch (status) {
+  // Native wire statuses are lowercase (idle/connecting/live/closed/error)
+  // and the mock adapter uses UI-style values — but a capitalized payload
+  // must never strand the UI in "connecting", so match case-insensitively.
+  switch (status.toLowerCase()) {
     case "connected":
     case "live":
       return "connected"

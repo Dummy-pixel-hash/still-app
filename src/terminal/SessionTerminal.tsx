@@ -193,6 +193,28 @@ export default function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Apply preference changes live: the mount effect above reads prefs once,
+  // so without this, font/cursor/scrollback edits only take effect after
+  // closing + reopening the overlay.
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) return
+    try {
+      if (terminal.options.fontSize !== prefs.fontSize) {
+        terminal.options.fontSize = prefs.fontSize
+      }
+      if (terminal.options.cursorStyle !== prefs.cursorStyle) {
+        terminal.options.cursorStyle = prefs.cursorStyle
+      }
+      if (terminal.options.scrollback !== prefs.scrollback) {
+        terminal.options.scrollback = prefs.scrollback
+      }
+      fitRef.current?.fit()
+    } catch {
+      // Option applies best-effort only; never break the live session.
+    }
+  }, [prefs.fontSize, prefs.cursorStyle, prefs.scrollback])
+
   return (
     <div
       ref={hostRef}
