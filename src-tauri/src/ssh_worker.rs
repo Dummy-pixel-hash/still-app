@@ -518,17 +518,39 @@ async fn run_authenticated<H: client::Handler>(
     let t_ch = std::time::Instant::now();
     let mut channel = bounded(CHANNEL_SECS, "SSH channel open", handle.channel_open_session()).await?;
     diag::ok_elapsed("rust", "CHANNEL_OPENED", "", &addr, t_ch.elapsed().as_millis());
+    let t_pty = std::time::Instant::now();
     bounded(
         CHANNEL_SECS,
         "PTY request",
         channel.request_pty(false, "xterm-256color", cfg.cols, cfg.rows, 0, 0, &[]),
     )
     .await?;
+    diag::ok_elapsed("rust", "PTY_ACCEPTED", "", &addr, t_pty.elapsed().as_millis());
+    let t_sh = std::time::Instant::now();
     bounded(CHANNEL_SECS, "shell request", channel.request_shell(false)).await?;
+    diag::ok_elapsed("rust", "SHELL_ACCEPTED", "", &addr, t_sh.elapsed().as_millis());
 
     // Invisible tmux infrastructure: attach-or-create, same name => persistence.
+    // DIAG-ONLY: safe command identity (no secrets — name/geometry only).
     let plan = TmuxPlan::new(&cfg.tmux_session);
-    channel.data_bytes(plan.attach_command(cfg.cols, cfg.rows)).await?;
+    let attach_cmd = plan.attach_command(cfg.cols, cfg.rows);
+    diag::record(
+        "rust",
+        "TMUX_STARTED",
+        "",
+        &addr,
+        true,
+        "",
+        &format!(
+            "name={} cols={} rows={} len={} attach_or_create=true",
+            plan.session_name,
+            cfg.cols,
+            cfg.rows,
+            attach_cmd.len(),
+        ),
+        None,
+    );
+    channel.data_bytes(attach_cmd).await?;
 
     let _ = event_tx.send(SessionEvent::Status {
         status: SessionStatus::Live,
@@ -537,11 +559,17 @@ async fn run_authenticated<H: client::Handler>(
     diag::ok("rust", "LIVE_EMITTED", "", &addr);
 
     // ---- pump loop ----
+    // `biased` is kept: shutdown must win once REALLY signaled (disconnect),
+    // but the receiver now stays pending for the whole session lifetime
+    // because LiveSession owns the sender until still_disconnect.
+    let mut stderr_bytes: u64 = 0;
+    let mut stderr_chunks: u64 = 0;
     loop {
         tokio::select! {
             biased;
             _ = &mut *shutdown_rx => {
                 // Clean disconnect: close channel, leave tmux alive server-side.
+                diag::record("rust", "CHANNEL_CLOSED", "", &addr, true, "", "reason=shutdown", None);
                 let _ = channel.eof().await;
                 let _ = channel.close().await;
                 let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
@@ -560,9 +588,47 @@ async fn run_authenticated<H: client::Handler>(
                         let _ = event_tx.send(SessionEvent::Data { data: data.to_vec() });
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        // DIAG-ONLY counts (no contents — may carry shell errors
+                        // adjacent to closure; content capture is a separate
+                        // narrowly-scoped decision).
+                        stderr_chunks += 1;
+                        stderr_bytes += data.len() as u64;
+                        diag::record(
+                            "rust",
+                            "STDERR_CHUNK",
+                            "",
+                            &addr,
+                            true,
+                            "",
+                            &format!("chunks={stderr_chunks} bytes={stderr_bytes}"),
+                            None,
+                        );
                         let _ = event_tx.send(SessionEvent::Data { data: data.to_vec() });
                     }
-                    Some(ChannelMsg::ExitStatus { .. }) | None => {
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        diag::record(
+                            "rust",
+                            "CHANNEL_CLOSED",
+                            "",
+                            &addr,
+                            true,
+                            "",
+                            &format!("reason=exit_status code={exit_status} stderr_chunks={stderr_chunks} stderr_bytes={stderr_bytes}"),
+                            None,
+                        );
+                        return Ok(());
+                    }
+                    None => {
+                        diag::record(
+                            "rust",
+                            "CHANNEL_CLOSED",
+                            "",
+                            &addr,
+                            true,
+                            "",
+                            &format!("reason=eof stderr_chunks={stderr_chunks} stderr_bytes={stderr_bytes}"),
+                            None,
+                        );
                         return Ok(());
                     }
                     _ => {}

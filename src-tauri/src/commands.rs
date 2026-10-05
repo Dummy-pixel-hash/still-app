@@ -226,10 +226,15 @@ async fn still_connect_inner(
         });
 
     // Reconnect path: drop any previous worker under the same id.
+    // Signal its owned shutdown first (same legitimate origin as
+    // still_disconnect), then abort as the backstop.
     {
         let mut map = state.sessions.lock().await;
         if let Some(old) = map.remove(&session_id) {
-            let old = old.lock().await;
+            let mut old = old.lock().await;
+            if let Some(tx) = old.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
             old.abort_handle.abort();
         }
     }
@@ -237,7 +242,7 @@ async fn still_connect_inner(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Placeholder abort handle until the worker spawns.
     let worker_holder: Arc<tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
@@ -250,6 +255,8 @@ async fn still_connect_inner(
         input_tx: input_tx.clone(),
         resize_tx: resize_tx.clone(),
         abort_handle: tauri::async_runtime::spawn(async {}),
+        // Own the sender for the session lifetime: keeps shutdown pending.
+        shutdown_tx: Some(shutdown_tx),
     }));
     // Replace placeholder with the real worker task.
     // DIAG-ONLY: log spawn + trace forwarded session events (type only).
@@ -426,7 +433,15 @@ pub async fn still_disconnect(
     diag::record("rust", "STILL_DISCONNECT_ENTERED", "", &sid, true, "", "", None);
     let mut map = state.sessions.lock().await;
     if let Some(live) = map.remove(&args.session_id) {
-        live.lock().await.abort_handle.abort();
+        // Legitimate shutdown origin: signal the worker first so the pump
+        // takes the clean shutdown branch (channel EOF + disconnect),
+        // then abort as the backstop. Sender ownership is what keeps the
+        // receiver pending for the whole session lifetime until here.
+        let mut guard = live.lock().await;
+        if let Some(tx) = guard.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        guard.abort_handle.abort();
         // tmux keeps running server-side: we only dropped OUR channel.
         diag::ok_elapsed("rust", "STILL_DISCONNECT_EXITED_OK", "", &sid, t0.elapsed().as_millis());
         Ok(())

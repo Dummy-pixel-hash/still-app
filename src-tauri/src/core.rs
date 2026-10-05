@@ -269,6 +269,11 @@ pub struct LiveSession {
     pub resize_tx: mpsc::UnboundedSender<(u32, u32)>,
     /// Worker task handle: aborting it drops TCP+channel (tmux survives).
     pub abort_handle: tauri::async_runtime::JoinHandle<()>,
+    /// Owned shutdown signal: kept alive for the session lifetime so the
+    /// worker's shutdown receiver stays PENDING until explicit disconnect.
+    /// (Previously the sender was dropped at spawn, pre-resolving shutdown
+    /// and letting the biased pump select kill healthy sessions instantly.)
+    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,6 +337,10 @@ mod tests {   use super::*;
     fn reconnect_reuses_same_attach_command() {
         let p = TmuxPlan::new("still");
         assert_eq!(p.attach_command(100, 30), p.attach_command(100, 30));
+        assert!(
+            TmuxPlan::new("claude-xxy-4").attach_command(100, 30).contains("-A"),
+            "attach-or-create (-A) is the persistence primitive"
+        );
     }
 
     #[test]
