@@ -59,6 +59,8 @@ export default function TerminalOverlay({
   const hide = useRef(0)
   const [prompt, setPrompt] = useState<AuthPrompt | null>(null)
   const [busy, setBusy] = useState(false)
+  // Footer starts collapsed: one slim status line, buttons one tap away.
+  const [footerOpen, setFooterOpen] = useState(false)
   const session = open?.session ?? null
   const localId = session?.id ?? ""
   const state = session ? connectionState(session.id) : "disconnected"
@@ -111,9 +113,44 @@ export default function TerminalOverlay({
     return () => window.clearTimeout(hide.current)
   }, [full, show])
 
+  // Ctrl+. closes the overlay (the "Workspace" pill hint). Terminal input
+  // keeps working: xterm's onData path is unaffected — this only fires when
+  // the overlay is open and full, and ignores keystrokes typed with extra
+  // modifiers or inside auth/settings inputs.
+  useEffect(() => {
+    if (!full) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
+      if (e.code !== "Period") return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return
+      e.preventDefault()
+      onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [full, onClose])
+
   const buildRequest = useCallback(
     async (s: Session): Promise<ConnectRequest | null> => {
-      const dims = { cols: 80, rows: 24 }
+      // Attach with the overlay's REAL dims on first try instead of a
+      // hardcoded 80x24-then-correct: TUIs that draw in the first window
+      // lay out for the wrong size and reflow glitchily. Falls back to
+      // 80x24 only if the terminal surface isn't laid out yet.
+      let dims = { cols: 80, rows: 24 }
+      try {
+        const host = document.getElementById(`still-term-${s.id}`)
+        if (host && host.clientWidth > 0 && host.clientHeight > 0) {
+          const cellW = 8.5
+          const cellH = 21
+          dims = {
+            cols: Math.max(20, Math.min(500, Math.floor(host.clientWidth / cellW))),
+            rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
+          }
+        }
+      } catch {
+        // Fall back to 80x24.
+      }
       const base = {
         localId: s.id,
         host: s.host,
@@ -404,36 +441,48 @@ export default function TerminalOverlay({
             )}
             {(state === "connecting" || state === "connected") && (
               <div className="flex shrink-0 items-center gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-2">
-                <span
-                  className={`h-[7px] w-[7px] rounded-full ${
-                    state === "connected"
-                      ? "bg-[#ff4a4a] shadow-[0_0_8px_1px_rgba(255,74,74,0.7)] animate-[breathe_2.4s_ease-in-out_infinite]"
-                      : "animate-pulse bg-[#e8c4a0]"
-                  }`}
-                />
-                <span className="font-mono text-[11px] text-dim">
-                  {state === "connected"
-                    ? `live · tmux ${session?.tmuxSession}`
-                    : "connecting…"}
-                </span>
-                <span className="ml-auto flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void doConnect()}
-                    className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
-                  >
-                    Reconnect
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (session) void disconnectSession(session.id)
-                    }}
-                    className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
-                  >
-                    Disconnect
-                  </button>
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setFooterOpen((v) => !v)}
+                  aria-label={footerOpen ? "Collapse status bar" : "Expand status bar"}
+                  className="flex items-center gap-2 rounded-full px-1 py-0.5 outline-none transition hover:bg-white/[0.06]"
+                >
+                  <span
+                    className={`h-[7px] w-[7px] rounded-full ${
+                      state === "connected"
+                        ? "bg-[#ff4a4a] shadow-[0_0_8px_1px_rgba(255,74,74,0.7)] animate-[breathe_2.4s_ease-in-out_infinite]"
+                        : "animate-pulse bg-[#e8c4a0]"
+                    }`}
+                  />
+                  <span className="font-mono text-[11px] text-dim">
+                    {state === "connected"
+                      ? `live · tmux ${session?.tmuxSession}`
+                      : "connecting…"}
+                  </span>
+                  <span className="font-mono text-[10px] text-faint">
+                    {footerOpen ? "▾" : "▸"}
+                  </span>
+                </button>
+                {footerOpen && (
+                  <span className="ml-auto flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void doConnect()}
+                      className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
+                    >
+                      Reconnect
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (session) void disconnectSession(session.id)
+                      }}
+                      className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
+                    >
+                      Disconnect
+                    </button>
+                  </span>
+                )}
               </div>
             )}
           </div>

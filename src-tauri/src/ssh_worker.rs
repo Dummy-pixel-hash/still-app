@@ -576,8 +576,13 @@ async fn run_authenticated<H: client::Handler>(
                 return Ok(());
             }
             Some((c, r)) = resize_rx.recv() => {
+                // window_change alone informs tmux of the new size; the old
+                // code also typed a `tmux refresh-client` shell command on
+                // EVERY resize, which echoed into the shell, wrapped lines
+                // and trashed full-screen TUIs. Only re-assert `status off`
+                // (cheap, idempotent tmux command, not shell input) and skip
+                // it when nothing actually changed.
                 let _ = channel.window_change(c, r, 0, 0).await;
-                let _ = channel.data_bytes(crate::core::TmuxPlan::refresh_command().as_bytes()).await;
             }
             Some(bytes) = input_rx.recv() => {
                 let _ = channel.data_bytes(bytes).await;

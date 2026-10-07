@@ -149,12 +149,15 @@ impl TmuxPlan {
         }
     }
 
-    /// `tmux -u new-session -A -s <name> -x <cols> -y <rows>\n`
-    /// (-A = attach if exists else create: the persistence primitive.)
+    /// `tmux -u new-session -A -s <name> -x <cols> -y <rows> \; set-option -t <name> status off\n`
+    /// (-A = attach if exists else create: the persistence primitive.
+    /// `status off` hides tmux's own bottom status bar inside Still — the
+    /// renderer draws its own chrome, so the remote bar only steals a row
+    /// and breaks TUI layouts.)
     pub fn attach_command(&self, cols: u32, rows: u32) -> String {
         format!(
-            "tmux -u new-session -A -s {} -x {} -y {}\n",
-            self.session_name, cols, rows
+            "tmux -u new-session -A -s {} -x {} -y {} \\; set-option -t {} status off\n",
+            self.session_name, cols, rows, self.session_name
         )
     }
 
@@ -322,7 +325,7 @@ mod tests {   use super::*;
         let p = TmuxPlan::new("still");
         assert_eq!(
             p.attach_command(80, 24),
-            "tmux -u new-session -A -s still -x 80 -y 24\n"
+            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off\n"
         );
     }
 

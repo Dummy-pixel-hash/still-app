@@ -45,6 +45,8 @@ export default function SessionTerminal({
   localRef.current = localId
   const pausedRef = useRef(paused ?? false)
   pausedRef.current = paused ?? false
+  // Last dims pushed server-side; skips redundant resize traffic.
+  const lastDims = useRef({ cols: 0, rows: 0 })
 
   useEffect(() => {
     const host = hostRef.current
@@ -108,9 +110,15 @@ export default function SessionTerminal({
         fit.fit()
         const dims = fit.proposeDimensions()
         if (dims && dims.cols > 1 && dims.rows > 1) {
-          void resizeSession(localRef.current, dims.cols, dims.rows).catch(
-            () => {},
-          )
+          // Skip no-op resizes: each push also repaints server-side, so
+          // only notify when dims actually changed. First push always goes
+          // through (lastCols/Rows start at 0) so attach gets real dims.
+          if (dims.cols !== lastDims.current.cols || dims.rows !== lastDims.current.rows) {
+            lastDims.current = { cols: dims.cols, rows: dims.rows }
+            void resizeSession(localRef.current, dims.cols, dims.rows).catch(
+              () => {},
+            )
+          }
         }
       } catch {
         // proposeDimensions can throw before first layout.
@@ -218,6 +226,7 @@ export default function SessionTerminal({
   return (
     <div
       ref={hostRef}
+      id={`still-term-${localRef.current}`}
       onClick={() => terminalRef.current?.focus()}
       className="h-full min-h-0 w-full cursor-text px-3 py-2 [&_.xterm]:h-full"
       aria-label="Terminal"
