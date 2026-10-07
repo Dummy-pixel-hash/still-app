@@ -18,8 +18,6 @@ export interface PingResponse {
 // renderer storage WITHOUT secrets. Secrets live only in transient memory
 // (per-connect prompt) and in the OS keyring via the native bridge.
 
-export type SessionKind = "shell" | "nvim" | "agent" | "lazygit" | "logs" | "btop"
-
 export type AuthMethod = "password" | "key" | "ask"
 
 export type ConnState =
@@ -36,7 +34,6 @@ export interface Session {
   username: string
   projectId: string
   workingDirectory: string
-  kind: SessionKind
   authMethod: AuthMethod
   /** Local key-library id when authMethod === 'key'. Metadata only, never secret text. */
   keyId?: string
@@ -82,28 +79,9 @@ export interface SessionDraft {
   username: string
   projectId: string
   workingDirectory: string
-  kind: SessionKind
   authMethod: AuthMethod
   keyId: string
   remember: boolean
-}
-
-export const KIND_COMMANDS: Record<SessionKind, string> = {
-  nvim: "nvim",
-  agent: "claude",
-  lazygit: "lazygit",
-  logs: "tail -f",
-  btop: "btop",
-  shell: "zsh",
-}
-
-export const KIND_LABELS: Record<SessionKind, string> = {
-  shell: "Shell",
-  nvim: "Neovim",
-  agent: "Agent",
-  lazygit: "lazygit",
-  logs: "Logs",
-  btop: "btop",
 }
 
 export function tmuxNameFor(name: string): string {
@@ -127,7 +105,6 @@ export function blankDraft(projectId = ""): SessionDraft {
     username: "",
     projectId,
     workingDirectory: "~",
-    kind: "shell",
     authMethod: "ask",
     keyId: "",
     remember: false,

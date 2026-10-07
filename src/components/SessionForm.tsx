@@ -1,11 +1,8 @@
 import { useEffect, useState } from "react"
 import {
-  KIND_COMMANDS,
-  KIND_LABELS,
   blankDraft,
   type Session,
   type SessionDraft,
-  type SessionKind,
 } from "../types"
 import { useStore, validateDraft } from "../session/store"
 
@@ -63,7 +60,6 @@ export default function SessionForm({
     username: initial?.username ?? "",
     projectId: initial?.projectId ?? store.projects[0]?.id ?? "",
     workingDirectory: initial?.workingDirectory ?? "~",
-    kind: initial?.kind ?? "shell",
     authMethod: initial?.authMethod ?? "ask",
     keyId: initial?.keyId ?? "",
     remember: initial?.remember ?? false,
@@ -164,20 +160,6 @@ export default function SessionForm({
             {store.projects.map((p) => (
               <option key={p.id} value={p.id} className="bg-[#121214]">
                 {p.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Session kind">
-          <select
-            className={inputClass}
-            value={draft.kind}
-            onChange={(e) => set("kind", e.target.value as SessionKind)}
-            aria-label="Session kind"
-          >
-            {(Object.keys(KIND_LABELS) as SessionKind[]).map((k) => (
-              <option key={k} value={k} className="bg-[#121214]">
-                {KIND_LABELS[k]} · {KIND_COMMANDS[k]}
               </option>
             ))}
           </select>

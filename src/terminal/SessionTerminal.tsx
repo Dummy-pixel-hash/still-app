@@ -32,19 +32,23 @@ const textDecoder = new TextDecoder()
 export default function SessionTerminal({
   localId,
   prefs,
-  paused,
+  onClose,
+  onZoom,
 }: {
   localId: string
   prefs: TerminalPrefs
-  paused?: boolean
+  onClose?: () => void
+  onZoom?: (delta: number | "reset") => void
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const localRef = useRef(localId)
   localRef.current = localId
-  const pausedRef = useRef(paused ?? false)
-  pausedRef.current = paused ?? false
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const onZoomRef = useRef(onZoom)
+  onZoomRef.current = onZoom
   // Last dims pushed server-side; skips redundant resize traffic.
   const lastDims = useRef({ cols: 0, rows: 0 })
 
@@ -53,12 +57,12 @@ export default function SessionTerminal({
     if (!host) return
 
     const terminal = new Terminal({
-      convertEol: true,
+      convertEol: false,
       cursorBlink: true,
       cursorStyle: prefs.cursorStyle,
       fontFamily: "'Geist Mono', ui-monospace, Consolas, monospace",
       fontSize: prefs.fontSize,
-      lineHeight: 1.5,
+      lineHeight: 1.0,
       scrollback: prefs.scrollback,
       theme: {
         background: "#08080a",
@@ -105,7 +109,6 @@ export default function SessionTerminal({
     }
 
     const pushResize = () => {
-      if (pausedRef.current) return
       try {
         fit.fit()
         const dims = fit.proposeDimensions()
@@ -127,7 +130,6 @@ export default function SessionTerminal({
 
     // Keyboard -> SSH. xterm.js encodes Ctrl/Alt/arrows/F-keys itself.
     const dataDispose = terminal.onData((data) => {
-      if (pausedRef.current) return
       void writeSession(localRef.current, textEncoder.encode(data)).catch(
         () => {},
       )
@@ -145,8 +147,21 @@ export default function SessionTerminal({
     // Initial size once laid out.
     const t = window.setTimeout(pushResize, 60)
 
-    // Clipboard: Ctrl+Shift+C copies, Ctrl+Shift+V pastes.
+    // App shortcuts (swallowed before PTY) + clipboard passthrough.
     terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === "keydown" && event.ctrlKey && !event.metaKey && !event.altKey) {
+        const t = event.target as HTMLElement | null
+        const inField = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")
+        if (!inField) {
+          const k = event.key.toLowerCase()
+          if (event.code === "Period" || k === ".") { event.preventDefault(); onCloseRef.current?.(); return false }
+          if (["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"].includes(event.code) || ["-", "_", "=", "+", "0"].includes(k)) {
+            event.preventDefault()
+            onZoomRef.current?.(k === "0" ? "reset" : k === "-" || k === "_" ? -1 : 1)
+            return false
+          }
+        }
+      }
       if (
         event.ctrlKey &&
         event.shiftKey &&
@@ -167,7 +182,7 @@ export default function SessionTerminal({
         void navigator.clipboard
           ?.readText()
           .then((text) => {
-            if (text && !pausedRef.current)
+            if (text)
               void writeSession(localRef.current, textEncoder.encode(text)).catch(
                 () => {},
               )
@@ -179,7 +194,7 @@ export default function SessionTerminal({
     })
 
     const unsub = subscribeSessionData(localRef.current, (data) => {
-      if (!pausedRef.current) terminal.write(new Uint8Array(data))
+      terminal.write(new Uint8Array(data))
     })
 
     terminal.focus()

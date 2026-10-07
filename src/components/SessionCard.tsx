@@ -1,14 +1,10 @@
 import { useMemo } from "react"
-import {
-  KIND_COMMANDS,
-  type ConnState,
-  type Session,
-  type SessionKind,
-} from "../types"
+import { type ConnState, type Session } from "../types"
 import { transcriptSnapshot } from "../session/connections"
 
-const statusMeta: Record<
-  ConnState | "never",
+export type CardConn = ConnState | "never"
+
+const statusMeta: Record<CardConn,
   { label: string; dot: string; pulse: boolean }
 > = {
   connected: {
@@ -39,23 +35,6 @@ const statusMeta: Record<
 }
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
-
-function kindGlyph(kind: SessionKind): string {
-  switch (kind) {
-    case "nvim":
-      return "▤"
-    case "agent":
-      return "✳"
-    case "lazygit":
-      return "⑂"
-    case "logs":
-      return "≣"
-    case "btop":
-      return "▦"
-    default:
-      return "›_"
-  }
-}
 
 /** Last bytes of the live transcript rendered as plain text preview. */
 function LivePreview({ sessionId }: { sessionId: string }) {
@@ -89,7 +68,7 @@ function LivePreview({ sessionId }: { sessionId: string }) {
 
 function IdlePreview({ session }: { session: Session }) {
   const rows: string[] = []
-  rows.push(`$ ${KIND_COMMANDS[session.kind]} · ${session.workingDirectory}`)
+  rows.push(`$ ${session.workingDirectory}`)
   if (session.host) rows.push(`${session.username}@${session.host}:${session.port}`)
   else rows.push("no host configured yet")
   rows.push(`tmux ${session.tmuxSession}`)
@@ -120,7 +99,7 @@ export default function SessionCard({
   onDropOn,
 }: {
   session: Session
-  conn: ConnState | "never"
+  conn: CardConn
   index: number
   dragging: boolean
   menuOpen: boolean
@@ -210,9 +189,6 @@ export default function SessionCard({
         </div>
         <div className="mt-0.5 flex items-center justify-between font-mono text-[11px] text-faint">
           <span className="truncate">{session.host || "—"}</span>
-          <span className="ml-2 shrink-0 text-[10px]">
-            {kindGlyph(session.kind)} {KIND_COMMANDS[session.kind]}
-          </span>
         </div>
 
         <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#050505] px-3 py-2.5 font-mono text-[10px] leading-[1.65] text-[#b0aab8] shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">

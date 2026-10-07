@@ -14,6 +14,7 @@ import {
   type ConnectRequest,
 } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
+import { updateTerminalPrefs } from "../session/store"
 import type { Session, TerminalPrefs } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
@@ -38,7 +39,6 @@ interface AuthPrompt {
  */
 export default function TerminalOverlay({
   open,
-  authOpen,
   prefs,
   keyTextFor,
   onClose,
@@ -51,7 +51,6 @@ export default function TerminalOverlay({
   onNeedAuth: (
     session: Session,
   ) => Promise<{ secret?: string; remember: boolean } | null>
-  authOpen: boolean
 }) {
   useConnections()
   const full = open?.phase === "open"
@@ -113,22 +112,25 @@ export default function TerminalOverlay({
     return () => window.clearTimeout(hide.current)
   }, [full, show])
 
-  // Ctrl+. closes the overlay (the "Workspace" pill hint). Terminal input
-  // keeps working: xterm's onData path is unaffected — this only fires when
-  // the overlay is open and full, and ignores keystrokes typed with extra
-  // modifiers or inside auth/settings inputs.
+  // Overlay-level fallback: terminal owns the real shortcuts via
+  // attachCustomKeyEventHandler (swallows before bytes hit the PTY).
+  // This only covers unfocused-terminal cases, in capture phase so the
+  // browser can't steal zoom keys first.
   useEffect(() => {
     if (!full) return
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
-      if (e.code !== "Period") return
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return
+      if (!e.ctrlKey || e.metaKey || e.altKey) return
+      const k = e.key.toLowerCase()
+      const isClose = e.code === "Period" || k === "." || k === ">"
+      const isZoom = ["-", "_", "=", "+", "0"].includes(k) || ["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract"].includes(e.code)
+      if (!isClose && !isZoom) return
       e.preventDefault()
-      onClose()
+      if (isClose) onClose()
     }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
+    window.addEventListener("keydown", onKey, { capture: true })
+    return () => window.removeEventListener("keydown", onKey, { capture: true })
   }, [full, onClose])
 
   const buildRequest = useCallback(
@@ -309,11 +311,14 @@ export default function TerminalOverlay({
                 key={`${open.session.id}-${open.session.updatedAt}`}
                 localId={open.session.id}
                 prefs={prefs}
-                paused={
-                  !full ||
-                  state === "disconnected" ||
-                  state === "error" ||
-                  authOpen
+                onClose={onClose}
+                onZoom={(d) =>
+                  updateTerminalPrefs({
+                    fontSize:
+                      d === "reset"
+                        ? 14
+                        : Math.min(24, Math.max(10, prefs.fontSize + d)),
+                  })
                 }
               />
             </div>
@@ -457,7 +462,11 @@ export default function TerminalOverlay({
                   <span className="font-mono text-[11px] text-dim">
                     {state === "connected"
                       ? `live · tmux ${session?.tmuxSession}`
-                      : "connecting…"}
+                      : hostPrompt
+                        ? "waiting for approval…"
+                        : busy
+                          ? "connecting…"
+                          : "connecting…"}
                   </span>
                   <span className="font-mono text-[10px] text-faint">
                     {footerOpen ? "▾" : "▸"}

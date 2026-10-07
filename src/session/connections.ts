@@ -118,9 +118,7 @@ function setEntry(localId: string, patch: Partial<Entry>) {
   emit()
 }
 
-function mapNativeStatus(
-  status: string,
-): ConnState {
+export function mapNativeStatus(status: string): ConnState {
   // Native wire statuses are lowercase (idle/connecting/live/closed/error)
   // and the mock adapter uses UI-style values — but a capitalized payload
   // must never strand the UI in "connecting", so match case-insensitively.
@@ -337,7 +335,11 @@ export async function connectSession(req: ConnectRequest): Promise<void> {
             pushTranscript(localId, event.data)
             sessionDataListeners.get(localId)?.forEach((fn) => fn(event.data))
           } else if (event.type === "status") {
-            setEntry(localId, { state: mapNativeStatus(event.status) })
+            const next = mapNativeStatus(event.status)
+            const cur = entries.get(localId)
+            // Ignore stale terminal states racing an in-flight attempt.
+            if (next === "disconnected" && cur?.nativeId && cur.state === "connecting") return
+            setEntry(localId, { state: next })
           } else if (event.type === "hostKeyPrompt") {
             // M5: untrusted/changed key — worker refused BEFORE auth. Surface the
             // fingerprint for explicit Trust/Reject; never auto-accept.

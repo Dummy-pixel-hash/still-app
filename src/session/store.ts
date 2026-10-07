@@ -48,7 +48,6 @@ function seed(): StoreShape {
         username: "",
         projectId: "atlas",
         workingDirectory: "~",
-        kind: "shell",
         authMethod: "ask",
         remember: false,
         tmuxSession: "still-shell",
@@ -63,7 +62,6 @@ function seed(): StoreShape {
         username: "",
         projectId: "lab",
         workingDirectory: "~",
-        kind: "shell",
         authMethod: "ask",
         remember: false,
         tmuxSession: "still-maintenance",
@@ -87,7 +85,14 @@ function load(): StoreShape {
     const parsed = JSON.parse(raw) as Partial<StoreShape>
     return {
       projects: Array.isArray(parsed.projects) ? parsed.projects : seed().projects,
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+      // Migration: drop legacy `kind` (session-kind presets removed).
+      sessions: Array.isArray(parsed.sessions)
+        ? parsed.sessions.map((s) => {
+            const { kind: _legacyKind, ...rest } = s as unknown as Record<string, unknown>
+            void _legacyKind
+            return rest as unknown as StoreShape["sessions"][number]
+          })
+        : [],
       order: parsed.order ?? {},
       keys: Array.isArray(parsed.keys) ? parsed.keys : [],
       settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
@@ -185,7 +190,6 @@ export function createSession(input: SessionInput): Session {
     username: input.username.trim(),
     projectId: input.projectId,
     workingDirectory: input.workingDirectory.trim() || "~",
-    kind: input.kind,
     authMethod: input.authMethod,
     keyId: input.authMethod === "key" ? input.keyId || undefined : undefined,
     remember: input.remember,

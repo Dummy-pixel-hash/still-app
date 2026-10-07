@@ -415,7 +415,6 @@ export default function Workspace() {
 
       <TerminalOverlay
         open={open}
-        authOpen={authFor !== null}
         prefs={store.settings.terminal}
         keyTextFor={keyTextFor}
         onClose={close}
@@ -473,7 +472,6 @@ export default function Workspace() {
                   username: draft.username.trim(),
                   projectId: draft.projectId,
                   workingDirectory: draft.workingDirectory.trim() || "~",
-                  kind: draft.kind,
                   authMethod: draft.authMethod,
                   keyId:
                     draft.authMethod === "key" ? draft.keyId || undefined : undefined,
