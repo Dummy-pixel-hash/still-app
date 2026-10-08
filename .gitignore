@@ -10,3 +10,12 @@ logs/
 *.log
 test-results/
 playwright-report/
+
+# local docs & media scratch (videos, notes) — never committed
+docs/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
