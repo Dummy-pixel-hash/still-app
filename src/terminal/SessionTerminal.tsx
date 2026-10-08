@@ -138,28 +138,31 @@ export default function SessionTerminal({
     let resizeTimer = 0
     const debounced = () => {
       window.clearTimeout(resizeTimer)
-      resizeTimer = window.setTimeout(pushResize, 120)
+      resizeTimer = window.setTimeout(pushResize, 150)
     }
     const observer = new ResizeObserver(debounced)
     observer.observe(host)
     window.addEventListener("resize", debounced)
 
     // Initial size once laid out.
-    const t = window.setTimeout(pushResize, 60)
+    const t = window.setTimeout(pushResize, 150)
 
-    // App shortcuts (swallowed before PTY) + clipboard passthrough.
+    // Backstop only: the overlay's capture-phase gate owns shortcuts and
+    // stops them before xterm sees them. This covers the case where the
+    // gate unmounted but the surface lingers.
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type === "keydown" && event.ctrlKey && !event.metaKey && !event.altKey) {
         const t = event.target as HTMLElement | null
-        const inField = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")
-        if (!inField) {
-          const k = event.key.toLowerCase()
-          if (event.code === "Period" || k === ".") { event.preventDefault(); onCloseRef.current?.(); return false }
-          if (["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"].includes(event.code) || ["-", "_", "=", "+", "0"].includes(k)) {
-            event.preventDefault()
-            onZoomRef.current?.(k === "0" ? "reset" : k === "-" || k === "_" ? -1 : 1)
-            return false
-          }
+        const inField = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)
+        const k = event.key.toLowerCase()
+        const isClose = event.code === "Period" || k === "." || k === ">"
+        const isZoom = ["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"].includes(event.code) || ["-", "_", "=", "+", "0"].includes(k)
+        if (isClose || (isZoom && !inField)) {
+          event.preventDefault()
+          event.stopPropagation()
+          if (isClose) onCloseRef.current?.()
+          else onZoomRef.current?.(k === "0" ? "reset" : k === "-" || k === "_" ? -1 : 1)
+          return false
         }
       }
       if (
@@ -193,8 +196,18 @@ export default function SessionTerminal({
       return true
     })
 
+    // Coalesce bursty SSH chunks into one term.write per frame.
+    let pending: number[] = []
+    let raf = 0
+    const flush = () => {
+      raf = 0
+      if (pending.length === 0) return
+      terminal.write(new Uint8Array(pending))
+      pending = []
+    }
     const unsub = subscribeSessionData(localRef.current, (data) => {
-      terminal.write(new Uint8Array(data))
+      pending.push(...data)
+      if (!raf) raf = window.requestAnimationFrame(flush)
     })
 
     terminal.focus()
@@ -202,6 +215,7 @@ export default function SessionTerminal({
     return () => {
       window.clearTimeout(t)
       window.clearTimeout(resizeTimer)
+      if (raf) window.cancelAnimationFrame(raf)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
       unsub()

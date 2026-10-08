@@ -36,6 +36,7 @@ const transcripts = new Map<string, number[]>()
 const TRANSCRIPT_CAP = 65536
 
 function emit() {
+  snapshotVersion += 1
   listeners.forEach((l) => l())
 }
 
@@ -46,12 +47,17 @@ function subscribe(fn: () => void) {
   }
 }
 
-function getSnapshot(): Map<string, Entry> {
-  return entries
+// Version counter: getSnapshot must return a NEW reference on every emit,
+// otherwise useSyncExternalStore bails out (Object.is) and the footer
+// keeps showing stale state until the next click forces a re-render.
+let snapshotVersion = 0
+function getSnapshot(): number {
+  return snapshotVersion
 }
 
 export function useConnections(): Map<string, Entry> {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  return entries
 }
 
 export function connectionState(localId: string): LiveState {

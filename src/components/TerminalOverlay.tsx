@@ -112,22 +112,50 @@ export default function TerminalOverlay({
     return () => window.clearTimeout(hide.current)
   }, [full, show])
 
-  // Overlay-level fallback: terminal owns the real shortcuts via
-  // attachCustomKeyEventHandler (swallows before bytes hit the PTY).
-  // This only covers unfocused-terminal cases, in capture phase so the
-  // browser can't steal zoom keys first.
+  const prefsRef = useRef(prefs)
+  prefsRef.current = prefs
+  // Single capture-phase gate: runs before xterm sees the key, so app
+  // shortcuts never leak bytes into the PTY. Backstop lives in
+  // SessionTerminal's attachCustomKeyEventHandler for focused-terminal.
   useEffect(() => {
     if (!full) return
     const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return
       if (!e.ctrlKey || e.metaKey || e.altKey) return
       const k = e.key.toLowerCase()
       const isClose = e.code === "Period" || k === "." || k === ">"
-      const isZoom = ["-", "_", "=", "+", "0"].includes(k) || ["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract"].includes(e.code)
-      if (!isClose && !isZoom) return
+      const isReset =
+        k === "0" || e.code === "Digit0" || e.code === "Numpad0"
+      const isZoomOut =
+        k === "-" ||
+        k === "_" ||
+        e.code === "Minus" ||
+        e.code === "NumpadSubtract"
+      const isZoomIn =
+        k === "=" ||
+        k === "+" ||
+        e.code === "Equal" ||
+        e.code === "NumpadAdd"
+      if (!isClose && !isReset && !isZoomOut && !isZoomIn) return
+      const t = e.target as HTMLElement | null
+      const inField =
+        !!t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      // Close works everywhere (even mid-auth); zoom skips text fields.
+      if (inField && !isClose) return
       e.preventDefault()
-      if (isClose) onClose()
+      e.stopPropagation()
+      if (isClose) {
+        onClose()
+        return
+      }
+      const cur = prefsRef.current.fontSize
+      if (isReset) updateTerminalPrefs({ fontSize: 14 })
+      else if (isZoomOut)
+        updateTerminalPrefs({ fontSize: Math.max(10, cur - 1) })
+      else updateTerminalPrefs({ fontSize: Math.min(24, cur + 1) })
     }
     window.addEventListener("keydown", onKey, { capture: true })
     return () => window.removeEventListener("keydown", onKey, { capture: true })
@@ -501,6 +529,7 @@ export default function TerminalOverlay({
       {full &&
         createPortal(
           <div
+            data-tauri-drag-region
             className="fixed left-1/2 top-3 z-[65] flex items-center gap-3 rounded-full bg-[#121214]/80 py-1.5 pl-4 pr-1.5 text-[12px] shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl transition-all duration-500"
             style={{
               opacity: chrome ? 1 : 0,
