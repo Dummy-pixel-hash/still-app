@@ -1,44 +1,74 @@
 // Connection presets for the new-session form. Metadata only — never secrets.
 // Persisted separately from the M2 store so the session store schema stays put.
-
-import type { AuthMethod } from "../types"
+//
+// A preset is identified by its user-given `name` (e.g. "Prod FRA").
+// Connection fields (host/port/user/dir) are filled from the preset on apply.
+// Legacy presets stored only `label` (user@host) are migrated to `name`.
 
 const PRESETS_KEY = "still.session-presets.v1"
 const MAX_PRESETS = 12
 
 export interface SessionPreset {
   id: string
-  label: string
+  /** User-given display name — the primary identifier shown in the dropdown. */
+  name: string
   host: string
   port: string
   username: string
   workingDirectory: string
-  authMethod: AuthMethod
 }
 
 export const BUILTIN_PRESETS: SessionPreset[] = [
   {
     id: "builtin-local",
-    label: "Local",
+    name: "Local",
     host: "localhost",
     port: "22",
     username: "",
     workingDirectory: "~",
-    authMethod: "ask",
   },
   {
     id: "builtin-blank",
-    label: "Custom",
+    name: "Custom",
     host: "",
     port: "22",
     username: "",
     workingDirectory: "~",
-    authMethod: "ask",
   },
 ]
 
 function builtin(id: string): SessionPreset | undefined {
   return BUILTIN_PRESETS.find((p) => p.id === id)
+}
+
+interface LegacyPreset {
+  id?: unknown
+  label?: unknown
+  name?: unknown
+  host?: unknown
+  port?: unknown
+  username?: unknown
+  workingDirectory?: unknown
+}
+
+function normalize(raw: LegacyPreset, index: number): SessionPreset | null {
+  if (!raw || typeof raw !== "object") return null
+  const host = typeof raw.host === "string" ? raw.host : ""
+  const label = typeof raw.label === "string" ? raw.label.trim() : ""
+  const nameRaw = typeof raw.name === "string" ? raw.name.trim() : ""
+  const name = nameRaw || label || host || `Preset ${index + 1}`
+  return {
+    id:
+      typeof raw.id === "string" && raw.id
+        ? raw.id
+        : `preset-${Date.now().toString(36)}-${index}`,
+    name,
+    host,
+    port: typeof raw.port === "string" ? raw.port : String(raw.port ?? "22"),
+    username: typeof raw.username === "string" ? raw.username : "",
+    workingDirectory:
+      typeof raw.workingDirectory === "string" ? raw.workingDirectory : "~",
+  }
 }
 
 export function loadPresets(): SessionPreset[] {
@@ -48,11 +78,10 @@ export function loadPresets(): SessionPreset[] {
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return BUILTIN_PRESETS
     // Builtins first (never duplicated); user presets keep insertion order.
-    const user = parsed.filter(
-      (p): p is SessionPreset =>
-        !!p && typeof p === "object" && typeof (p as SessionPreset).host === "string",
-    )
-    return [...BUILTIN_PRESETS, ...user.filter((p) => !builtin(p.id))].slice(0, MAX_PRESETS)
+    const user = (parsed as LegacyPreset[])
+      .map((p, i) => normalize(p, i))
+      .filter((p): p is SessionPreset => p !== null && !builtin(p.id))
+    return [...BUILTIN_PRESETS, ...user].slice(0, MAX_PRESETS)
   } catch {
     return BUILTIN_PRESETS
   }
@@ -69,9 +98,8 @@ export function savePresets(presets: SessionPreset[]): SessionPreset[] {
   return kept
 }
 
-export function presetLabel(host: string, username: string): string {
-  const h = host.trim()
-  const u = username.trim()
-  if (u && h) return `${u}@${h}`
-  return h || "Preset"
+/** Display line for a dropdown option: "Name — user@host:port". */
+export function presetDetail(p: SessionPreset): string {
+  const target = p.host ? `${p.username ? `${p.username}@` : ""}${p.host}:${p.port || "22"}` : "blank"
+  return `${p.name} — ${target}`
 }

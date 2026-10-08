@@ -33,49 +33,46 @@ const DEFAULT_SETTINGS: AppSettings = {
 }
 
 function seed(): StoreShape {
-  const now = Date.now()
   return {
-    projects: [
-      { id: "atlas", name: "Atlas", note: "Payments API · production", order: 0 },
-      { id: "lab", name: "Home Lab", note: "Proxmox cluster · 3 nodes", order: 1 },
-    ],
-    sessions: [
-      {
-        id: "seed-atlas-shell",
-        name: "Shell",
-        host: "",
-        port: 22,
-        username: "",
-        projectId: "atlas",
-        workingDirectory: "~",
-        authMethod: "ask",
-        remember: false,
-        tmuxSession: "still-shell",
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: "seed-lab-shell",
-        name: "Shell",
-        host: "",
-        port: 22,
-        username: "",
-        projectId: "lab",
-        workingDirectory: "~",
-        authMethod: "ask",
-        remember: false,
-        tmuxSession: "still-maintenance",
-        createdAt: now,
-        updatedAt: now,
-      },
-    ],
-    order: {
-      atlas: ["seed-atlas-shell"],
-      lab: ["seed-lab-shell"],
-    },
+    // First run starts empty: the workspace shows the onboarding panel
+    // (no fake Atlas/Home Lab projects the user never created).
+    projects: [],
+    sessions: [],
+    order: {},
     keys: [],
     settings: DEFAULT_SETTINGS,
   }
+}
+
+// One-time purge of the shipped placeholder content (Atlas/Home Lab +
+// seed shells) the user never created. Matches exact seed IDs only —
+// user data is untouched. A seed project is dropped only when it holds
+// nothing but seed sessions, so anything a user created survives.
+const SEED_PROJECT_IDS = new Set(["atlas", "lab"])
+const SEED_SESSION_IDS = new Set(["seed-atlas-shell", "seed-lab-shell"])
+
+function purgeShippedSeeds(store: StoreShape): StoreShape {
+  const sessions = store.sessions.filter((s) => !SEED_SESSION_IDS.has(s.id))
+  const projects = store.projects.filter(
+    (p) =>
+      !SEED_PROJECT_IDS.has(p.id) ||
+      store.sessions.some(
+        (s) => s.projectId === p.id && !SEED_SESSION_IDS.has(s.id),
+      ),
+  )
+  if (
+    sessions.length === store.sessions.length &&
+    projects.length === store.projects.length
+  )
+    return store
+  const live = new Set(projects.map((p) => p.id))
+  const kept = new Set(sessions.map((s) => s.id))
+  const order: Record<string, string[]> = {}
+  for (const [pid, ids] of Object.entries(store.order))
+    if (live.has(pid)) order[pid] = ids.filter((id) => kept.has(id))
+  const next = { ...store, sessions, projects, order }
+  persist(next)
+  return next
 }
 
 function load(): StoreShape {
@@ -104,7 +101,7 @@ function load(): StoreShape {
 
 let cached: StoreShape | null = null
 function getStore(): StoreShape {
-  if (!cached) cached = load()
+  if (!cached) cached = purgeShippedSeeds(load())
   return cached
 }
 
@@ -158,6 +155,25 @@ export function createProject(name: string, note = ""): Project {
   })
   notify()
   return project
+}
+
+/**
+ * Delete a project and every session inside it. Returns the removed
+ * sessions so the caller can release their live workers first.
+ */
+export function removeProject(id: string): Session[] {
+  const store = getStore()
+  const removed = store.sessions.filter((s) => s.projectId === id)
+  const { [id]: _dropped, ...order } = store.order
+  void _dropped
+  persist({
+    ...store,
+    projects: store.projects.filter((p) => p.id !== id),
+    sessions: store.sessions.filter((s) => s.projectId !== id),
+    order,
+  })
+  notify()
+  return removed
 }
 
 // --- sessions ---

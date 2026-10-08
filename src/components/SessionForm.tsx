@@ -5,12 +5,6 @@ import {
   type SessionDraft,
 } from "../types"
 import { useStore, validateDraft } from "../session/store"
-import {
-  loadPresets,
-  presetLabel,
-  savePresets,
-  type SessionPreset,
-} from "../session/presets"
 
 const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
@@ -37,17 +31,24 @@ function Field({
   )
 }
 
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-faint">
+      {children}
+    </p>
+  )
+}
+
 /**
- * Polished Still session form (new + edit). Validation is field-level and
- * local. Secrets entered here are transient: handed to the connect flow and
- * never written to renderer storage.
+ * Edit-session form. Creation lives in NewSessionWizard; this form edits
+ * existing metadata (including auth method) without ever auto-connecting.
+ * Secrets entered here are transient and never written to renderer storage.
  */
 export default function SessionForm({
   initial,
   heading,
   submitLabel,
   keyOptions,
-  withPresets = false,
   onSubmit,
   onCancel,
 }: {
@@ -55,7 +56,6 @@ export default function SessionForm({
   heading: string
   submitLabel: string
   keyOptions: { id: string; name: string }[]
-  withPresets?: boolean
   onSubmit: (draft: SessionDraft, secret?: string) => void
   onCancel: () => void
 }) {
@@ -75,40 +75,6 @@ export default function SessionForm({
   const [secret, setSecret] = useState("")
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [tried, setTried] = useState(false)
-  const [presets, setPresets] = useState<SessionPreset[]>(() =>
-    withPresets ? loadPresets() : [],
-  )
-
-  const applyPreset = (preset: SessionPreset) =>
-    setDraft((d) => ({
-      ...d,
-      host: preset.host,
-      port: preset.port,
-      username: preset.username,
-      workingDirectory: preset.workingDirectory,
-      authMethod: preset.authMethod,
-      ...(d.name.trim() ? {} : { name: preset.label }),
-    }))
-
-  const savePreset = () => {
-    if (!draft.host.trim()) return
-    const next = savePresets([
-      ...presets,
-      {
-        id: `preset-${Date.now().toString(36)}`,
-        label: presetLabel(draft.host, draft.username),
-        host: draft.host.trim(),
-        port: draft.port,
-        username: draft.username.trim(),
-        workingDirectory: draft.workingDirectory,
-        authMethod: draft.authMethod,
-      },
-    ])
-    setPresets(next)
-  }
-
-  const removePreset = (id: string) =>
-    setPresets(savePresets(presets.filter((p) => p.id !== id)))
 
   useEffect(() => {
     if (tried) setErrors(validateDraft(draft))
@@ -116,10 +82,6 @@ export default function SessionForm({
 
   const set = <K extends keyof SessionDraft>(key: K, value: SessionDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }))
-
-  const needsSecret =
-    draft.authMethod === "password" ||
-    (draft.authMethod === "ask" && secret.trim().length === 0)
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -132,125 +94,94 @@ export default function SessionForm({
   }
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-4">
+    <form onSubmit={submit} className="flex flex-col gap-6">
       <h2 className="font-serif text-3xl text-fg">{heading}</h2>
 
-      {withPresets ? (
-        <div className="group/presets flex flex-wrap items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
-            Presets
-          </span>
-          {presets.map((preset) => (
-            <span key={preset.id} className="relative">
-              <button
-                type="button"
-                onClick={() => applyPreset(preset)}
-                title={`${preset.host || "no host"}:${preset.port}`}
-                className="rounded-full border border-white/10 bg-black/40 px-3 py-1 font-mono text-[11px] text-dim transition hover:border-[#ff4a4a]/50 hover:text-fg"
-              >
-                {preset.label}
-              </button>
-              {!preset.id.startsWith("builtin-") ? (
-                <button
-                  type="button"
-                  onClick={() => removePreset(preset.id)}
-                  aria-label={`Delete preset ${preset.label}`}
-                  className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-white/15 bg-[#17171a] text-[9px] leading-none text-dim hover:text-[#ff8080] group-hover/presets:flex"
-                >
-                  ×
-                </button>
-              ) : null}
-            </span>
-          ))}
-          <button
-            type="button"
-            onClick={savePreset}
-            disabled={!draft.host.trim()}
-            title="Save current host/port/user as a preset"
-            className="rounded-full border border-dashed border-white/15 px-3 py-1 font-mono text-[11px] text-faint transition hover:border-white/25 hover:text-fg disabled:opacity-40"
-          >
-            + save
-          </button>
-        </div>
-      ) : null}
-
-      <Field label="Name" error={errors.name}>
-        <input
-          className={inputClass}
-          value={draft.name}
-          onChange={(e) => set("name", e.target.value)}
-          placeholder="Prod shell"
-          aria-label="Session name"
-        />
-      </Field>
-
-      <div className="grid grid-cols-[1fr_110px] gap-3">
-        <Field label="Host" error={errors.host}>
+      <section className="flex flex-col gap-3">
+        <SectionLabel>Connection</SectionLabel>
+        <Field label="Name" error={errors.name}>
           <input
-            className={`${inputClass} font-mono`}
-            value={draft.host}
-            onChange={(e) => set("host", e.target.value)}
-            placeholder="dev-fra-02  ·  192.0.2.10"
-            aria-label="Host"
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Port" error={errors.port}>
-          <input
-            className={`${inputClass} font-mono`}
-            value={draft.port}
-            onChange={(e) => set("port", e.target.value)}
-            placeholder="22"
-            aria-label="Port"
-            inputMode="numeric"
-          />
-        </Field>
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Username" error={errors.username}>
-          <input
-            className={`${inputClass} font-mono`}
-            value={draft.username}
-            onChange={(e) => set("username", e.target.value)}
-            placeholder="deploy"
-            aria-label="Username"
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Working directory">
-          <input
-            className={`${inputClass} font-mono`}
-            value={draft.workingDirectory}
-            onChange={(e) => set("workingDirectory", e.target.value)}
-            placeholder="~"
-            aria-label="Working directory"
-            spellCheck={false}
-          />
-        </Field>
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Project" error={errors.projectId}>
-          <select
             className={inputClass}
-            value={draft.projectId}
-            onChange={(e) => set("projectId", e.target.value)}
-            aria-label="Project"
-          >
-            {store.projects.map((p) => (
-              <option key={p.id} value={p.id} className="bg-[#121214]">
-                {p.name}
-              </option>
-            ))}
-          </select>
+            value={draft.name}
+            onChange={(e) => set("name", e.target.value)}
+            placeholder="Prod shell"
+            aria-label="Session name"
+          />
         </Field>
-      </div>
 
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
-          Authentication
-        </legend>
+        <div className="grid grid-cols-[1fr_110px] gap-3">
+          <Field label="Host" error={errors.host}>
+            <input
+              className={`${inputClass} font-mono`}
+              value={draft.host}
+              onChange={(e) => set("host", e.target.value)}
+              placeholder="dev-fra-02  ·  192.0.2.10"
+              aria-label="Host"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label="Port" error={errors.port}>
+            <input
+              className={`${inputClass} font-mono`}
+              value={draft.port}
+              onChange={(e) => set("port", e.target.value)}
+              placeholder="22"
+              aria-label="Port"
+              inputMode="numeric"
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Username" error={errors.username}>
+            <input
+              className={`${inputClass} font-mono`}
+              value={draft.username}
+              onChange={(e) => set("username", e.target.value)}
+              placeholder="deploy"
+              aria-label="Username"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label="Working directory">
+            <input
+              className={`${inputClass} font-mono`}
+              value={draft.workingDirectory}
+              onChange={(e) => set("workingDirectory", e.target.value)}
+              placeholder="~"
+              aria-label="Working directory"
+              spellCheck={false}
+            />
+          </Field>
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <SectionLabel>Destination</SectionLabel>
+        <Field label="Project" error={errors.projectId}>
+          {store.projects.length > 0 ? (
+            <select
+              className={inputClass}
+              value={draft.projectId}
+              onChange={(e) => set("projectId", e.target.value)}
+              aria-label="Project"
+            >
+              {store.projects.map((p) => (
+                <option key={p.id} value={p.id} className="bg-[#121214]">
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className="rounded-lg border border-dashed border-white/15 px-3 py-2 text-[12px] text-dim">
+              A “Default” project will be created for this session.
+            </p>
+          )}
+        </Field>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <SectionLabel>Authentication</SectionLabel>
         <div className="grid grid-cols-3 gap-2">
           {(
             [
@@ -276,7 +207,7 @@ export default function SessionForm({
         </div>
 
         {draft.authMethod === "password" && (
-          <div className="mt-3">
+          <div className="mt-1">
             <input
               type="password"
               autoComplete="new-password"
@@ -289,7 +220,7 @@ export default function SessionForm({
           </div>
         )}
         {draft.authMethod === "key" && (
-          <div className="mt-3">
+          <div className="mt-1">
             {keyOptions.length === 0 ? (
               <p className="rounded-lg border border-dashed border-white/15 px-3 py-2 text-[12px] text-dim">
                 No keys yet — add one under Settings → SSH keys, then pick it
@@ -319,13 +250,13 @@ export default function SessionForm({
             ) : null}
           </div>
         )}
-        {draft.authMethod === "ask" && needsSecret && (
-          <p className="mt-2 font-mono text-[11px] text-faint">
+        {draft.authMethod === "ask" && (
+          <p className="font-mono text-[11px] text-faint">
             You’ll be asked for a password or key each time you connect.
           </p>
         )}
 
-        <label className="mt-3 flex items-center gap-2 text-[12px] text-dim">
+        <label className="mt-1 flex items-center gap-2 text-[12px] text-dim">
           <input
             type="checkbox"
             checked={draft.remember}
@@ -334,7 +265,7 @@ export default function SessionForm({
           />
           Remember on this device <span className="font-mono text-[10px] text-faint">(OS keyring, native only)</span>
         </label>
-      </fieldset>
+      </section>
 
       <div className="mt-1 flex items-center justify-end gap-2">
         <button

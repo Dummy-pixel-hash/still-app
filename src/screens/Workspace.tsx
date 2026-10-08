@@ -3,6 +3,9 @@ import WindowNav from "../components/WindowNav"
 import SessionCard from "../components/SessionCard"
 import TerminalOverlay, { type OpenState } from "../components/TerminalOverlay"
 import SessionForm from "../components/SessionForm"
+import NewSessionWizard from "../components/NewSessionWizard"
+import NewProjectDialog from "../components/NewProjectDialog"
+import RemoveProjectDialog from "../components/RemoveProjectDialog"
 import SettingsSheet from "../components/SettingsSheet"
 import RemoveDialog from "../components/RemoveDialog"
 import AuthDialog from "../components/AuthDialog"
@@ -10,6 +13,7 @@ import {
   createProject,
   createSession,
   moveSession,
+  removeProject,
   removeSession,
   reorderSession,
   touchSession,
@@ -17,12 +21,11 @@ import {
   useStore,
 } from "../session/store"
 import {
-  connectSession,
   connectionState,
   releaseSession,
   useConnections,
 } from "../session/connections"
-import type { ConnState, Session, SessionDraft } from "../types"
+import type { ConnState, Project, Session, SessionDraft } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 type Sort = "manual" | "recent" | "name"
@@ -47,8 +50,12 @@ export default function Workspace() {
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<OpenState | null>(null)
   const [drag, setDrag] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState<string | null>(null)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [showNew, setShowNew] = useState<string | null>(null)
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [projectMenuId, setProjectMenuId] = useState<string | null>(null)
+  const [removingProject, setRemovingProject] = useState<Project | null>(null)
   const [editing, setEditing] = useState<Session | null>(null)
   const [removing, setRemoving] = useState<Session | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -152,40 +159,18 @@ export default function Workspace() {
   )
 
   const handleCreate = useCallback(
-    async (projectId: string, draft: SessionDraft, secret?: string) => {
-      const session = createSession({ ...draft, projectId })
+    async (draft: SessionDraft) => {
+      // Auth is deferred: create the card, open it, and let the overlay
+      // auto-connect prompt via AuthDialog. No secrets ever pass through
+      // the creation flow — they stay transient in the connect flow.
+      const session = createSession({ ...draft })
       setShowNew(null)
-      // Auto-connect the new card so the typed bridge path is exercised
-      // immediately; secrets stay transient.
-      // Single-owner rule: when a secret was just typed, THIS flow owns the
-      // initial connection (the overlay auto-connect must not fire a second
-      // one — it skips non-disconnected/pending sessions, and the registry
-      // epoch-supersedes any overlap). When there is no secret, ownership
-      // stays with the overlay auto-connect, which will prompt for auth.
       requestAnimationFrame(() => {
         const el = document.querySelector(
           `[data-card="${session.id}"]`,
         ) as HTMLElement | null
         if (el) openSession(session, el)
       })
-      if (secret) {
-        const authKind =
-          draft.authMethod === "key" ? "privateKey" : "password"
-        try {
-          await connectSession({
-            localId: session.id,
-            host: session.host,
-            port: session.port,
-            username: session.username,
-            authKind,
-            secret,
-            remember: draft.remember,
-            tmuxSession: session.tmuxSession,
-          })
-        } catch {
-          // Overlay shows the error + retry; card stays put.
-        }
-      }
     },
     [openSession],
   )
@@ -279,9 +264,17 @@ export default function Workspace() {
               </select>
               <button
                 type="button"
-                onClick={() =>
-                  setShowNew(store.projects[0]?.id ?? null)
-                }
+                onClick={() => setShowNewProject(true)}
+                className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg"
+              >
+                + Project
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const p = store.projects[0] ?? createProject("Default", "")
+                  setShowNew(p.id)
+                }}
                 className="rounded-full bg-[#e8e2e6] px-4 py-1.5 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
               >
                 New Session
@@ -299,10 +292,18 @@ export default function Workspace() {
 
           {empty ? (
             <section className="rise mt-10 rounded-[20px] border border-dashed border-white/15 bg-white/[0.02] p-10 text-center">
-              <p className="font-serif text-3xl text-fg">No sessions yet</p>
+              <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-faint">
+                {store.projects.length === 0 ? "Welcome to Still" : "Workspace is empty"}
+              </p>
+              <p className="mt-2 font-serif text-3xl text-fg">
+                {store.projects.length === 0
+                  ? "Connect your first server"
+                  : "No sessions yet"}
+              </p>
               <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-dim">
-                Create your first persistent session. The remote tmux runtime
-                survives disconnects — come back any time and reattach.
+                {store.projects.length === 0
+                  ? "Still keeps one persistent tmux session per card. Create a session, connect, and authenticate when asked — reopen any time and reattach."
+                  : "Create your first persistent session. The remote tmux runtime survives disconnects — come back any time and reattach."}
               </p>
               <button
                 type="button"
@@ -315,10 +316,35 @@ export default function Workspace() {
               >
                 New Session
               </button>
+              <p className="mt-3 font-mono text-[11px] text-faint">
+                1. New session → 2. Connect → 3. Sign in when asked
+              </p>
             </section>
           ) : (
             view.map(({ project, sessions }) => (
-              <section key={project.id} className="mt-8">
+              <section
+                key={project.id}
+                className={`mt-8 rounded-[20px] transition-shadow ${
+                  drag && dragOver === project.id
+                    ? "shadow-[0_0_0_1px_rgba(255,74,74,0.45),0_0_40px_-12px_rgba(255,74,74,0.35)]"
+                    : "shadow-[0_0_0_1px_transparent]"
+                }`}
+                onDragOver={(e) => e.preventDefault()}
+                onDragEnter={(e) => {
+                  e.preventDefault()
+                  setDragOver(project.id)
+                }}
+                onDragLeave={(e) => {
+                  // Child-to-child moves bubble with the child as target;
+                  // only clear when the pointer truly leaves this section.
+                  if (e.target === e.currentTarget) setDragOver(null)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  setDragOver(null)
+                  if (drag) moveSession(drag, project.id)
+                }}
+              >
                 <header className="mb-3 flex items-baseline justify-between gap-3">
                   <div className="min-w-0">
                     <h2 className="truncate font-serif text-2xl text-fg">
@@ -342,6 +368,35 @@ export default function Workspace() {
                     >
                       +
                     </button>
+                    <span className="relative">
+                      <button
+                        type="button"
+                        aria-label={`Actions for project ${project.name}`}
+                        aria-expanded={projectMenuId === project.id}
+                        onClick={() =>
+                          setProjectMenuId(
+                            projectMenuId === project.id ? null : project.id,
+                          )
+                        }
+                        className="rounded-md px-2 py-1 font-mono text-[13px] leading-none text-faint transition hover:bg-white/[0.07] hover:text-fg"
+                      >
+                        •••
+                      </button>
+                      {projectMenuId === project.id ? (
+                        <span className="absolute right-0 top-7 z-20 flex w-44 flex-col overflow-hidden rounded-xl border border-white/10 bg-[#121214]/95 py-1 text-[12px] shadow-[0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setProjectMenuId(null)
+                              setRemovingProject(project)
+                            }}
+                            className="px-3 py-1.5 text-left text-[#ff8080] transition hover:bg-white/[0.07]"
+                          >
+                            Remove project…
+                          </button>
+                        </span>
+                      ) : null}
+                    </span>
                   </div>
                 </header>
                 {sessions.length === 0 ? (
@@ -351,11 +406,6 @@ export default function Workspace() {
                 ) : (
                   <div
                     className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      if (drag) moveSession(drag, project.id)
-                    }}
                   >
                     {sessions.map((s, i) => (
                       <SessionCard
@@ -390,7 +440,10 @@ export default function Workspace() {
                         }}
                         onToggleMenu={setMenuId}
                         onDragStart={() => setDrag(s.id)}
-                        onDragEnd={() => setDrag(null)}
+                        onDragEnd={() => {
+                          setDrag(null)
+                          setDragOver(null)
+                        }}
                         onDropOn={() => {
                           if (drag && drag !== s.id) {
                             const ids = sessions
@@ -433,17 +486,20 @@ export default function Workspace() {
             className="grain relative max-h-[92vh] w-full max-w-xl overflow-y-auto scroll-quiet rounded-t-[20px] border border-white/10 bg-[#0b0b0e] p-6 sm:rounded-[20px]"
             onClick={(e) => e.stopPropagation()}
           >
-            <SessionForm
-              heading="New session"
-              submitLabel="Create & connect"
-              initial={{ projectId: showNew }}
-              keyOptions={store.keys}
-              withPresets
+            <NewSessionWizard
+              key={showNew}
+              initialProjectId={showNew}
+              projects={store.projects}
+              onCreateProject={(name) => createProject(name)}
+              onSubmit={(draft) => void handleCreate(draft)}
               onCancel={() => setShowNew(null)}
-              onSubmit={(draft, secret) => void handleCreate(showNew, draft, secret)}
             />
           </div>
         </div>
+      ) : null}
+
+      {showNewProject ? (
+        <NewProjectDialog onClose={() => setShowNewProject(false)} />
       ) : null}
 
       {editing ? (
@@ -487,6 +543,22 @@ export default function Workspace() {
 
       {removing ? (
         <RemoveDialog session={removing} onClose={() => setRemoving(null)} />
+      ) : null}
+
+      {removingProject ? (
+        <RemoveProjectDialog
+          projectName={removingProject.name}
+          sessionCount={
+            store.sessions.filter((s) => s.projectId === removingProject.id).length
+          }
+          onClose={() => setRemovingProject(null)}
+          onConfirm={() => {
+            const gone = removeProject(removingProject.id)
+            setRemovingProject(null)
+            // Drop live workers for the removed cards; remote tmux survives.
+            void Promise.all(gone.map((s) => releaseSession(s.id)))
+          }}
+        />
       ) : null}
 
       {showSettings ? (

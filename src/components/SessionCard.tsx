@@ -160,12 +160,13 @@ export default function SessionCard({
           animationDelay: `${index * 55}ms`,
           transform: "rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg))",
           transition: `transform 500ms ${EASE}, opacity 300ms, box-shadow 400ms`,
+          // While dragging, the card keeps its full visuals — the drop
+          // target (project section) lights up instead of the card dimming.
+          cursor: dragging ? "grabbing" : undefined,
           boxShadow:
             "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 24px 40px -18px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.5)",
         }}
-        className={`group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,90,90,0.18),0_30px_50px_-16px_rgba(0,0,0,1),0_0_60px_-20px_rgba(255,60,60,0.35)] ${
-          dragging ? "opacity-30" : ""
-        }`}
+        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,90,90,0.18),0_30px_50px_-16px_rgba(0,0,0,1),0_0_60px_-20px_rgba(255,60,60,0.35)]"
       >
         <span
           className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-500 group-hover:opacity-100"

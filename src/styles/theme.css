@@ -72,11 +72,25 @@ body,
   from { opacity: 0; transform: translate(-50%, -8px) scale(0.96); }
   to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
+/* Wizard steps drift in from the side, overshoot slightly past their
+   resting spot, then settle — forward from the right, back from the left. */
+@keyframes step-next {
+  0% { opacity: 0; transform: translateX(64px); }
+  60% { opacity: 1; transform: translateX(-10px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+@keyframes step-back {
+  0% { opacity: 0; transform: translateX(-64px); }
+  60% { opacity: 1; transform: translateX(10px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+.step-next { animation: step-next 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.step-back { animation: step-back 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .cursor-blink { animation: blink 1.1s steps(1) infinite; }
 .rise { animation: rise 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
 @media (prefers-reduced-motion: reduce) {
-  .rise, .cursor-blink { animation: none; }
+  .rise, .cursor-blink, .step-next, .step-back { animation: none; }
   *, *::before, *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;

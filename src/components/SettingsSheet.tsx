@@ -14,6 +14,49 @@ const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
 
 /**
+ * Live miniature-terminal preview. Reads the same prefs the real xterm
+ * surface uses (font size + cursor style + theme colors), so every tweak
+ * above reflects here instantly.
+ */
+function TerminalPreview({
+  fontSize,
+  cursorStyle,
+}: {
+  fontSize: number
+  cursorStyle: "block" | "underline" | "bar"
+}) {
+  return (
+    <div
+      role="img"
+      aria-label={`Terminal preview, ${fontSize}px ${cursorStyle} cursor`}
+      className="mt-3 overflow-hidden rounded-xl border border-white/[0.07] bg-[#08080a] px-4 py-3"
+    >
+      <div
+        className="font-mono leading-[1.5] text-[#ded9dd]"
+        style={{ fontSize: `${fontSize}px` }}
+      >
+        <div className="truncate">
+          <span className="text-[#ff5a5a]">deploy</span>
+          <span className="text-[#777078]">@prod-fra-02</span>{" "}
+          <span className="text-[#9a96b8]">~</span>
+        </div>
+        <div className="flex items-center gap-0 truncate">
+          <span className="shrink-0 text-[#91b587]">$&nbsp;</span>
+          <span className="truncate">nvim main.rs</span>
+          {cursorStyle === "block" ? (
+            <span className="cursor-blink ml-0.5 inline-block h-[1em] w-[0.6em] shrink-0 bg-[#ff5a5a]" />
+          ) : cursorStyle === "underline" ? (
+            <span className="cursor-blink ml-0.5 inline-block h-[1em] w-[0.6em] shrink-0 border-b-2 border-[#ff5a5a]" />
+          ) : (
+            <span className="cursor-blink ml-0.5 inline-block h-[1em] w-[2px] shrink-0 bg-[#ff5a5a]" />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * Settings sheet: terminal prefs, confirm-remove toggle, key-library entry.
  * Key text is written straight to the OS keyring — never to renderer storage.
  */
@@ -141,6 +184,13 @@ export default function SettingsSheet({
               />
             </label>
           </div>
+          <p className="mb-1 mt-3 block font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+            Preview
+          </p>
+          <TerminalPreview
+            fontSize={store.settings.terminal.fontSize}
+            cursorStyle={store.settings.terminal.cursorStyle}
+          />
         </section>
 
         <section className="mt-6">

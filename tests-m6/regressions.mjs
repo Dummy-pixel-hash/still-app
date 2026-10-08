@@ -44,8 +44,11 @@ ok("overlay doConnect is rejection-safe (no unhandled rejections)",
   overlay.includes("no unhandled promise rejections"));
 
 // --- FIX 2: single owner -----------------------------------------------------
-ok("creation flow has exactly one direct connect call site",
-  count(workspace, "await connectSession(") === 1);
+// Deferred auth: creation never carries a secret, so the overlay auto-connect
+// owns the first attempt (zero direct sites). At most one direct site is the
+// invariant — two overlapping owners must never exist.
+ok("creation flow has at most one direct connect call site",
+  count(workspace, "await connectSession(") <= 1);
 ok("overlay auto-connect yields to an in-flight/owned attempt",
   overlay.includes("isConnectPending(session.id)") &&
   overlay.includes("Single-owner rule"));
