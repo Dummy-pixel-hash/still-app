@@ -51,6 +51,8 @@ export default function SessionTerminal({
   onZoomRef.current = onZoom
   // Last dims pushed server-side; skips redundant resize traffic.
   const lastDims = useRef({ cols: 0, rows: 0 })
+  // Hoisted resizer so font changes can re-push dims (see prefs effect).
+  const pushResizeRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     const host = hostRef.current
@@ -127,6 +129,7 @@ export default function SessionTerminal({
         // proposeDimensions can throw before first layout.
       }
     }
+    pushResizeRef.current = pushResize
 
     // Keyboard -> SSH. xterm.js encodes Ctrl/Alt/arrows/F-keys itself.
     const dataDispose = terminal.onData((data) => {
@@ -153,7 +156,8 @@ export default function SessionTerminal({
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type === "keydown" && event.ctrlKey && !event.metaKey && !event.altKey) {
         const t = event.target as HTMLElement | null
-        const inField = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)
+        const inXterm = !!t && !!t.classList?.contains("xterm-helper-textarea")
+        const inField = !!t && !inXterm && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)
         const k = event.key.toLowerCase()
         const isClose = event.code === "Period" || k === "." || k === ">"
         const isZoom = ["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"].includes(event.code) || ["-", "_", "=", "+", "0"].includes(k)
@@ -171,9 +175,25 @@ export default function SessionTerminal({
         event.code === "KeyC" &&
         event.type === "keydown"
       ) {
+        event.preventDefault()
+        event.stopPropagation()
         const selection = terminal.getSelection()
-        if (selection)
-          void navigator.clipboard?.writeText(selection).catch(() => {})
+        if (selection) {
+          if (navigator.clipboard?.writeText) {
+            void navigator.clipboard.writeText(selection).catch(() => {
+              const ta = document.createElement("textarea")
+              ta.value = selection
+              document.body.appendChild(ta)
+              ta.select()
+              try {
+                document.execCommand("copy")
+              } catch {
+                // Selection stays visible for retry.
+              }
+              ta.remove()
+            })
+          }
+        }
         return false
       }
       if (
@@ -218,6 +238,7 @@ export default function SessionTerminal({
       if (raf) window.cancelAnimationFrame(raf)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
+      dataDispose.dispose()
       unsub()
       // Remember how much transcript this surface rendered, so the next
       // mount can tell growth (marker) from a plain reopen (silent repaint).
@@ -246,7 +267,10 @@ export default function SessionTerminal({
       if (terminal.options.scrollback !== prefs.scrollback) {
         terminal.options.scrollback = prefs.scrollback
       }
-      fitRef.current?.fit()
+      // Re-fit AND re-push (next frame, after xterm lays out the new
+      // font): smaller font fits more cols/rows, so the server must be
+      // told or tmux keeps drawing the old grid.
+      window.requestAnimationFrame(() => pushResizeRef.current())
     } catch {
       // Option applies best-effort only; never break the live session.
     }

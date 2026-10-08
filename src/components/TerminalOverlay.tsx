@@ -137,8 +137,10 @@ export default function TerminalOverlay({
         e.code === "NumpadAdd"
       if (!isClose && !isReset && !isZoomOut && !isZoomIn) return
       const t = e.target as HTMLElement | null
+      const inXterm = !!t && !!t.classList?.contains("xterm-helper-textarea")
       const inField =
         !!t &&
+        !inXterm &&
         (t.tagName === "INPUT" ||
           t.tagName === "TEXTAREA" ||
           t.tagName === "SELECT" ||
@@ -324,6 +326,12 @@ export default function TerminalOverlay({
         }
       }}
     >
+      {/* Always-on grab strip: pill auto-hides, this never does. */}
+      <div
+        data-tauri-drag-region
+        className="absolute inset-x-0 top-0 z-40 h-2 cursor-default"
+        aria-hidden
+      />
       <div
         className="relative h-full w-full transition-opacity"
         style={{

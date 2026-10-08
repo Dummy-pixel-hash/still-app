@@ -33,7 +33,7 @@ export default function WindowNav() {
     "h-[18px] w-[18px] transition-transform duration-200 group-hover:scale-110"
 
   return (
-    <div className="pointer-events-none absolute right-4 top-4 z-30 flex items-center gap-2.5">
+    <div className="pointer-events-none absolute left-4 right-4 top-4 z-30 flex items-center gap-2.5">
       <div
         data-tauri-drag-region
         className="pointer-events-auto h-11 flex-1 cursor-default rounded-full border border-white/[0.07] bg-black/30 backdrop-blur"
