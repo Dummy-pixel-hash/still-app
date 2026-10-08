@@ -11,6 +11,12 @@
 ## Demo
 
 🎥 Video walkthrough coming soon.
+<img width="1593" height="951" alt="image" src="https://github.com/user-attachments/assets/ac219c16-7c96-4260-86a6-601eba5b3915" />
+
+
+
+<img width="1513" height="906" alt="Screenshot 2026-10-09 002757" src="https://github.com/user-attachments/assets/9481cb7b-d993-4e88-b6db-65cdca4ca259" />
+
 
 <!--
 Demo video: drop the file in docs/ (gitignored scratch space) and point
