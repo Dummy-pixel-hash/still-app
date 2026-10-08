@@ -438,6 +438,7 @@ export default function Workspace() {
               submitLabel="Create & connect"
               initial={{ projectId: showNew }}
               keyOptions={store.keys}
+              withPresets
               onCancel={() => setShowNew(null)}
               onSubmit={(draft, secret) => void handleCreate(showNew, draft, secret)}
             />

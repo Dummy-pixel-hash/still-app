@@ -5,6 +5,12 @@ import {
   type SessionDraft,
 } from "../types"
 import { useStore, validateDraft } from "../session/store"
+import {
+  loadPresets,
+  presetLabel,
+  savePresets,
+  type SessionPreset,
+} from "../session/presets"
 
 const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
@@ -41,6 +47,7 @@ export default function SessionForm({
   heading,
   submitLabel,
   keyOptions,
+  withPresets = false,
   onSubmit,
   onCancel,
 }: {
@@ -48,6 +55,7 @@ export default function SessionForm({
   heading: string
   submitLabel: string
   keyOptions: { id: string; name: string }[]
+  withPresets?: boolean
   onSubmit: (draft: SessionDraft, secret?: string) => void
   onCancel: () => void
 }) {
@@ -67,6 +75,40 @@ export default function SessionForm({
   const [secret, setSecret] = useState("")
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [tried, setTried] = useState(false)
+  const [presets, setPresets] = useState<SessionPreset[]>(() =>
+    withPresets ? loadPresets() : [],
+  )
+
+  const applyPreset = (preset: SessionPreset) =>
+    setDraft((d) => ({
+      ...d,
+      host: preset.host,
+      port: preset.port,
+      username: preset.username,
+      workingDirectory: preset.workingDirectory,
+      authMethod: preset.authMethod,
+      ...(d.name.trim() ? {} : { name: preset.label }),
+    }))
+
+  const savePreset = () => {
+    if (!draft.host.trim()) return
+    const next = savePresets([
+      ...presets,
+      {
+        id: `preset-${Date.now().toString(36)}`,
+        label: presetLabel(draft.host, draft.username),
+        host: draft.host.trim(),
+        port: draft.port,
+        username: draft.username.trim(),
+        workingDirectory: draft.workingDirectory,
+        authMethod: draft.authMethod,
+      },
+    ])
+    setPresets(next)
+  }
+
+  const removePreset = (id: string) =>
+    setPresets(savePresets(presets.filter((p) => p.id !== id)))
 
   useEffect(() => {
     if (tried) setErrors(validateDraft(draft))
@@ -92,6 +134,45 @@ export default function SessionForm({
   return (
     <form onSubmit={submit} className="flex flex-col gap-4">
       <h2 className="font-serif text-3xl text-fg">{heading}</h2>
+
+      {withPresets ? (
+        <div className="group/presets flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+            Presets
+          </span>
+          {presets.map((preset) => (
+            <span key={preset.id} className="relative">
+              <button
+                type="button"
+                onClick={() => applyPreset(preset)}
+                title={`${preset.host || "no host"}:${preset.port}`}
+                className="rounded-full border border-white/10 bg-black/40 px-3 py-1 font-mono text-[11px] text-dim transition hover:border-[#ff4a4a]/50 hover:text-fg"
+              >
+                {preset.label}
+              </button>
+              {!preset.id.startsWith("builtin-") ? (
+                <button
+                  type="button"
+                  onClick={() => removePreset(preset.id)}
+                  aria-label={`Delete preset ${preset.label}`}
+                  className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-white/15 bg-[#17171a] text-[9px] leading-none text-dim hover:text-[#ff8080] group-hover/presets:flex"
+                >
+                  ×
+                </button>
+              ) : null}
+            </span>
+          ))}
+          <button
+            type="button"
+            onClick={savePreset}
+            disabled={!draft.host.trim()}
+            title="Save current host/port/user as a preset"
+            className="rounded-full border border-dashed border-white/15 px-3 py-1 font-mono text-[11px] text-faint transition hover:border-white/25 hover:text-fg disabled:opacity-40"
+          >
+            + save
+          </button>
+        </div>
+      ) : null}
 
       <Field label="Name" error={errors.name}>
         <input
