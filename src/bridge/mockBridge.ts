@@ -1,3 +1,4 @@
+import { readBrowserClipboard, writeBrowserClipboard } from "./browserClipboard"
 import type { NativeBridge, NativeSessionEvent } from "./nativeBridge"
 import type { ConnectionStatus } from "../types"
 
@@ -151,6 +152,10 @@ export const mockBridge: NativeBridge = {
   async windowStartDrag() {
     return undefined
   },
+
+  // The preview simulates SSH, not successful clipboard operations.
+  clipboardWriteText: writeBrowserClipboard,
+  clipboardReadText: readBrowserClipboard,
 }
 
 export { mapRemoteStatus }

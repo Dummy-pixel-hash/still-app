@@ -6,6 +6,7 @@
 // NOT a disconnect: the worker keeps running until explicit Disconnect.
 
 import { useSyncExternalStore } from "react"
+import { ByteRing } from "./byteRing"
 import {
   nativeBridge,
   type ConnectArgs,
@@ -32,7 +33,7 @@ const listeners = new Set<() => void>()
 const unsubscribers = new Map<string, () => void>()
 
 // Monotonic output transcript per local session id (in-memory only, ring).
-const transcripts = new Map<string, number[]>()
+const transcripts = new Map<string, ByteRing>()
 const TRANSCRIPT_CAP = 65536
 
 function emit() {
@@ -145,15 +146,14 @@ export function mapNativeStatus(status: string): ConnState {
 }
 
 function pushTranscript(localId: string, data: number[]) {
-  const buf = transcripts.get(localId) ?? []
-  buf.push(...data)
-  if (buf.length > TRANSCRIPT_CAP) buf.splice(0, buf.length - TRANSCRIPT_CAP)
+  const buf = transcripts.get(localId) ?? new ByteRing(TRANSCRIPT_CAP)
+  buf.append(data)
   transcripts.set(localId, buf)
 }
 
 /** In-memory scrollback snapshot (bytes) for instant terminal repaint. */
 export function transcriptSnapshot(localId: string): Uint8Array {
-  return new Uint8Array(transcripts.get(localId) ?? [])
+  return transcripts.get(localId)?.snapshot() ?? new Uint8Array()
 }
 
 export function clearTranscript(localId: string) {
@@ -170,13 +170,13 @@ const announcedLengths = new Map<string, number>()
 
 /** True when the transcript gained bytes since this surface last rendered. */
 export function needsReattachMarker(localId: string): boolean {
-  const cur = transcripts.get(localId)?.length ?? 0
+  const cur = transcripts.get(localId)?.totalBytes ?? 0
   return cur > (announcedLengths.get(localId) ?? 0)
 }
 
 /** Record that the surface has rendered the current transcript in full. */
 export function noteTranscriptRendered(localId: string) {
-  announcedLengths.set(localId, transcripts.get(localId)?.length ?? 0)
+  announcedLengths.set(localId, transcripts.get(localId)?.totalBytes ?? 0)
 }
 
 // --- Connection attempt ownership -------------------------------------------

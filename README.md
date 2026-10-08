@@ -82,3 +82,47 @@ node tests-m5/regressions.mjs
 
 `hostkey_m5` needs a local sshd on 127.0.0.1:22222 with `PerSourcePenalties no`
 (the refusals it deliberately triggers are otherwise throttled by sshd).
+
+## Terminal input, scrolling, and clipboard
+
+- **Copy:** `Ctrl+Shift+C` copies the current xterm selection through the native
+  OS clipboard. In a mouse-enabled TUI, **Shift-drag** selects local terminal text.
+  tmux/TUI selections sent via OSC 52 are also supported: Still shows “TUI
+  selection ready”; `Ctrl+Shift+C` transfers that selection to the OS clipboard.
+  Local selection wins. Remote requests alone never modify or read the clipboard.
+  Staged transfers are bounded to 1 MiB, expire after 30 seconds, and are not
+  restored from transcript replay or across connections.
+- **Paste:** `Ctrl+Shift+V` reads the OS clipboard once and calls xterm's paste API.
+  Bracketed paste is honored when the remote application enables it. Applications
+  that do not enable bracketed paste may still interpret embedded newlines as Enter.
+- **Scroll:** normal scrollback stays local. Touchpad deltas in mouse-reporting
+  or alternate-screen applications are accumulated into line steps, retaining
+  magnitude instead of discarding it; each gesture's reports share one IPC write.
+- Output bypasses per-chunk disk diagnostics and an extra animation-frame queue.
+  Transcript append uses a bounded byte ring, not repeated whole-array shifts.
+- Connect applies mouse/history settings to the Still session and enables supported
+  tmux server keyboard/clipboard options. `set-clipboard on` permits application
+  OSC 52 transfers; Still still requires the explicit local copy shortcut. The
+  history limit affects future panes, not history already discarded. No server
+  restart or edits to `~/.tmux.conf` are needed; **do not kill existing sessions**.
+
+### Verify terminal behavior
+
+```sh
+npm run typecheck
+npm run build
+# Install a test browser once, or set STILL_TEST_BROWSER to an installed Chrome.
+npx playwright install chromium
+npm run test:terminal
+npm run bench:terminal
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins
+cargo test --locked --manifest-path src-tauri/Cargo.toml --test tmux_options
+# Unix + Python + tmux: real PTY wheel/copy-mode/OSC52 check on a private socket.
+python3 tests-terminal/tmux-pty.py
+```
+
+Browser interaction tests use real xterm, including its alternate-screen and
+mouse protocols; only the SSH/OS clipboard bridge is mocked. The packaged
+Windows clipboard and physical touchpad still need a Windows runtime check.
+The legacy M3 source check for `authOpen` currently fails independently of these
+changes (M5 and M6 pass); it is not masked or removed by the new tests.

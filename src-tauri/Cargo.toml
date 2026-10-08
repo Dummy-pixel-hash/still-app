@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+tauri-plugin-clipboard-manager = "2"
 keyring = "4.2.0"
 russh = "0.63.3"
 serde = { version = "1.0.229", features = ["derive"] }

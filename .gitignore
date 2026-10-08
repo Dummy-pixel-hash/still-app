@@ -8,3 +8,5 @@ src-tauri/gen/
 *-debug.log*
 logs/
 *.log
+test-results/
+playwright-report/

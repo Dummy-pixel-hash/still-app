@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow } from "@tauri-apps/api/window"
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
 import type {
   ConnectArgs,
@@ -126,8 +127,8 @@ export const tauriBridge: NativeBridge = {
   },
 
   async subscribeToSession(sessionId, callback) {
-    // DIAG-ONLY: trace listen start/resolve + every received SessionEvent
-    // type so we can tell "Rust never emitted" from "WebView never got it".
+    // Trace lifecycle events only. Logging each output chunk added a second
+    // IPC round-trip and filesystem write to every TUI redraw.
     const t0 = Date.now()
     diagRecord({ stage: "SUBSCRIBE_START", localId: "", nativeId: sessionId })
     let unlisten: () => void
@@ -135,12 +136,13 @@ export const tauriBridge: NativeBridge = {
       const p = listen<NativeSessionEvent>(
         `still://session-event/${sessionId}`,
         (event) => {
-          // Count + type only; data payloads (byte counts) stay Rust-side.
-          diagRecord({
-            stage: `EVENT_RECEIVED_${event.payload?.type ?? "unknown"}`,
-            localId: "",
-            nativeId: sessionId,
-          })
+          if (event.payload.type !== "data") {
+            diagRecord({
+              stage: `EVENT_RECEIVED_${event.payload.type}`,
+              localId: "",
+              nativeId: sessionId,
+            })
+          }
           callback(event.payload)
         },
       )
@@ -204,6 +206,10 @@ export const tauriBridge: NativeBridge = {
   async forgetKeySecret(keyId: string) {
     await invoke("still_forget_key", { args: { keyId } })
   },
+
+  // Explicit user copy/paste only; never invoked by remote OSC read queries.
+  clipboardWriteText: writeText,
+  clipboardReadText: readText,
 
   async windowMinimize() {
     await getCurrentWindow().minimize()

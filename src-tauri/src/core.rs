@@ -149,18 +149,15 @@ impl TmuxPlan {
         }
     }
 
-    /// `tmux -u new-session -A -s <name> -x <cols> -y <rows> \; ...\n`
-    /// (-A = attach if exists else create: the persistence primitive.
-    /// `status off` hides tmux's own bottom status bar inside Still — the
-    /// renderer draws its own chrome, so the remote bar only steals a row
-    /// and breaks TUI layouts. Trailing `set-option -s` lines are server
-    /// options: `extended-keys on` + `csi-u` lets TUI apps (pi) tell
-    /// Shift/Ctrl+Enter apart from plain Enter. Attach already succeeded by
-    /// then, so an unknown-option error on old tmux is one noisy line, not
-    /// a broken session.)
+    /// Attach/create first, then configure this session's mouse/scrollback.
+    /// History limits apply to future panes, not to history already discarded.
+    /// Optional server keyboard options are quiet on older tmux versions so
+    /// they cannot abort the command queue before mouse support is configured.
+    /// set-clipboard permits TUI/tmux OSC 52 transfers; the renderer stages
+    /// these until an explicit Ctrl+Shift+C and never answers clipboard reads.
     pub fn attach_command(&self, cols: u32, rows: u32) -> String {
         format!(
-            "tmux -u new-session -A -s {n} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -s extended-keys on \\; set-option -s extended-keys-format csi-u \\; set-option -s mouse on \\; set-option -s history-limit 10000\n",
+            "tmux -u new-session -A -s {n} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n",
             n = self.session_name,
             c = cols,
             r = rows
@@ -327,11 +324,11 @@ pub fn new_session_map() -> SessionMap {
 mod tests {   use super::*;
 
     #[test]
-    fn attach_command_matches_flutter() {
+    fn attach_command_configures_input_without_killing_sessions() {
         let p = TmuxPlan::new("still");
         assert_eq!(
             p.attach_command(80, 24),
-            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -s extended-keys on \\; set-option -s extended-keys-format csi-u \\; set-option -s mouse on \\; set-option -s history-limit 10000\n"
+            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -t still mouse on \\; set-option -t still history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n"
         );
     }
 

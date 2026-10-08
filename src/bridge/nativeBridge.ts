@@ -108,6 +108,10 @@ export interface NativeBridge {
   /** Remove key text for a library entry id from the OS keyring. */
   forgetKeySecret(keyId: string): Promise<void>
 
+  // --- Clipboard (centralized through native bridge) ---
+  clipboardWriteText(text: string): Promise<void>
+  clipboardReadText(): Promise<string>
+
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<void>
   windowClose(): Promise<void>
@@ -196,5 +200,12 @@ export const failingBridge: NativeBridge = {
   },
   async windowStartDrag(): Promise<void> {
     throw new Error("No native runtime: window controls unavailable.")
+  },
+
+  async clipboardWriteText(): Promise<void> {
+    throw new Error("No native runtime: clipboard unavailable.")
+  },
+  async clipboardReadText(): Promise<string> {
+    throw new Error("No native runtime: clipboard unavailable.")
   },
 }

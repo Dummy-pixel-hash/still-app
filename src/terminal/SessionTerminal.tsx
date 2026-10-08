@@ -1,15 +1,20 @@
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import {
   needsReattachMarker,
+  nativeSessionId,
   noteTranscriptRendered,
   resizeSession,
   subscribeSessionData,
   transcriptSnapshot,
+  useConnections,
   writeSession,
 } from "../session/connections"
+import { nativeBridge } from "../bridge/nativeBridge"
+import { bindTerminalClipboard } from "./clipboard"
+import { bindApplicationWheel } from "./wheel"
 import type { TerminalPrefs } from "../types"
 
 const textEncoder = new TextEncoder()
@@ -40,6 +45,15 @@ export default function SessionTerminal({
   onClose?: () => void
   onZoom?: (delta: number | "reset") => void
 }) {
+  useConnections()
+  const transportId = nativeSessionId(localId)
+  const [feedback, setFeedback] = useState("")
+  const feedbackTimer = useRef(0)
+  const notify = useCallback((message: string) => {
+    setFeedback(message)
+    window.clearTimeout(feedbackTimer.current)
+    feedbackTimer.current = window.setTimeout(() => setFeedback(""), 4000)
+  }, [])
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -50,7 +64,7 @@ export default function SessionTerminal({
   const onZoomRef = useRef(onZoom)
   onZoomRef.current = onZoom
   // Last dims pushed server-side; skips redundant resize traffic.
-  const lastDims = useRef({ cols: 0, rows: 0 })
+  const lastDims = useRef({ nativeId: null as string | null, cols: 0, rows: 0 })
   // Hoisted resizer so font changes can re-push dims (see prefs effect).
   const pushResizeRef = useRef<() => void>(() => {})
 
@@ -96,18 +110,22 @@ export default function SessionTerminal({
     terminalRef.current = terminal
     fitRef.current = fit
 
-    // Repaint recent transcript instantly (reconnect/reopen continuity).
-    // The synthetic marker is painted only when the transcript GREW since
-    // this surface last rendered it (bytes arrived while the overlay was
-    // closed, e.g. across a disconnect/reconnect) — repeated opens of the
-    // same live session repaint silently instead of stacking markers.
+    const clipboard = bindTerminalClipboard({
+      terminal,
+      host,
+      bridge: () => nativeBridge,
+      sessionId: () => nativeSessionId(localRef.current),
+      notify,
+    })
+    // Repaint only remote bytes. App notices must not move the TUI cursor,
+    // and replayed OSC 52 sequences must never stage an old clipboard copy.
     const snapshot = transcriptSnapshot(localRef.current)
     if (snapshot.length > 0) {
-      terminal.write(snapshot)
-      if (needsReattachMarker(localRef.current)) {
-        terminal.write("\r\n\x1b[90m[reattached — live output resumes below]\x1b[0m\r\n")
-      }
+      terminal.write(snapshot, clipboard.endReplay)
+      if (needsReattachMarker(localRef.current)) notify("Session reattached")
       noteTranscriptRendered(localRef.current)
+    } else {
+      clipboard.endReplay()
     }
 
     const pushResize = () => {
@@ -118,11 +136,13 @@ export default function SessionTerminal({
           // Skip no-op resizes: each push also repaints server-side, so
           // only notify when dims actually changed. First push always goes
           // through (lastCols/Rows start at 0) so attach gets real dims.
-          if (dims.cols !== lastDims.current.cols || dims.rows !== lastDims.current.rows) {
-            lastDims.current = { cols: dims.cols, rows: dims.rows }
-            void resizeSession(localRef.current, dims.cols, dims.rows).catch(
-              () => {},
-            )
+          const nativeId = nativeSessionId(localRef.current)
+          if (nativeId && (nativeId !== lastDims.current.nativeId || dims.cols !== lastDims.current.cols || dims.rows !== lastDims.current.rows)) {
+            const sent = { nativeId, cols: dims.cols, rows: dims.rows }
+            lastDims.current = sent
+            void resizeSession(localRef.current, dims.cols, dims.rows).catch(() => {
+              if (lastDims.current === sent) lastDims.current = { nativeId: null, cols: 0, rows: 0 }
+            })
           }
         }
       } catch {
@@ -131,11 +151,32 @@ export default function SessionTerminal({
     }
     pushResizeRef.current = pushResize
 
-    // Keyboard -> SSH. xterm.js encodes Ctrl/Alt/arrows/F-keys itself.
-    const dataDispose = terminal.onData((data) => {
-      void writeSession(localRef.current, textEncoder.encode(data)).catch(
-        () => {},
-      )
+    // One IPC write per wheel gesture, not one per generated mouse report.
+    // Ordinary keyboard/paste input remains immediate and in byte order.
+    let inputBatch: Uint8Array[] | null = null
+    const sendInput = (bytes: Uint8Array) => {
+      if (inputBatch) inputBatch.push(bytes)
+      else void writeSession(localRef.current, bytes).catch(() => {})
+    }
+    const dataDispose = terminal.onData(data => sendInput(textEncoder.encode(data)))
+    const binaryDispose = terminal.onBinary(data =>
+      sendInput(Uint8Array.from(data, c => c.charCodeAt(0) & 255)),
+    )
+    const unbindWheel = bindApplicationWheel(terminal, host, dispatch => {
+      const chunks: Uint8Array[] = []
+      inputBatch = chunks
+      try {
+        dispatch()
+      } finally {
+        inputBatch = null
+        const length = chunks.reduce((n, chunk) => n + chunk.length, 0)
+        if (length) {
+          const bytes = new Uint8Array(length)
+          let offset = 0
+          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+          sendInput(bytes)
+        }
+      }
     })
 
     let resizeTimer = 0
@@ -147,8 +188,9 @@ export default function SessionTerminal({
     observer.observe(host)
     window.addEventListener("resize", debounced)
 
-    // Initial size once laid out.
-    const t = window.setTimeout(pushResize, 150)
+    // Initial fit on the next layout frame; nativeId changes trigger another
+    // push below so a pre-connect fit cannot swallow the first real resize.
+    const t = window.requestAnimationFrame(pushResize)
 
     // Backstop only: the overlay's capture-phase gate owns shortcuts and
     // stops them before xterm sees them. This covers the case where the
@@ -169,78 +211,28 @@ export default function SessionTerminal({
           return false
         }
       }
-      if (
-        event.ctrlKey &&
-        event.shiftKey &&
-        event.code === "KeyC" &&
-        event.type === "keydown"
-      ) {
-        event.preventDefault()
-        event.stopPropagation()
-        const selection = terminal.getSelection()
-        if (selection) {
-          if (navigator.clipboard?.writeText) {
-            void navigator.clipboard.writeText(selection).catch(() => {
-              const ta = document.createElement("textarea")
-              ta.value = selection
-              document.body.appendChild(ta)
-              ta.select()
-              try {
-                document.execCommand("copy")
-              } catch {
-                // Selection stays visible for retry.
-              }
-              ta.remove()
-            })
-          }
-        }
-        return false
-      }
-      if (
-        event.ctrlKey &&
-        event.shiftKey &&
-        event.code === "KeyV" &&
-        event.type === "keydown"
-      ) {
-        // One path only: terminal.paste() sends bracketed paste
-        // (\x1b[200~...\x1b[201~) so apps see it as paste and never
-        // auto-execute. Returning false stops xterm's own paste too.
-        event.preventDefault()
-        event.stopPropagation()
-        void navigator.clipboard
-          ?.readText()
-          .then((text) => {
-            if (text) terminal.paste(text)
-          })
-          .catch(() => {})
-        return false
-      }
       return true
     })
 
-    // Coalesce bursty SSH chunks into one term.write per frame.
-    let pending: number[] = []
-    let raf = 0
-    const flush = () => {
-      raf = 0
-      if (pending.length === 0) return
-      terminal.write(new Uint8Array(pending))
-      pending = []
-    }
+    // xterm already queues parsing/rendering. An additional per-frame output
+    // queue added latency and grew without bound in a background WebView.
     const unsub = subscribeSessionData(localRef.current, (data) => {
-      pending.push(...data)
-      if (!raf) raf = window.requestAnimationFrame(flush)
+      terminal.write(Uint8Array.from(data))
     })
 
     terminal.focus()
 
     return () => {
-      window.clearTimeout(t)
+      window.cancelAnimationFrame(t)
       window.clearTimeout(resizeTimer)
-      if (raf) window.cancelAnimationFrame(raf)
+      window.clearTimeout(feedbackTimer.current)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
+      clipboard.dispose()
+      unbindWheel()
       dataDispose.dispose()
+      binaryDispose.dispose()
+      pushResizeRef.current = () => {}
       unsub()
       // Remember how much transcript this surface rendered, so the next
       // mount can tell growth (marker) from a plain reopen (silent repaint).
@@ -272,20 +264,29 @@ export default function SessionTerminal({
       // Re-fit AND re-push (next frame, after xterm lays out the new
       // font): smaller font fits more cols/rows, so the server must be
       // told or tmux keeps drawing the old grid.
-      window.requestAnimationFrame(() => pushResizeRef.current())
+      const frame = window.requestAnimationFrame(() => pushResizeRef.current())
+      return () => window.cancelAnimationFrame(frame)
     } catch {
       // Option applies best-effort only; never break the live session.
     }
-  }, [prefs.fontSize, prefs.cursorStyle, prefs.scrollback])
+  }, [prefs.fontSize, prefs.cursorStyle, prefs.scrollback, transportId])
 
   return (
     <div
       ref={hostRef}
       id={`still-term-${localRef.current}`}
       onClick={() => terminalRef.current?.focus()}
-      className="h-full min-h-0 w-full cursor-text px-3 py-2 [&_.xterm]:h-full"
+      className="relative h-full min-h-0 w-full cursor-text px-3 py-2 [&_.xterm]:h-full"
       aria-label="Terminal"
-    />
+    >
+      <div
+        role="status"
+        aria-live="polite"
+        className="pointer-events-none absolute bottom-3 left-4 right-4 z-10 text-sm text-fg"
+      >
+        {feedback && <span className="inline-block rounded-md bg-[#17171a] px-3 py-2">{feedback}</span>}
+      </div>
+    </div>
   )
 }
 

@@ -126,8 +126,9 @@ pub fn record(
         let _ = f.write_all(line.as_bytes());
         // Prompt flush: evidence must survive a hung/crashed process.
         let _ = f.flush();
-        // Belt-and-braces on Windows: also push bytes to disk.
-        let _ = f.sync_all();
+        // sync_all removed from hot path: per-chunk fsync stalled
+        // interactive redraws on Windows ARM64. Evidence still
+        // survives a normal process exit (OS flushes on close).
     }
 }
 

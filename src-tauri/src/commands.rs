@@ -301,17 +301,8 @@ async fn still_connect_inner(
                                 None,
                             );
                         }
-                        SessionEvent::Data { data } => {
-                            diag::record(
-                                "rust",
-                                "EVENT_EMITTED_DATA",
-                                &diag_local_e,
-                                &sid_e,
-                                true,
-                                "",
-                                &format!("{} bytes", data.len()),
-                                None,
-                            );
+                        SessionEvent::Data { .. } => {
+                            // Terminal output must not wait for synchronous disk logging.
                         }
                         SessionEvent::HostKeyPrompt { .. } => {
                             diag::ok(

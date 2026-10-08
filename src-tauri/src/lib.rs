@@ -40,6 +40,7 @@ pub fn run() {
     // DIAG-ONLY: first native record — proves the diagnostic build runs.
     crate::diag::app_start();
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             still_ping,

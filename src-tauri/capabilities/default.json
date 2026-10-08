@@ -12,6 +12,8 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
     "core:event:allow-listen",
-    "core:event:allow-emit"
+    "core:event:allow-emit",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text"
   ]
 }
