@@ -4,7 +4,8 @@
 > disconnects, reattach anytime — including the sessions where your
 > coding agent keeps working after you close the laptop.
 
-[![Windows build](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml/badge.svg)](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml)
+[![Windows ARM64 build](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml/badge.svg)](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml)
+[![Windows x64 build](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-x64.yml/badge.svg)](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-x64.yml)
 [![Latest release](https://img.shields.io/github/v/release/Dummy-pixel-hash/still-app)](https://github.com/Dummy-pixel-hash/still-app/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
 
