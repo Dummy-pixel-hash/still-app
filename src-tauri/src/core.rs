@@ -149,15 +149,21 @@ impl TmuxPlan {
         }
     }
 
-    /// `tmux -u new-session -A -s <name> -x <cols> -y <rows> \; set-option -t <name> status off\n`
+    /// `tmux -u new-session -A -s <name> -x <cols> -y <rows> \; ...\n`
     /// (-A = attach if exists else create: the persistence primitive.
     /// `status off` hides tmux's own bottom status bar inside Still — the
     /// renderer draws its own chrome, so the remote bar only steals a row
-    /// and breaks TUI layouts.)
+    /// and breaks TUI layouts. Trailing `set-option -s` lines are server
+    /// options: `extended-keys on` + `csi-u` lets TUI apps (pi) tell
+    /// Shift/Ctrl+Enter apart from plain Enter. Attach already succeeded by
+    /// then, so an unknown-option error on old tmux is one noisy line, not
+    /// a broken session.)
     pub fn attach_command(&self, cols: u32, rows: u32) -> String {
         format!(
-            "tmux -u new-session -A -s {} -x {} -y {} \\; set-option -t {} status off\n",
-            self.session_name, cols, rows, self.session_name
+            "tmux -u new-session -A -s {n} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -s extended-keys on \\; set-option -s extended-keys-format csi-u \\; set-option -s mouse on \\; set-option -s history-limit 10000\n",
+            n = self.session_name,
+            c = cols,
+            r = rows
         )
     }
 
@@ -325,7 +331,7 @@ mod tests {   use super::*;
         let p = TmuxPlan::new("still");
         assert_eq!(
             p.attach_command(80, 24),
-            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off\n"
+            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -s extended-keys on \\; set-option -s extended-keys-format csi-u \\; set-option -s mouse on \\; set-option -s history-limit 10000\n"
         );
     }
 

@@ -129,7 +129,7 @@ async fn headless_real_ssh_tmux_roundtrip() {
     check(
         "T1 tmux attach command",
         still_app::core::TmuxPlan::new("still-m1-test").attach_command(80, 24)
-            == "tmux -u new-session -A -s still-m1-test -x 80 -y 24 \\; set-option -t still-m1-test status off\n",
+            == "tmux -u new-session -A -s still-m1-test -x 80 -y 24 \\; set-option -t still-m1-test status off \\; set-option -s extended-keys on \\; set-option -s extended-keys-format csi-u \\; set-option -s mouse on \\; set-option -s history-limit 10000\n",
     );
 
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel();

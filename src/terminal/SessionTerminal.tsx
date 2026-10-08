@@ -202,13 +202,15 @@ export default function SessionTerminal({
         event.code === "KeyV" &&
         event.type === "keydown"
       ) {
+        // One path only: terminal.paste() sends bracketed paste
+        // (\x1b[200~...\x1b[201~) so apps see it as paste and never
+        // auto-execute. Returning false stops xterm's own paste too.
+        event.preventDefault()
+        event.stopPropagation()
         void navigator.clipboard
           ?.readText()
           .then((text) => {
-            if (text)
-              void writeSession(localRef.current, textEncoder.encode(text)).catch(
-                () => {},
-              )
+            if (text) terminal.paste(text)
           })
           .catch(() => {})
         return false
