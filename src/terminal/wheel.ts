@@ -36,11 +36,12 @@ export function bindApplicationWheel(
   const forwarded = new WeakSet<Event>()
   const element = terminal.element!
   const screen = element.querySelector<HTMLElement>(".xterm-screen")!
+  let glideId = 0
   const onWheel = (event: WheelEvent) => {
     if (forwarded.has(event)) return
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
       steps.reset()
-      return // Pinch/modifier gestures are not ordinary scrolling.
+      return
     }
     const mouse = terminal.modes.mouseTrackingMode
     if (mouse === "none" && terminal.buffer.active.type !== "alternate") {
@@ -51,22 +52,45 @@ export function bindApplicationWheel(
     const rowHeight = screen.getBoundingClientRect().height / terminal.rows
     if (rowHeight <= 0) return
     const count = steps.consume(event.deltaY, event.deltaMode, rowHeight, terminal.rows)
+    if (count === 0) return
+
     event.preventDefault()
     event.stopImmediatePropagation()
-    batchInput(() => {
-      for (let i = 0; i < Math.abs(count); i++) {
-        const normalized = new WheelEvent("wheel", {
-          bubbles: true,
-          cancelable: true,
-          deltaMode: WheelEvent.DOM_DELTA_LINE,
-          deltaY: Math.sign(count),
-          clientX: event.clientX,
-          clientY: event.clientY,
+
+    const thisGlideId = ++glideId
+    const sign = Math.sign(count)
+    const DURATION = 150
+    const STEP_MS = 16
+    let elapsed = 0
+    const collected: WheelEvent[] = []
+
+    function nextFrame() {
+      if (thisGlideId !== glideId || elapsed >= DURATION) return
+      elapsed += STEP_MS
+
+      const normalized = new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        deltaY: sign,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      })
+      forwarded.add(normalized)
+      element.dispatchEvent(normalized)
+      collected.push(normalized)
+
+      if (elapsed >= DURATION || thisGlideId !== glideId) {
+        batchInput(() => {
+          for (const ev of collected) {
+            element.dispatchEvent(ev)
+          }
         })
-        forwarded.add(normalized)
-        element.dispatchEvent(normalized)
       }
-    })
+
+      requestAnimationFrame(nextFrame)
+    }
+    requestAnimationFrame(nextFrame)
   }
   host.addEventListener("wheel", onWheel, { capture: true, passive: false })
   return () => host.removeEventListener("wheel", onWheel, { capture: true })
