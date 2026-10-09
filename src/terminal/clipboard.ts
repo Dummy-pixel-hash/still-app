@@ -131,23 +131,6 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       copying = false
     }
   }
-  const paste = async () => {
-    if (pasting) return
-    const targetSession = syncOwner()
-    if (!targetSession) { notify("Connect before pasting."); return }
-    pasting = true
-    try {
-      const text = await bridge().clipboardReadText()
-      // A pending permission/read result must not paste into a new session or dialog.
-      if (alive && targetSession === syncOwner() && host.contains(document.activeElement)) {
-        if (text) terminal.paste(text)
-      }
-    } catch {
-      if (alive) notify("Paste failed. Clipboard access was denied; use the paste menu or retry.")
-    } finally {
-      pasting = false
-    }
-  }
   const pasteImage = async (blob: Blob) => {
     if (pasting) return
     const targetSession = syncOwner()
@@ -180,13 +163,11 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey || event.isComposing) return
     const key = event.key.toLowerCase()
     const isCopy = event.code === "KeyC" || key === "c"
-    const isPaste = event.code === "KeyV" || key === "v"
-    if (!isCopy && !isPaste) return
+    if (!isCopy) return
     event.preventDefault()
     event.stopImmediatePropagation()
     if (event.repeat) return
-    if (isCopy) void copy()
-    else void paste()
+    void copy()
   }
   host.addEventListener("keydown", onKey, { capture: true })
   // Image paste: Ctrl+V / context-menu paste surfaces a ClipboardEvent on the
@@ -211,10 +192,20 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
         }
       }
     }
-    if (!image) return
+    if (image) {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      void pasteImage(image)
+      return
+    }
+    const text = data.getData("text/plain")
+    if (!text) return
+    if (!host.contains(document.activeElement)) return
+    const target = syncOwner()
+    if (!target) return
     event.preventDefault()
     event.stopImmediatePropagation()
-    void pasteImage(image)
+    terminal.paste(text)
   }
   host.addEventListener("paste", onPasteEvent)
   return {
