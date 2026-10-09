@@ -46,6 +46,13 @@ body,
   display: none;
 }
 
+.xterm-viewport {
+  scrollbar-width: none;
+}
+.xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
 .grain::after {
   content: '';
   position: absolute;
