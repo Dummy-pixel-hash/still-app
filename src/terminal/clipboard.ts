@@ -102,6 +102,56 @@ function blobToBase64(blob: Blob): Promise<string> {
   })
 }
 
+/**
+ * Floating thumbnail so a paste is visibly acknowledged even when the
+ * remote `ls -l` output lands somewhere the user can't see it (e.g. a
+ * fullscreen TUI owns the screen). Self-contained: appends an <img> to
+ * the terminal host, removes it after a few seconds or on click.
+ * Returns a cleanup function.
+ */
+function showImagePreview(host: HTMLElement, blob: Blob, caption: string): () => void {
+  const url = URL.createObjectURL(blob)
+  const box = document.createElement("div")
+  box.setAttribute("role", "status")
+  box.setAttribute("aria-label", caption)
+  box.style.cssText = [
+    "position:absolute", "top:12px", "right:12px", "z-index:30",
+    "max-width:220px", "border-radius:10px", "overflow:hidden",
+    "background:rgba(18,18,20,0.92)", "border:1px solid rgba(255,255,255,0.14)",
+    "box-shadow:0 12px 32px rgba(0,0,0,0.6)", "cursor:pointer",
+  ].join(";")
+  const img = document.createElement("img")
+  img.src = url
+  img.alt = caption
+  img.style.cssText = "display:block;max-width:220px;max-height:160px;object-fit:contain;background:#000"
+  const label = document.createElement("div")
+  label.textContent = caption
+  label.style.cssText = "padding:6px 10px;font:11px ui-monospace,monospace;color:#ded9dd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+  box.appendChild(img)
+  box.appendChild(label)
+  host.appendChild(box)
+  let gone = false
+  const cleanup = () => {
+    if (gone) return
+    gone = true
+    window.clearTimeout(timer)
+    box.remove()
+    URL.revokeObjectURL(url)
+  }
+  const timer = window.setTimeout(cleanup, 9000)
+  box.addEventListener("click", cleanup)
+  return cleanup
+}
+
+/** True when a fullscreen app (agent TUI, vim, tmux copy-mode…) owns the screen. */
+function isAlternateScreen(terminal: Terminal): boolean {
+  try {
+    return terminal.buffer.active.type === "alternate"
+  } catch {
+    return false
+  }
+}
+
 /** Local copy and explicit, bounded TUI clipboard transfers share one shortcut. */
 export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notify, write }: {
   terminal: Terminal
@@ -118,6 +168,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
   let pasting = false
   let owner = sessionId()
   let remoteCopy: { text: string; time: number } | null = null
+  let clearPreview: (() => void) | null = null
   const syncOwner = () => {
     const current = sessionId()
     if (current !== owner) { owner = current; remoteCopy = null }
@@ -175,10 +226,25 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     try {
       const base64 = await blobToBase64(blob)
       const remotePath = imageRemotePath(imageUploadFileName(new Date(), blob.type))
-      const script = `${buildImageUploadScript(remotePath, base64)}\n`
+      // Always show the image locally first: the remote `ls -l` output is
+      // invisible when a fullscreen app owns the screen, and the user must
+      // SEE that the paste landed.
+      if (alive) {
+        clearPreview?.()
+        clearPreview = showImagePreview(host, blob, `Image • ${formatBytes(blob.size)}`)
+      }
       // A pending read must not paste into a new session.
       if (!alive || targetSession !== syncOwner()) {
         if (alive) notify("Session changed — image paste cancelled.")
+        return
+      }
+      // Never type a shell script into a fullscreen TUI (agent UI, editor,
+      // pager…): those keystrokes land in the app, not a shell — no file is
+      // created and the TUI input gets trashed. Upload only at a shell prompt.
+      if (isAlternateScreen(terminal)) {
+        if (alive) {
+          notify("Fullscreen app is active — image kept in preview. Exit to a shell prompt and paste again to upload to ~/still-uploads.")
+        }
         return
       }
       // Direct write, NOT terminal.paste: xterm would wrap the payload in
@@ -186,6 +252,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       // enables mode 2004, corrupting the upload. Chunked to avoid one
       // giant IPC payload. No focus gate: focus may move during the async
       // read, and focus is irrelevant to a direct write.
+      const script = `${buildImageUploadScript(remotePath, base64)}\n`
       const bytes = new TextEncoder().encode(script)
       const send = write ?? (async (chunk: Uint8Array) => {
         terminal.paste(new TextDecoder().decode(chunk))
@@ -264,6 +331,8 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     dispose: () => {
       alive = false
       remoteCopy = null
+      clearPreview?.()
+      clearPreview = null
       osc.dispose()
       host.removeEventListener("keydown", onKey, { capture: true })
       host.removeEventListener("paste", onPasteEvent)
