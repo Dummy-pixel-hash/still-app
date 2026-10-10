@@ -42,15 +42,14 @@ export function bindApplicationWheel(
       steps.reset()
       return // Pinch/modifier gestures are not ordinary scrolling.
     }
-    // Scrolled back into local scrollback: let the browser scroll the xterm
-    // viewport (smooth, native). Only forward once pinned to the bottom.
-    if (terminal.buffer.active.viewportY < terminal.buffer.active.baseY) return
-    const mouse = terminal.modes.mouseTrackingMode
-    if (mouse === "none" && terminal.buffer.active.type !== "alternate") {
+    if (!(event.target instanceof Node) || !element.contains(event.target)) return
+    // Normal buffer: hands off. xterm checks scrollback before mouse
+    // reports, so the viewport scrolls natively with zero IPC. Forwarding
+    // here is what dragged every tick into tmux copy-mode.
+    if (terminal.buffer.active.type !== "alternate") {
       steps.reset()
       return
     }
-    if (!(event.target instanceof Node) || !element.contains(event.target)) return
     const rowHeight = screen.getBoundingClientRect().height / terminal.rows
     if (rowHeight <= 0) return
     const count = steps.consume(event.deltaY, event.deltaMode, rowHeight, terminal.rows)
