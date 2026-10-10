@@ -116,6 +116,7 @@ export default function SessionTerminal({
       bridge: () => nativeBridge,
       sessionId: () => nativeSessionId(localRef.current),
       notify,
+      write: (bytes) => writeSession(localRef.current, bytes),
     })
     // Repaint only remote bytes. App notices must not move the TUI cursor,
     // and replayed OSC 52 sequences must never stage an old clipboard copy.

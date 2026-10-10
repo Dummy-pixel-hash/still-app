@@ -9,7 +9,15 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 /** Remote directory receiving pasted images (created on demand). */
 export const IMAGE_UPLOAD_DIR = "$HOME/still-uploads"
 
-const IMAGE_EOF = "STILL_IMAGE_EOF"
+/** Base64 payload chars per printf line (heredoc-free, shell-agnostic). */
+const B64_CHUNK = 4096
+
+/** Max bytes per still_write IPC chunk (avoids one giant JSON payload). */
+export const WRITE_CHUNK_BYTES = 32 * 1024
+
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
 
 /** OSC 52 write only: never answer a remote clipboard read/query. */
 export function decodeClipboardRequest(data: string): string | null {
@@ -44,13 +52,31 @@ export function imageRemotePath(fileName: string): string {
 
 /**
  * Shell script that recreates `base64` bytes at `remotePath` on the REMOTE
- * host using only POSIX coreutils (no SFTP channel needed). Sent through the
- * existing PTY input path, so it lands in the shell exactly like typed text.
- * Base64 output is heredoc-safe (no quotes/backticks/dollars by construction).
+ * host without SFTP and without heredocs.
+ *
+ * Why no heredoc: the old `<<'EOF'` form hung whenever the remote had
+ * bracketed-paste enabled (xterm wraps the paste in ESC[200~…ESC[201~, so
+ * the EOF line never matched) and it failed on macOS (`base64 -d` vs `-D`)
+ * and on fish (no `<<` heredocs). This form uses one `printf '%s'` append
+ * per chunk (base64 alphabet needs no quoting) plus a single `sh -c`
+ * decode line, so it works from bash/zsh/fish alike. Sent via direct
+ * session write (not terminal.paste), so no bracketed markers are added.
  */
 export function buildImageUploadScript(remotePath: string, base64: string): string {
   const quoted = `"${remotePath.replace(/"/g, '\\"')}"`
-  return `mkdir -p ${IMAGE_UPLOAD_DIR} && base64 -d > ${quoted} <<'${IMAGE_EOF}'\n${base64}\n${IMAGE_EOF}`
+  const b64Path = `"${remotePath.replace(/"/g, '\\"')}.b64"`
+  const lines: string[] = []
+  lines.push(`mkdir -p "${IMAGE_UPLOAD_DIR}" && rm -f ${b64Path}`)
+  const clean = base64.replace(/\s+/g, "")
+  for (let i = 0; i < clean.length; i += B64_CHUNK) {
+    lines.push(`printf '%s' '${clean.slice(i, i + B64_CHUNK)}' >> ${b64Path}`)
+  }
+  const decode =
+    `base64 -d ${b64Path} > ${quoted} 2>/dev/null || ` +
+    `base64 -D ${b64Path} > ${quoted} 2>/dev/null || ` +
+    `openssl base64 -d -in ${b64Path} -out ${quoted}`
+  lines.push(`sh -c ${shSingleQuote(`${decode} && rm -f ${b64Path} && ls -l ${quoted}`)}`)
+  return lines.join("\n")
 }
 
 export function formatBytes(bytes: number): string {
@@ -77,12 +103,14 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /** Local copy and explicit, bounded TUI clipboard transfers share one shortcut. */
-export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notify }: {
+export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notify, write }: {
   terminal: Terminal
   host: HTMLElement
   bridge: () => NativeBridge
   sessionId: () => string | null
   notify: (message: string) => void
+  /** Direct session write (bypasses xterm paste/bracketed markers). */
+  write?: (bytes: Uint8Array) => Promise<void>
 }) {
   let alive = true
   let replaying = true
@@ -147,12 +175,25 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     try {
       const base64 = await blobToBase64(blob)
       const remotePath = imageRemotePath(imageUploadFileName(new Date(), blob.type))
-      const script = buildImageUploadScript(remotePath, base64)
-      // A pending read must not paste into a new session or dialog.
-      if (alive && targetSession === syncOwner() && host.contains(document.activeElement)) {
-        terminal.paste(`${script}\n`)
-        notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
+      const script = `${buildImageUploadScript(remotePath, base64)}\n`
+      // A pending read must not paste into a new session.
+      if (!alive || targetSession !== syncOwner()) {
+        if (alive) notify("Session changed — image paste cancelled.")
+        return
       }
+      // Direct write, NOT terminal.paste: xterm would wrap the payload in
+      // bracketed-paste markers (ESC[200~…ESC[201~) whenever the remote
+      // enables mode 2004, corrupting the upload. Chunked to avoid one
+      // giant IPC payload. No focus gate: focus may move during the async
+      // read, and focus is irrelevant to a direct write.
+      const bytes = new TextEncoder().encode(script)
+      const send = write ?? (async (chunk: Uint8Array) => {
+        terminal.paste(new TextDecoder().decode(chunk))
+      })
+      for (let i = 0; i < bytes.length; i += WRITE_CHUNK_BYTES) {
+        await send(bytes.slice(i, i + WRITE_CHUNK_BYTES))
+      }
+      if (alive) notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
     } catch {
       if (alive) notify("Image paste failed. Try copying the file another way.")
     } finally {
