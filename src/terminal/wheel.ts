@@ -42,6 +42,9 @@ export function bindApplicationWheel(
       steps.reset()
       return // Pinch/modifier gestures are not ordinary scrolling.
     }
+    // Scrolled back into local scrollback: let the browser scroll the xterm
+    // viewport (smooth, native). Only forward once pinned to the bottom.
+    if (terminal.buffer.active.viewportY < terminal.buffer.active.baseY) return
     const mouse = terminal.modes.mouseTrackingMode
     if (mouse === "none" && terminal.buffer.active.type !== "alternate") {
       steps.reset()

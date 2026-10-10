@@ -1,5 +1,4 @@
 import type { Terminal } from "@xterm/xterm"
-import { readClipboardImageFile } from "../bridge/nativeBridge"
 import type { NativeBridge } from "../bridge/nativeBridge"
 
 export const MAX_REMOTE_COPY_BYTES = 1024 * 1024
@@ -205,6 +204,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       // screenshots on some WebViews). Fall back to a native image read.
       event.preventDefault()
       event.stopImmediatePropagation()
+      const { readClipboardImageFile } = await import("../bridge/nativeBridge")
       const image = await readClipboardImageFile()
       if (image) void pasteImage(image)
       else if (alive) notify("Nothing to paste. Copy an image or text first.")
