@@ -1,4 +1,5 @@
 import type { Terminal } from "@xterm/xterm"
+import { readClipboardImageFile } from "../bridge/nativeBridge"
 import type { NativeBridge } from "../bridge/nativeBridge"
 
 export const MAX_REMOTE_COPY_BYTES = 1024 * 1024
@@ -174,7 +175,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
   // focused xterm helper textarea (inside host). Text keeps flowing through
   // the shortcut + bridge path above; only image payloads are intercepted
   // here and uploaded to ~/still-uploads via the live PTY.
-  const onPasteEvent = (event: ClipboardEvent) => {
+  const onPasteEvent = async (event: ClipboardEvent) => {
     const data = event.clipboardData
     if (!data) return
     let image: File | null = null
@@ -199,7 +200,16 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       return
     }
     const text = data.getData("text/plain")
-    if (!text) return
+    if (!text) {
+      // Bitmap-only clipboard: no file item and no text (common for
+      // screenshots on some WebViews). Fall back to a native image read.
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const image = await readClipboardImageFile()
+      if (image) void pasteImage(image)
+      else if (alive) notify("Nothing to paste. Copy an image or text first.")
+      return
+    }
     if (!host.contains(document.activeElement)) return
     const target = syncOwner()
     if (!target) return

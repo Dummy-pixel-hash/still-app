@@ -1,5 +1,47 @@
 import type { ConnectionStatus } from "../types"
 
+/**
+ * Bitmap-only clipboard fallback: paste events sometimes carry no file item
+ * and no text (screenshots on some WebViews). Try the async clipboard API
+ * first, then the Tauri native image read (RGBA -> PNG via canvas).
+ * Returns a PNG File or null. Never throws.
+ */
+export async function readClipboardImageFile(): Promise<File | null> {
+  try {
+    const items = await navigator.clipboard?.read?.()
+    for (const item of items ?? []) {
+      const mime = item.types.find((t) => t.startsWith("image/"))
+      if (!mime) continue
+      const blob = await item.getType(mime)
+      if (blob?.size) return new File([blob], "still-paste.png", { type: "image/png" })
+    }
+  } catch {
+    // Async clipboard unavailable/denied — try the native fallback below.
+  }
+  if (!("__TAURI__" in window)) return null
+  try {
+    const { readImage } = await import("@tauri-apps/plugin-clipboard-manager")
+    const image = await readImage()
+    const [rgba, { width, height }] = await Promise.all([image.rgba(), image.size()])
+    try {
+      if (!width || !height || rgba.length !== width * height * 4) return null
+      const canvas = document.createElement("canvas")
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return null
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0)
+      const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"))
+      if (!blob?.size) return null
+      return new File([blob], "still-paste.png", { type: "image/png" })
+    } finally {
+      await image.close().catch(() => {})
+    }
+  } catch {
+    return null
+  }
+}
+
 export type Unsubscribe = () => void
 
 /** Auth method selected in the renderer. The secret itself is passed per-call only. */
