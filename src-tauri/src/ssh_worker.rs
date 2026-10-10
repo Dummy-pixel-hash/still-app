@@ -532,7 +532,8 @@ async fn run_authenticated<H: client::Handler>(
 
     // Invisible tmux infrastructure: attach-or-create, same name => persistence.
     // DIAG-ONLY: safe command identity (no secrets — name/geometry only).
-    let plan = TmuxPlan::new(&cfg.tmux_session);
+    let mut plan = TmuxPlan::new(&cfg.tmux_session);
+    plan.working_directory = cfg.working_directory.clone();
     let attach_cmd = plan.attach_command(cfg.cols, cfg.rows);
     diag::record(
         "rust",

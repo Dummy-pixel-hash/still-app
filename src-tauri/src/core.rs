@@ -38,6 +38,9 @@ pub struct SshConnectArgs {
     /// Remember secret in OS secure storage (keyring) for this connection id.
     pub remember: Option<bool>,
     pub tmux_session: Option<String>,
+    /// Desired start directory for a newly created tmux session. Ignored when
+    /// attached to an already-running session.
+    pub working_directory: Option<String>,
     pub cols: Option<u32>,
     pub rows: Option<u32>,
     pub client_id: Option<String>,
@@ -49,6 +52,7 @@ pub struct SshConfig {
     pub port: u16,
     pub username: String,
     pub tmux_session: String,
+    pub working_directory: Option<String>,
     pub cols: u32,
     pub rows: u32,
 }
@@ -102,6 +106,14 @@ impl SshConnectArgs {
             port: self.port,
             username: username.to_string(),
             tmux_session: TmuxPlan::sanitize_name(self.tmux_session.as_deref()),
+            // "~" / blank mean "whatever tmux defaults to" (the login home),
+            // so they never reach the command line as a -c argument.
+            working_directory: self
+                .working_directory
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty() && *d != "~")
+                .map(str::to_string),
             cols: self.cols.unwrap_or(80).clamp(20, 500),
             rows: self.rows.unwrap_or(24).clamp(5, 200),
         })
@@ -120,12 +132,15 @@ impl SshConnectArgs {
 
 pub struct TmuxPlan {
     pub session_name: String,
+    /// Start directory for a *new* session; `None` means tmux's default.
+    pub working_directory: Option<String>,
 }
 
 impl TmuxPlan {
     pub fn new(name: &str) -> Self {
         Self {
             session_name: Self::sanitize_name(Some(name)),
+            working_directory: None,
         }
     }
 
@@ -156,9 +171,18 @@ impl TmuxPlan {
     /// set-clipboard permits TUI/tmux OSC 52 transfers; the renderer stages
     /// these until an explicit Ctrl+Shift+C and never answers clipboard reads.
     pub fn attach_command(&self, cols: u32, rows: u32) -> String {
+        // `-c` only applies when tmux creates the session; on `-A` attach to an
+        // existing session it is ignored, which is intended (a live session's
+        // cwd is not ours to move).
+        let start_dir = self
+            .working_directory
+            .as_deref()
+            .map(|d| format!(" -c {}", shell_quote(d)))
+            .unwrap_or_default();
         format!(
-            "tmux -u new-session -A -s {n} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n",
+            "tmux -u new-session -A -s {n}{d} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n",
             n = self.session_name,
+            d = start_dir,
             c = cols,
             r = rows
         )
@@ -167,6 +191,12 @@ impl TmuxPlan {
     pub fn refresh_command() -> &'static str {
         "tmux refresh-client -S 2>/dev/null || tmux refresh-client 2>/dev/null || true\n"
     }
+}
+
+/// POSIX single-quote escaping for values interpolated into the remote shell
+/// command line. Inside single quotes the only character that needs care is `'`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +363,58 @@ mod tests {   use super::*;
     }
 
     #[test]
+    fn attach_command_passes_start_directory_when_set() {
+        let mut p = TmuxPlan::new("still");
+        p.working_directory = Some("/srv/app".into());
+        let cmd = p.attach_command(80, 24);
+        assert!(
+            cmd.contains("new-session -A -s still -c '/srv/app' -x 80"),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with("set-clipboard on\n"), "{cmd}");
+    }
+
+    #[test]
+    fn attach_command_quotes_hostile_start_directory() {
+        let mut p = TmuxPlan::new("still");
+        p.working_directory = Some("/tmp/a b'c;rm -rf ~".into());
+        let cmd = p.attach_command(80, 24);
+        assert!(cmd.contains(r"-c '/tmp/a b'\''c;rm -rf ~'"), "{cmd}");
+        // The injected `;rm` stays inside quotes: only the six tmux `\;`
+        // separators are unescaped.
+        assert_eq!(cmd.matches(" \\; ").count(), 6, "{cmd}");
+    }
+
+    #[test]
+    fn attach_command_omits_start_directory_when_unset() {
+        let p = TmuxPlan::new("still");
+        assert!(!p.attach_command(80, 24).contains(" -c "), "default plan must not pass -c");
+    }
+
+    #[test]
+    fn validate_drops_home_and_blank_working_directory() {
+        let base = |dir: &str| SshConnectArgs {
+            host: "h".into(),
+            port: 22,
+            username: "u".into(),
+            auth_kind: "password".into(),
+            secret: Some("pw".into()),
+            remember: None,
+            tmux_session: None,
+            working_directory: Some(dir.into()),
+            cols: None,
+            rows: None,
+            client_id: None,
+        };
+        assert_eq!(base("~").validate().unwrap().working_directory, None);
+        assert_eq!(base("   ").validate().unwrap().working_directory, None);
+        assert_eq!(
+            base(" /srv/app ").validate().unwrap().working_directory,
+            Some("/srv/app".into())
+        );
+    }
+
+    #[test]
     fn sanitize_matches_flutter() {
         assert_eq!(TmuxPlan::sanitize_name(Some("still; rm -rf /")), "still__rm_-rf__");
         assert_eq!(TmuxPlan::sanitize_name(Some("")), "still");
@@ -360,6 +442,7 @@ mod tests {   use super::*;
             secret: None,
             remember: None,
             tmux_session: None,
+            working_directory: None,
             cols: None,
             rows: None,
             client_id: None,
@@ -380,6 +463,7 @@ mod tests {   use super::*;
             secret: None,
             remember: None,
             tmux_session: None,
+            working_directory: None,
             cols: None,
             rows: None,
             client_id: None,

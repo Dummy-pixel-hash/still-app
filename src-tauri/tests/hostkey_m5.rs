@@ -103,6 +103,7 @@ fn test_cfg() -> core::SshConfig {
         port: 22222,
         username: "nobody-invalid".into(),
         tmux_session: "still-m5-probe".into(),
+        working_directory: None,
         cols: 80,
         rows: 24,
     }
@@ -251,6 +252,7 @@ async fn m5_existing_trusted_host_connects() {
         port: 22222,
         username: user,
         tmux_session: "still-m5-live".into(),
+        working_directory: None,
         cols: 80,
         rows: 24,
     };

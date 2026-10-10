@@ -189,6 +189,7 @@ export default function TerminalOverlay({
         port: s.port,
         username: s.username,
         tmuxSession: s.tmuxSession,
+        workingDirectory: s.workingDirectory,
         ...dims,
       }
       if (s.authMethod === "password") {

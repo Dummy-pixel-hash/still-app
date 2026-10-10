@@ -17,6 +17,8 @@ export interface ConnectArgs {
   remember?: boolean
   /** Desired remote tmux session name (sanitized natively). */
   tmuxSession?: string
+  /** Remote start directory for a newly created tmux session. */
+  workingDirectory?: string
   cols?: number
   rows?: number
   clientId?: string

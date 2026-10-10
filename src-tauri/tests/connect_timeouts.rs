@@ -174,6 +174,7 @@ async fn stalled_peer_returns_typed_failure_and_writes_no_trust() {
         port,
         username: "nobody".into(),
         tmux_session: "still-timeout-probe".into(),
+        working_directory: None,
         cols: 80,
         rows: 24,
     };
@@ -227,6 +228,7 @@ async fn stalled_attempt_does_not_block_later_attempts() {
         port: stall_port,
         username: "nobody".into(),
         tmux_session: "still-timeout-stalled".into(),
+        working_directory: None,
         cols: 80,
         rows: 24,
     };
@@ -253,6 +255,7 @@ async fn stalled_attempt_does_not_block_later_attempts() {
         port: 22,
         username: user,
         tmux_session: "still-timeout-live".into(),
+        working_directory: None,
         cols: 80,
         rows: 24,
     };
