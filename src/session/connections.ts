@@ -5,7 +5,7 @@
 // session id is transient per connection. Leaving the workspace overlay is
 // NOT a disconnect: the worker keeps running until explicit Disconnect.
 
-import { useSyncExternalStore } from "react"
+import { useCallback, useSyncExternalStore } from "react"
 import { ByteRing } from "./byteRing"
 import {
   nativeBridge,
@@ -145,10 +145,62 @@ export function mapNativeStatus(status: string): ConnState {
   }
 }
 
+// Per-session transcript version: bumped (throttled) as bytes arrive so
+// main-screen card previews can re-render live output without
+// re-rendering the whole workspace per byte burst. Separate listener set
+// from the connection-state store: data arrives far more often than state
+// changes, and only the live card for that session should wake up.
+const transcriptVersions = new Map<string, number>()
+const transcriptListeners = new Map<string, Set<() => void>>()
+const transcriptLastEmit = new Map<string, number>()
+// Max ~3 re-renders/sec per live card preview.
+const TRANSCRIPT_EMIT_MIN_MS = 350
+
+function emitTranscript(localId: string) {
+  transcriptVersions.set(
+    localId,
+    (transcriptVersions.get(localId) ?? 0) + 1,
+  )
+  transcriptListeners.get(localId)?.forEach((l) => l())
+}
+
+/** React binding: re-render when this session's transcript grows. */
+export function useTranscriptVersion(localId: string): number {
+  const subscribe = useCallback(
+    (fn: () => void) => {
+      let set = transcriptListeners.get(localId)
+      if (!set) {
+        set = new Set()
+        transcriptListeners.set(localId, set)
+      }
+      set.add(fn)
+      return () => {
+        set.delete(fn)
+      }
+    },
+    [localId],
+  )
+  const getVersion = useCallback(
+    () => transcriptVersions.get(localId) ?? 0,
+    [localId],
+  )
+  return useSyncExternalStore(subscribe, getVersion, getVersion)
+}
+
 function pushTranscript(localId: string, data: number[]) {
   const buf = transcripts.get(localId) ?? new ByteRing(TRANSCRIPT_CAP)
   buf.append(data)
   transcripts.set(localId, buf)
+  // Throttled wake-up for card previews. The terminal surface itself
+  // stays on the unthrottled sessionDataListeners fan-out below.
+  const now = Date.now()
+  if (now - (transcriptLastEmit.get(localId) ?? 0) >= TRANSCRIPT_EMIT_MIN_MS) {
+    transcriptLastEmit.set(localId, now)
+    emitTranscript(localId)
+    // Keep the frozen snapshot fresh while output flows (throttled
+    // inside persistFrozenPreview; cheap 900-byte tail decode).
+    persistFrozenPreview(localId, snapshotPreviewLines(localId))
+  }
 }
 
 /** In-memory scrollback snapshot (bytes) for instant terminal repaint. */
@@ -158,6 +210,80 @@ export function transcriptSnapshot(localId: string): Uint8Array {
 
 export function clearTranscript(localId: string) {
   transcripts.delete(localId)
+  // Wake the card preview so it falls back to the frozen snapshot
+  // or IdlePreview immediately.
+  transcriptLastEmit.delete(localId)
+  emitTranscript(localId)
+}
+
+// --- Frozen card snapshot -------------------------------------------------
+// Last output retained for disconnected cards, in-memory AND across
+// reloads (localStorage, plain stripped text only — never raw escapes).
+// Disconnects keep it; only explicit session removal discards it.
+const FROZEN_PREFIX = "still.preview.v1."
+const FROZEN_MIN_MS = 2000
+const frozenLastPersist = new Map<string, number>()
+
+function stripPreviewAnsi(s: string): string {
+  return (
+    s
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+  )
+}
+
+/** Last non-empty lines of the live transcript tail (plain text). */
+export function snapshotPreviewLines(localId: string, max = 4): string[] {
+  const bytes = transcriptSnapshot(localId)
+  if (bytes.length === 0) return []
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(
+    bytes.slice(Math.max(0, bytes.length - 900)),
+  )
+  return stripPreviewAnsi(text)
+    .split("\n")
+    .map((l) => l.replace(/\s+$/g, ""))
+    .filter((l) => l.length > 0)
+    .slice(-max)
+}
+
+function persistFrozenPreview(localId: string, lines: string[]) {
+  if (lines.length === 0) return
+  const now = Date.now()
+  if (now - (frozenLastPersist.get(localId) ?? 0) < FROZEN_MIN_MS) return
+  frozenLastPersist.set(localId, now)
+  try {
+    localStorage.setItem(
+      FROZEN_PREFIX + localId,
+      lines.join("\n").slice(-2000),
+    )
+  } catch {
+    // Private mode / quota: in-memory transcript still shows while running.
+  }
+}
+
+/** Frozen snapshot lines, if any (disconnect + reload safe). */
+export function frozenPreview(localId: string): string[] | null {
+  try {
+    const raw = localStorage.getItem(FROZEN_PREFIX + localId)
+    if (!raw) return null
+    const lines = raw.split("\n").filter((l) => l.length > 0)
+    return lines.length > 0 ? lines : null
+  } catch {
+    return null
+  }
+}
+
+export function discardFrozenPreview(localId: string) {
+  frozenLastPersist.delete(localId)
+  try {
+    localStorage.removeItem(FROZEN_PREFIX + localId)
+  } catch {
+    // Ignore.
+  }
 }
 
 // Per-surface render cursor: how many transcript bytes the mounted terminal
@@ -555,6 +681,9 @@ export async function releaseSession(localId: string): Promise<void> {
   }
   sessionDataListeners.delete(localId)
   clearTranscript(localId)
+  // Explicit removal drops the frozen card snapshot too. Disconnects
+  // keep it — only removal discards.
+  discardFrozenPreview(localId)
   announcedLengths.delete(localId)
   entries.delete(localId)
   emit()

@@ -1,6 +1,10 @@
 import { useMemo } from "react"
 import { type ConnState, type Session } from "../types"
-import { transcriptSnapshot } from "../session/connections"
+import {
+  frozenPreview,
+  snapshotPreviewLines,
+  useTranscriptVersion,
+} from "../session/connections"
 
 export type CardConn = ConnState | "never"
 
@@ -36,34 +40,21 @@ const statusMeta: Record<CardConn,
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
-/** Last bytes of the live transcript rendered as plain text preview. */
-function LivePreview({ sessionId }: { sessionId: string }) {
-  const lines = useMemo(() => {
-    const bytes = transcriptSnapshot(sessionId)
-    if (bytes.length === 0) return null
-    const text = new TextDecoder("utf-8", { fatal: false })
-      .decode(bytes.slice(Math.max(0, bytes.length - 900)))
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
-    const out = text
-      .split("\n")
-      .map((l) => l.replace(/\s+$/g, ""))
-      .filter((l) => l.length > 0)
-      .slice(-4)
-    return out.length > 0 ? out : null
-  }, [sessionId])
-  if (!lines) return null
-  return (
-    <div className="space-y-1">
-      {lines.map((line, i) => (
-        <div key={i} className="truncate whitespace-pre">
-          {line}
-        </div>
-      ))}
-    </div>
-  )
+/**
+ * Card preview lines: live transcript tail while output exists (persisted
+ * as the frozen snapshot on the side), else the frozen snapshot kept
+ * across disconnect + reload, else null for the idle placeholder.
+ */
+function usePreviewLines(sessionId: string): string[] | null {
+  // Hook order must stay stable: always subscribe, even when only the
+  // persisted snapshot exists.
+  const version = useTranscriptVersion(sessionId)
+  return useMemo(() => {
+    const live = snapshotPreviewLines(sessionId)
+    if (live.length > 0) return live
+    return frozenPreview(sessionId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, version])
 }
 
 function IdlePreview({ session }: { session: Session }) {
@@ -192,10 +183,7 @@ export default function SessionCard({
           <span className="truncate">{session.host || "—"}</span>
         </div>
 
-        <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#050505] px-3 py-2.5 font-mono text-[10px] leading-[1.65] text-[#b0aab8] shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
-          {live ? <LivePreview sessionId={session.id} /> : <IdlePreview session={session} />}
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[#050505] to-transparent" />
-        </div>
+        <CardPreview session={session} live={live} />
 
         <div className="mt-3 flex items-center justify-between text-[11px] text-faint">
           <span className="truncate font-mono text-[10px]">
@@ -244,6 +232,60 @@ export default function SessionCard({
           </span>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Card screen: a miniature terminal window. Live output while connected;
+ * the frozen last-output snapshot after disconnect (kept in-memory and
+ * restored from localStorage across reloads); the idle placeholder only
+ * when the session never produced output.
+ */
+function CardPreview({ session, live }: { session: Session; live: boolean }) {
+  const lines = usePreviewLines(session.id)
+  return (
+    <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
+      {/* Miniature window chrome: traffic dots + session title. */}
+      <div className="flex items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
+        <span className="h-[7px] w-[7px] rounded-full bg-[#ff5f57]/80" />
+        <span className="h-[7px] w-[7px] rounded-full bg-[#febc2e]/70" />
+        <span className="h-[7px] w-[7px] rounded-full bg-[#28c840]/70" />
+        <span className="ml-1.5 truncate text-[9px] tracking-wide text-faint">
+          {session.tmuxSession}
+          {!live ? " — snapshot" : ""}
+        </span>
+        {!live ? (
+          <span className="ml-auto shrink-0 rounded border border-white/10 px-1 py-px text-[8px] uppercase tracking-[0.08em] text-faint">
+            frozen
+          </span>
+        ) : null}
+      </div>
+      <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
+        {lines && lines.length > 0 ? (
+          <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
+            {lines.map((line, i) => (
+              <div key={i} className="truncate whitespace-pre">
+                {line}
+                {live && i === lines.length - 1 ? (
+                  <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[#ff5a5a]" />
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <IdlePreview session={session} />
+        )}
+      </div>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 top-7 bg-gradient-to-t from-[#08080a] via-transparent to-transparent" />
+      {/* Scanline sheen so the miniature reads as a screen, not text. */}
+      <div
+        className="pointer-events-none absolute inset-0 opacity-[0.5]"
+        style={{
+          background:
+            "repeating-linear-gradient(0deg, rgba(255,255,255,0.022) 0 1px, transparent 1px 3px)",
+        }}
+      />
     </div>
   )
 }
