@@ -21,10 +21,12 @@ import {
   useStore,
 } from "../session/store"
 import {
+  connectionError,
   connectionState,
   releaseSession,
   useConnections,
 } from "../session/connections"
+import { nativeBridge } from "../bridge/nativeBridge"
 import type { ConnState, Project, Session, SessionDraft } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
@@ -151,6 +153,26 @@ export default function Workspace() {
 
   const onNeedAuth = useCallback(
     async (session: Session) => {
+      // Silent path: keyring already holds the secret — skip the dialog
+      // unless the stored secret just failed auth (then it is wrong).
+      if (session.authMethod === "password") {
+        const err = connectionError(session.id) ?? ""
+        if (!/auth|wrong|password|incorrect|denied/i.test(err)) {
+          try {
+            if (
+              await nativeBridge.hasCredential(
+                session.host,
+                session.port,
+                session.username,
+              )
+            ) {
+              return { secret: undefined, remember: true }
+            }
+          } catch {
+            // Fall through to the dialog.
+          }
+        }
+      }
       const ans = await needAuth(session)
       setAuthFor(null)
       return ans
