@@ -130,9 +130,13 @@ function blobToBase64(blob: Blob): Promise<string> {
  * remote `ls -l` output lands somewhere the user can't see it (e.g. a
  * fullscreen TUI owns the screen). Self-contained: appends an <img> to
  * the terminal host, removes it after a few seconds or on click.
+ * An optional action (e.g. "Upload anyway") renders as a button.
  * Returns a cleanup function.
  */
-function showImagePreview(host: HTMLElement, blob: Blob, caption: string): () => void {
+function showImagePreview(host: HTMLElement, blob: Blob, caption: string, action?: {
+  label: string
+  onClick: () => void
+}): () => void {
   const url = URL.createObjectURL(blob)
   const box = document.createElement("div")
   box.setAttribute("role", "status")
@@ -152,6 +156,19 @@ function showImagePreview(host: HTMLElement, blob: Blob, caption: string): () =>
   label.style.cssText = "padding:6px 10px;font:11px ui-monospace,monospace;color:#ded9dd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
   box.appendChild(img)
   box.appendChild(label)
+  if (action) {
+    const btn = document.createElement("button")
+    btn.type = "button"
+    btn.textContent = action.label
+    btn.style.cssText = "display:block;width:calc(100% - 20px);margin:0 10px 10px;padding:6px 0;border-radius:999px;border:0;background:#ff4a4a;color:#fff;font:12px ui-monospace,monospace;font-weight:600;cursor:pointer"
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation()
+      btn.setAttribute("disabled", "")
+      btn.textContent = "Uploading…"
+      action.onClick()
+    })
+    box.appendChild(btn)
+  }
   host.appendChild(box)
   let gone = false
   const cleanup = () => {
@@ -252,25 +269,10 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     try {
       const base64 = await blobToBase64(blob)
       const remotePath = imageRemotePath(imageUploadFileName(new Date(), mime))
-      // Always show the image locally first: the remote `ls -l` output is
-      // invisible when a fullscreen app owns the screen, and the user must
-      // SEE that the paste landed.
-      if (alive) {
-        clearPreview?.()
-        clearPreview = showImagePreview(host, blob, `Image • ${formatBytes(blob.size)}`)
-      }
+      const script = `${buildImageUploadScript(remotePath, base64)}\n`
       // A pending read must not paste into a new session.
       if (!alive || targetSession !== syncOwner()) {
         if (alive) notify("Session changed — image paste cancelled.")
-        return
-      }
-      // Never type a shell script into a fullscreen TUI (agent UI, editor,
-      // pager…): those keystrokes land in the app, not a shell — no file is
-      // created and the TUI input gets trashed. Upload only at a shell prompt.
-      if (isAlternateScreen(terminal)) {
-        if (alive) {
-          notify("Fullscreen app is active — image kept in preview. Exit to a shell prompt and paste again to upload to ~/still-uploads.")
-        }
         return
       }
       // Direct write, NOT terminal.paste: xterm would wrap the payload in
@@ -278,15 +280,50 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       // enables mode 2004, corrupting the upload. Chunked to avoid one
       // giant IPC payload. No focus gate: focus may move during the async
       // read, and focus is irrelevant to a direct write.
-      const script = `${buildImageUploadScript(remotePath, base64)}\n`
-      const bytes = new TextEncoder().encode(script)
-      const send = write ?? (async (chunk: Uint8Array) => {
-        terminal.paste(new TextDecoder().decode(chunk))
-      })
-      for (let i = 0; i < bytes.length; i += WRITE_CHUNK_BYTES) {
-        await send(bytes.slice(i, i + WRITE_CHUNK_BYTES))
+      const doUpload = async () => {
+        const bytes = new TextEncoder().encode(script)
+        const send = write ?? (async (chunk: Uint8Array) => {
+          terminal.paste(new TextDecoder().decode(chunk))
+        })
+        for (let i = 0; i < bytes.length; i += WRITE_CHUNK_BYTES) {
+          await send(bytes.slice(i, i + WRITE_CHUNK_BYTES))
+        }
+        if (alive) notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
       }
-      if (alive) notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
+      // Never type a shell script into a fullscreen TUI (agent UI, editor,
+      // pager…): those keystrokes land in the app, not a shell — no file is
+      // created and the TUI input gets trashed. Upload only at a shell prompt.
+      // The detector can stick (missed exit sequence after a crash, dropped
+      // connection, or truncated repaint), so a stuck "fullscreen" must never
+      // be a dead end: offer an explicit override + a way to unstick the view.
+      const blocked = isAlternateScreen(terminal)
+      if (alive) {
+        clearPreview?.()
+        clearPreview = showImagePreview(
+          host,
+          blob,
+          blocked
+            ? `Image • ${formatBytes(blob.size)} — paused (fullscreen?)`
+            : `Image • ${formatBytes(blob.size)}`,
+          blocked
+            ? {
+                label: "Upload anyway",
+                onClick: () => {
+                  void doUpload().catch(() => {
+                    if (alive) notify("Image paste failed. Try copying the file another way.")
+                  })
+                },
+              }
+            : undefined,
+        )
+      }
+      if (blocked) {
+        if (alive) {
+          notify("Fullscreen app suspected — upload paused. At a shell prompt? Upload anyway. Screen looks stuck? Type reset + Enter.")
+        }
+        return
+      }
+      await doUpload()
     } catch {
       if (alive) notify("Image paste failed. Try copying the file another way.")
     } finally {
