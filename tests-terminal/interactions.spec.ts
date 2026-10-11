@@ -111,6 +111,37 @@ test("native context-menu paste remains single and bracketed", async ({ page }) 
   expect(await h(page, "harness.writes.length")).toBe(1)
 })
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+test("image paste uploads via SFTP without typing shell script", async ({ page }) => {
+  await page.evaluate((b64) => {
+    const bin = atob(b64)
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+    const file = new File([bytes], "shot.png", { type: "image/png" })
+    const dt = new DataTransfer()
+    dt.items.add(file)
+    document.querySelector(".xterm-helper-textarea")!.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }))
+  }, PNG_B64)
+  await expect.poll(() => h(page, "harness.uploads.length")).toBe(1)
+  // SFTP path: no PTY script bytes, preview shown instead.
+  expect(await h(page, "harness.writes.length")).toBe(0)
+  await expect(page.getByRole("status").first()).toContainText("Pasted image")
+})
+
+test("image paste in fullscreen agent window auto-inserts path", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[2J\\x1b[H")')
+  await page.evaluate((b64) => {
+    const bin = atob(b64)
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+    const file = new File([bytes], "shot.png", { type: "image/png" })
+    const dt = new DataTransfer()
+    dt.items.add(file)
+    document.querySelector(".xterm-helper-textarea")!.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }))
+  }, PNG_B64)
+  await expect.poll(() => h(page, "harness.uploads.length")).toBe(1)
+  await expect.poll(() => emittedText(page)).toContain("~/still-uploads/still-paste-")
+})
+
 for (const change of ["focus", "session", "unmount"]) {
   test(`pending clipboard read cannot paste after ${change} changes`, async ({ page }) => {
     await h(page, "harness.deferPaste = true")

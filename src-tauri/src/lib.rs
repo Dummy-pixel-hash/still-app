@@ -47,6 +47,7 @@ pub fn run() {
             commands::still_connect,
             commands::still_write,
             commands::still_resize,
+            commands::still_upload_image,
             commands::still_status,
             commands::still_disconnect,
             commands::still_forget_secret,

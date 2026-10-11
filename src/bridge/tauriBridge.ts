@@ -211,6 +211,13 @@ export const tauriBridge: NativeBridge = {
   clipboardWriteText: writeText,
   clipboardReadText: readText,
 
+  async uploadImage(sessionId: string, fileName: string, base64Data: string) {
+    const res = await invoke<{ remotePath: string }>("still_upload_image", {
+      args: { sessionId, fileName, base64Data },
+    })
+    return { remotePath: res.remotePath }
+  },
+
   async windowMinimize() {
     await getCurrentWindow().minimize()
   },

@@ -105,7 +105,7 @@ async fn headless_verified_real_ssh_tmux_roundtrip() {
     let (_rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        ssh_worker::run_session(cfg, None, Some(key_data), etx, irx, rrx, srx).await;
+        ssh_worker::run_session("test-sid".into(), cfg, None, Some(key_data), etx, irx, rrx, srx).await;
     });
 
     // T1: verified handshake + real auth + tmux attach reaches Live.

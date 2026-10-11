@@ -156,6 +156,13 @@ export const mockBridge: NativeBridge = {
   // The preview simulates SSH, not successful clipboard operations.
   clipboardWriteText: writeBrowserClipboard,
   clipboardReadText: readBrowserClipboard,
+
+  async uploadImage(_sessionId: string, fileName: string, _base64Data: string) {
+    // Dev preview: no remote host. Return a fake $HOME path so the
+    // insert-into-agent flow can be exercised in the browser.
+    const safe = fileName.replace(/[^A-Za-z0-9._-]/g, "_") || "still-paste.png"
+    return { remotePath: `$HOME/still-uploads/${safe}` }
+  },
 }
 
 export { mapRemoteStatus }

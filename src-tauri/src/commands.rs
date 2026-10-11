@@ -268,6 +268,7 @@ async fn still_connect_inner(
         let live_clone = live.clone();
         let app_e = app.clone();
         let sid_e = session_id.clone();
+        let sid_run = sid_e.clone();
         let diag_local_e = diag_local.clone();
         let handle = tauri::async_runtime::spawn(async move {
             // Forward worker events -> window events + mirror status.
@@ -319,6 +320,7 @@ async fn still_connect_inner(
                 diag::ok("rust", "FORWARD_LOOP_ENDED", &diag_local_e, &sid_e);
             };
             let run = ssh_worker::run_session(
+                sid_run,
                 cfg,
                 password,
                 private_key,
@@ -372,6 +374,64 @@ pub async fn still_resize(
         StillError::friendly("not_connected", "Session is not connected.")
     })?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadArgs {
+    pub session_id: String,
+    pub file_name: String,
+    /// Standard base64 (no whitespace) of the image bytes. Frontend already
+    /// produces this via FileReader; avoids a giant JSON number array.
+    pub base64_data: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadResult {
+    pub remote_path: String,
+}
+
+/// SFTP image upload on the existing authenticated connection.
+/// Never touches the PTY, so fullscreen TUIs (agent windows) are safe.
+/// Falls back to the legacy PTY script path only when SFTP is unavailable
+/// server-side — the frontend decides that from this command's error.
+#[tauri::command]
+pub async fn still_upload_image(args: UploadArgs) -> Result<UploadResult, StillError> {
+    if args.session_id.trim().is_empty() {
+        return Err(StillError::friendly("no_session", "Unknown session. Connect first."));
+    }
+    if args.base64_data.len() > 7 * 1024 * 1024 {
+        return Err(StillError::friendly(
+            "too_large",
+            "Image too large. Max is 5 MB.",
+        ));
+    }
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        args.base64_data.trim(),
+    )
+    .map_err(|_| StillError::friendly("invalid", "Image data is not valid base64."))?;
+    if bytes.is_empty() {
+        return Err(StillError::friendly("invalid", "Image is empty."));
+    }
+    let remote_path = crate::ssh_worker::upload_via_sftp(&args.session_id, &args.file_name, bytes)
+        .await
+        .map_err(|e| {
+            let s = format!("{e:#}");
+            if s.contains("unknown session") {
+                StillError::friendly("no_session", "Unknown session. Connect first.")
+            } else if s.contains("too large") {
+                StillError::friendly("too_large", "Image too large. Max is 5 MB.")
+            } else if s.contains("only image") {
+                StillError::friendly("invalid", "Only images can be pasted as files.")
+            } else if s.contains("sftp subsystem refused") || s.contains("sftp") {
+                StillError::friendly("sftp_unavailable", format!("SFTP upload failed ({s}). Server may disable sftp."))
+            } else {
+                StillError::friendly("upload_failed", format!("Upload failed ({s})."))
+            }
+        })?;
+    Ok(UploadResult { remote_path })
 }
 
 #[derive(Debug, Serialize)]

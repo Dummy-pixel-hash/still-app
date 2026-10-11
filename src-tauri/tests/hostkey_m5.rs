@@ -115,7 +115,7 @@ async fn run_worker_once(cfg: core::SshConfig) -> Vec<core::SessionEvent> {
     let (_rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
     // No credentials: verification must refuse BEFORE auth matters.
-    ssh_worker::run_session(cfg, None, None, etx, irx, rrx, srx).await;
+    ssh_worker::run_session("test-sid".into(), cfg, None, None, etx, irx, rrx, srx).await;
     // Give the event loop a beat to flush (run_session sends synchronously,
     // but be tolerant).
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -261,7 +261,7 @@ async fn m5_existing_trusted_host_connects() {
     let (_rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        ssh_worker::run_session(cfg, None, Some(key_data), etx, irx, rrx, srx).await;
+        ssh_worker::run_session("test-sid".into(), cfg, None, Some(key_data), etx, irx, rrx, srx).await;
     });
     // Wait for Live status (real auth + tmux through the verified path).
     let mut saw_live = false;

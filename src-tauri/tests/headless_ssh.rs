@@ -104,7 +104,7 @@ async fn headless_real_ssh_tmux_roundtrip() {
     let (_itx, irx) = tokio::sync::mpsc::unbounded_channel();
     let (_rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
-    ssh_worker::run_session(refused, Some("x".into()), None, etx, irx, rrx, srx).await;
+    ssh_worker::run_session("test-sid".into(), refused, Some("x".into()), None, etx, irx, rrx, srx).await;
     let mut saw_error = false;
     while let Ok(ev) = erx.try_recv() {
         if matches!(ev, still_app::core::SessionEvent::Error { .. }) {
@@ -141,7 +141,7 @@ async fn headless_real_ssh_tmux_roundtrip() {
     let (rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        ssh_worker::run_session(cfg, None, Some(key_data), etx, irx, rrx, srx).await;
+        ssh_worker::run_session("test-sid".into(), cfg, None, Some(key_data), etx, irx, rrx, srx).await;
     });
     // Wait for live status.
     let mut live = false;
@@ -233,7 +233,7 @@ async fn headless_real_ssh_tmux_roundtrip() {
     let (_rtx2, rrx2) = tokio::sync::mpsc::unbounded_channel();
     let (_stx2, srx2) = tokio::sync::oneshot::channel();
     let handle2 = tokio::spawn(async move {
-        ssh_worker::run_session(cfg2, None, Some(key_data2), etx2, irx2, rrx2, srx2).await;
+        ssh_worker::run_session("test-sid".into(), cfg2, None, Some(key_data2), etx2, irx2, rrx2, srx2).await;
     });
     let mut live2 = false;
     for _ in 0..100 {

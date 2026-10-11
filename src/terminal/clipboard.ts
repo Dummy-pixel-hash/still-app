@@ -318,21 +318,98 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
     pasting = true
     try {
       const base64 = await blobToBase64(blob)
-      const remotePath = imageRemotePath(imageUploadFileName(new Date(), mime))
-      const script = `${buildImageUploadScript(remotePath, base64)}\n`
+      const fileName = imageUploadFileName(new Date(), mime)
       // A pending read must not paste into a new session.
       if (!alive || targetSession !== syncOwner()) {
         if (alive) notify("Session changed — image paste cancelled.")
         return
       }
-      // Direct write, NOT terminal.paste: xterm would wrap the payload in
-      // bracketed-paste markers (ESC[200~…ESC[201~) whenever the remote
-      // enables mode 2004, corrupting the upload. Chunked to avoid one
-      // giant IPC payload. No focus gate: focus may move during the async
-      // read, and focus is irrelevant to a direct write.
       // Agent-facing reference: plain path auto-attaches in Claude Code,
       // Codex and Pi; @path is OpenCode's syntax. ~/ form: attach detectors
       // match it better than a $HOME-prefixed string.
+      const localId = sessionLocalId()
+      // SFTP upload first: out-of-band on the same SSH connection, zero
+      // bytes through the PTY. Safe in fullscreen TUIs (agent window) —
+      // no shell script typed, no bracketed-paste corruption, no shell
+      // quoting, no gate. Direct paste in the agent window depends on this.
+      const trySftp = async (): Promise<string | null> => {
+        try {
+          const up = (bridge() as Partial<NativeBridge>).uploadImage
+          if (!up) return null
+          const res = await (up as NativeBridge["uploadImage"]).call(bridge(), targetSession, fileName, base64)
+          return res.remotePath || null
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          // SFTP disabled server-side or unknown session: caller falls back
+          // to the legacy PTY script path. All other errors are terminal.
+          if (/sftp_unavailable|no_session/i.test(msg)) return null
+          if (/too_large/i.test(msg)) {
+            if (alive) notify(`Image too large (${formatBytes(blob.size)}). Max is ${formatBytes(MAX_IMAGE_BYTES)}.`)
+            throw e
+          }
+          if (/only image|invalid/i.test(msg)) {
+            if (alive) notify("Only images can be pasted as files.")
+            throw e
+          }
+          return null
+        }
+      }
+      const insertIntoAgent = async (remotePath: string) => {
+        if (!alive || targetSession !== syncOwner()) {
+          if (alive) notify("Session changed — insert cancelled.")
+          return
+        }
+        try {
+          const insertText = `${insertStyle() === "at" ? "@" : ""}${remotePath.replace(/^\$HOME/, "~")} `
+          const bytes = new TextEncoder().encode(insertText)
+          if (write) await write(bytes)
+          else terminal.paste(insertText)
+          if (alive) notify("Path inserted — review and press Enter in the agent.")
+        } catch {
+          if (alive) notify("Insert failed. Type it manually.")
+        }
+      }
+      const sftpPath = await trySftp().catch(() => null)
+      if (!alive || targetSession !== syncOwner()) {
+        if (alive) notify("Session changed — image paste cancelled.")
+        return
+      }
+      if (sftpPath) {
+        // Direct agent-window paste: SFTP never disturbs the TUI, so an
+        // active fullscreen app means the user is IN the agent prompt —
+        // insert immediately. At a shell prompt show the thumbnail with
+        // an explicit Insert button instead (no surprise typing).
+        const remoteTui = await remoteTuiActive(localId)
+        const alt = isAlternateScreen(terminal)
+        const inAgent = remoteTui || alt
+        if (alive) {
+          if (inAgent) {
+            await insertIntoAgent(sftpPath)
+            clearPreview?.()
+            clearPreview = showImagePreview(host, blob, `Uploaded • ${formatBytes(blob.size)}`)
+          } else {
+            notify(`Pasted image → ${sftpPath} (${formatBytes(blob.size)})`)
+            clearPreview?.()
+            clearPreview = showImagePreview(host, blob, `Uploaded • ${formatBytes(blob.size)}`, {
+              label: "Insert into agent",
+              busyLabel: "Inserted ✓",
+              onClick: () => {
+                void insertIntoAgent(sftpPath)
+              },
+            })
+          }
+        }
+        return
+      }
+      // Legacy PTY fallback (SFTP unavailable): type a shell script via
+      // direct session write. Never into a fullscreen TUI — those bytes
+      // land in the app, not a shell. This path keeps the old gate.
+      const remotePath = imageRemotePath(fileName)
+      const script = `${buildImageUploadScript(remotePath, base64)}\n`
+      if (!alive || targetSession !== syncOwner()) {
+        if (alive) notify("Session changed — image paste cancelled.")
+        return
+      }
       const insertText = `${insertStyle() === "at" ? "@" : ""}${remotePath.replace(/^\$HOME/, "~")} `
       const doUpload = async () => {
         const bytes = new TextEncoder().encode(script)
@@ -349,41 +426,20 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
             label: "Insert into agent",
             busyLabel: "Inserted ✓",
             onClick: () => {
-              void insertIntoAgent()
+              void (async () => {
+                try {
+                  const bytes = new TextEncoder().encode(insertText)
+                  if (write) await write(bytes)
+                  else terminal.paste(insertText)
+                  if (alive) notify("Path inserted — review and press Enter in the agent.")
+                } catch {
+                  if (alive) notify(`Insert failed. Type it manually: ${insertText.trim()}`)
+                }
+              })()
             },
           })
         }
       }
-      // Types the uploaded path into the agent's input (no Enter — the user
-      // reviews and sends). Explicit user action: no fullscreen gate here,
-      // landing in an agent prompt is exactly the point.
-      const insertIntoAgent = async () => {
-        if (!alive || targetSession !== syncOwner()) {
-          if (alive) notify("Session changed — insert cancelled.")
-          return
-        }
-        try {
-          const bytes = new TextEncoder().encode(insertText)
-          if (write) await write(bytes)
-          else terminal.paste(insertText)
-          if (alive) notify("Path inserted — review and press Enter in the agent.")
-        } catch {
-          if (alive) notify(`Insert failed. Type it manually: ${insertText.trim()}`)
-        }
-      }
-      // Never type a shell script into a fullscreen TUI (agent UI, editor,
-      // pager…): those keystrokes land in the app, not a shell — no file is
-      // created and the TUI input gets trashed. Upload only at a shell prompt.
-      //
-      // Two signals, fused: the remote stream verdict (transcript tail shows
-      // an unclosed alt-screen enter) and the xterm display flag. The display
-      // flag sticks forever when the exit sequence is lost (crash, dropped
-      // connection, truncated repaint) while the shell keeps printing into
-      // the invisible alt buffer — everything LOOKS normal but the flag says
-      // fullscreen. When the stream says shell and only the display flag
-      // disagrees, heal the display locally (zero remote bytes: a live TUI
-      // cannot be corrupted by it) and proceed — no click needed.
-      const localId = sessionLocalId()
       const remoteTui = await remoteTuiActive(localId)
       if (!alive || targetSession !== syncOwner()) {
         if (alive) notify("Session changed — image paste cancelled.")
@@ -451,11 +507,11 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
   }
   host.addEventListener("keydown", onKey, { capture: true })
   // Image paste: Ctrl+V / context-menu paste surfaces a ClipboardEvent on the
-  // focused xterm helper textarea (inside host). Text keeps flowing through
-  // the shortcut + bridge path above; only image payloads are intercepted
-  // here and uploaded to ~/still-uploads via the live PTY.
+  // focused xterm helper textarea (inside host). On Linux WebKitGTK the
+  // event fires with EMPTY clipboardData — that must NOT suppress the
+  // native fallback below, so the timestamp guard is set only when real
+  // data was seen.
   const onPasteEvent = async (event: ClipboardEvent) => {
-    lastPasteEventAt = Date.now()
     let data: DataTransfer | null = null
     try {
       data = event.clipboardData
@@ -486,34 +542,57 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
         }
       }
       if (image) {
+        lastPasteEventAt = Date.now()
         event.preventDefault()
         event.stopImmediatePropagation()
         void pasteImage(image)
         return
       }
       const text = data.getData("text/plain")
-      if (!text) {
-        // Bitmap-only clipboard: no file item and no text (common for
-        // screenshots on some WebViews). Fall back to a native image read.
+      if (text) {
+        lastPasteEventAt = Date.now()
+        if (!host.contains(document.activeElement)) return
+        const target = syncOwner()
+        if (!target) return
         event.preventDefault()
         event.stopImmediatePropagation()
-        const { readClipboardImageFile } = await import("../bridge/nativeBridge")
-        const fallback = await readClipboardImageFile()
-        if (fallback) void pasteImage(fallback)
-        else if (alive) notify("Nothing to paste. Copy an image or text first.")
+        terminal.paste(text)
         return
       }
-      if (!host.contains(document.activeElement)) return
-      const target = syncOwner()
-      if (!target) return
+      // Empty clipboardData (WebKitGTK) or bitmap-only with no file item:
+      // fall through to the native plugin (image first, then text).
+      // Do NOT mark the event as handled — the backup path uses the
+      // timestamp guard, and an empty event must not suppress it. But
+      // prevent xterm's own handler from doing anything with nothing.
       event.preventDefault()
       event.stopImmediatePropagation()
-      terminal.paste(text)
+      const eventOwner = syncOwner()
+      const { readClipboardImageFile } = await import("../bridge/nativeBridge")
+      const fallbackImage = await readClipboardImageFile()
+      if (!alive || eventOwner !== syncOwner()) return
+      if (fallbackImage) {
+        lastPasteEventAt = Date.now()
+        void pasteImage(fallbackImage)
+        return
+      }
+      try {
+        const nativeText = await bridge().clipboardReadText()
+        if (!alive || eventOwner !== syncOwner()) return
+        if (nativeText) {
+          lastPasteEventAt = Date.now()
+          if (host.contains(document.activeElement)) terminal.paste(nativeText)
+          else notify("Terminal lost focus — click it and paste again.")
+        } else if (alive) {
+          notify("Nothing to paste. Copy an image or text first.")
+        }
+      } catch {
+        if (alive && eventOwner === syncOwner()) notify("Nothing to paste. Copy an image or text first.")
+      }
     } catch {
       if (alive) notify("Paste failed. Try copying again.")
     }
   }
-  host.addEventListener("paste", onPasteEvent)
+  host.addEventListener("paste", onPasteEvent, { capture: true })
   // Backup for WebViews that swallow the DOM paste event entirely (no event,
   // no clipboardData — the user sees nothing at all). When Ctrl(+Shift)+V is
   // pressed inside the terminal and no paste event arrives shortly after,
@@ -526,6 +605,9 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
     const t = event.target as HTMLElement | null
     if (!t?.classList?.contains("xterm-helper-textarea")) return
     const pressedAt = Date.now()
+    // Capture owner now: a pending clipboard read must never paste into a
+    // new session, a moved focus, or an unmounted surface.
+    const pendingOwner = syncOwner()
     window.setTimeout(() => {
       if (!alive || pasting) return
       if (lastPasteEventAt >= pressedAt) return
@@ -533,13 +615,13 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
         try {
           const { readClipboardImageFile } = await import("../bridge/nativeBridge")
           const image = await readClipboardImageFile()
-          if (!alive) return
+          if (!alive || pendingOwner !== syncOwner()) return
           if (image) { void pasteImage(image); return }
-          const target = syncOwner()
+          const target = pendingOwner
           if (!target) { notify("Connect before pasting."); return }
           try {
             const text = await bridge().clipboardReadText()
-            if (!alive) return
+            if (!alive || target !== syncOwner()) return
             if (text) {
               if (host.contains(document.activeElement)) terminal.paste(text)
               else notify("Terminal lost focus — click it and paste again.")
@@ -547,7 +629,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
               notify("Nothing to paste. Copy an image or text first.")
             }
           } catch {
-            if (alive) notify("Paste failed. Clipboard access was denied; try again.")
+            if (alive && target === syncOwner()) notify("Paste failed. Clipboard access was denied; try again.")
           }
         } catch {
           if (alive) notify("Paste failed. Try copying again.")
@@ -566,7 +648,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessi
       osc.dispose()
       host.removeEventListener("keydown", onKey, { capture: true })
       host.removeEventListener("keydown", onCtrlV, { capture: true })
-      host.removeEventListener("paste", onPasteEvent)
+      host.removeEventListener("paste", onPasteEvent, { capture: true })
     },
   }
 }

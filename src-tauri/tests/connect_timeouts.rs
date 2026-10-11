@@ -185,8 +185,7 @@ async fn stalled_peer_returns_typed_failure_and_writes_no_trust() {
 
     // Outer tripwire: the whole establishment MUST terminate. Under the old
     // unbounded design this awaited forever (KEX stall with no deadline).
-    tokio::time::timeout(Duration::from_secs(60), ssh_worker::run_session(
-        cfg, None, None, etx, irx, rrx, srx,
+    tokio::time::timeout(Duration::from_secs(60), ssh_worker::run_session("test-sid".into(), cfg, None, None, etx, irx, rrx, srx,
     ))
     .await
     .expect("stalled peer must terminate (regression: unbounded handshake)");
@@ -237,8 +236,7 @@ async fn stalled_attempt_does_not_block_later_attempts() {
     let (_stall_rtx, stall_rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stall_stx, stall_srx) = tokio::sync::oneshot::channel();
     let stalled = tokio::spawn(async move {
-        ssh_worker::run_session(
-            stall_cfg, None, None, stall_etx, stall_irx, stall_rrx, stall_srx,
+        ssh_worker::run_session("test-sid".into(), stall_cfg, None, None, stall_etx, stall_irx, stall_rrx, stall_srx,
         )
         .await;
     });
@@ -264,8 +262,7 @@ async fn stalled_attempt_does_not_block_later_attempts() {
     let (_rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
     let (_stx, srx) = tokio::sync::oneshot::channel();
     let good = tokio::spawn(async move {
-        ssh_worker::run_session(
-            good_cfg, None, Some(key_data), etx, irx, rrx, srx,
+        ssh_worker::run_session("test-sid".into(), good_cfg, None, Some(key_data), etx, irx, rrx, srx,
         )
         .await;
     });

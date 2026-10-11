@@ -177,7 +177,7 @@ fn verify_against_store(
     }
 }
 
-struct VerifyClient {
+pub(crate) struct VerifyClient {
     host: String,
     port: u16,
     verified: Arc<std::sync::Mutex<Option<(String, String, String)>>>,
@@ -225,6 +225,126 @@ impl client::Handler for CaptureClient {
 }
 
 static HANDSHAKE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Live authenticated handles for out-of-band SFTP uploads.
+/// Keyed by native session id. The PTY worker owns the connection;
+/// uploads open a second channel on the same connection, so shell
+/// state (including fullscreen TUIs) is never disturbed.
+/// russh Handle is !Clone, so shared via Arc<Mutex<>>; the lock is
+/// held only to open the SFTP channel, never across I/O.
+static SESSION_HANDLES: std::sync::OnceLock<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<VerifyClient>>>,
+        >,
+    >,
+> = std::sync::OnceLock::new();
+
+fn session_handles() -> &'static tokio::sync::Mutex<
+    std::collections::HashMap<
+        String,
+        std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<VerifyClient>>>,
+    >,
+> {
+    SESSION_HANDLES.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn store_handle(
+    session_id: &str,
+    handle: std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<VerifyClient>>>,
+) {
+    session_handles().lock().await.insert(session_id.to_string(), handle);
+}
+
+async fn remove_handle(session_id: &str) {
+    session_handles().lock().await.remove(session_id);
+}
+
+/// Max image bytes accepted for SFTP upload (5 MiB, mirrors frontend).
+const MAX_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
+
+/// Upload bytes to `~/still-uploads/<safe file_name>` via SFTP on the
+/// existing authenticated connection. Returns the `$HOME`-style remote
+/// path for display. Never touches the PTY, so fullscreen TUIs are safe.
+pub async fn upload_via_sftp(
+    session_id: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<String> {
+    use russh_sftp::{client::SftpSession, protocol::OpenFlags};
+    use tokio::io::AsyncWriteExt;
+
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(anyhow::anyhow!(
+            "image too large ({} bytes, max {} bytes)",
+            bytes.len(),
+            MAX_UPLOAD_BYTES
+        ));
+    }
+    // Safe filename: allowlist, fallback when empty.
+    let safe: String = file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = if safe.is_empty() { "still-paste.png".to_string() } else { safe };
+    // Extension allowlist: images only.
+    let lower = safe.to_ascii_lowercase();
+    if !(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".webp") || lower.ends_with(".gif") || lower.ends_with(".bmp")) {
+        return Err(anyhow::anyhow!("only image files can be uploaded"));
+    }
+
+    let handle_arc = {
+        let locked = session_handles().lock().await;
+        locked.get(session_id).cloned()
+    };
+    let handle_arc =
+        handle_arc.ok_or_else(|| anyhow::anyhow!("unknown session (reconnect first)"))?;
+
+    let channel = {
+        let h = handle_arc.lock().await;
+        h.channel_open_session()
+            .await
+            .map_err(|e| anyhow::anyhow!("sftp channel open failed: {e:#}"))?
+    };
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp subsystem refused (server may disable sftp): {e:#}"))?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp handshake failed: {e:#}"))?;
+
+    // Cwd at login is $HOME on stock sshd; keep paths relative so no
+    // shell expansion is needed. Best-effort mkdir (exists => error ignored).
+    let _ = sftp.create_dir("still-uploads").await;
+    let remote = format!("still-uploads/{safe}");
+    let mut file = sftp
+        .open_with_flags(
+            &remote,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp open failed: {e:#}"))?;
+    file.write_all(&bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp write failed: {e:#}"))?;
+    file.flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp flush failed: {e:#}"))?;
+    file.shutdown()
+        .await
+        .map_err(|e| anyhow::anyhow!("sftp close failed: {e:#}"))?;
+    // Display form matches the old PTY path: $HOME-prefixed, frontend
+    // converts to ~/ for agent attach detectors.
+    Ok(format!("$HOME/{remote}"))
+}
 
 /// Pace the START of SSH handshakes: the system sshd throttles rapid
 /// unauthenticated KEX, so beginnings stay serialized at least
@@ -291,6 +411,7 @@ async fn probe_host_key_retry(
 }
 
 pub async fn run_session(
+    session_id: String,
     cfg: SshConfig,
     password: Option<String>,
     private_key_pem: Option<String>,
@@ -304,6 +425,7 @@ pub async fn run_session(
     let native_hint = format!("{}:{} tmux={}", cfg.host, cfg.port, cfg.tmux_session);
     diag::record("rust", "WORKER_ENTERED", "", &native_hint, true, "", "", None);
     let result = run_session_inner(
+        &session_id,
         &cfg,
         password,
         private_key_pem,
@@ -313,6 +435,7 @@ pub async fn run_session(
         &mut shutdown_rx,
     )
     .await;
+    remove_handle(&session_id).await;
     match result {
         Ok(()) => {
             diag::record("rust", "WORKER_EXITED_OK", "", &native_hint, true, "", "", None);
@@ -335,6 +458,7 @@ pub async fn run_session(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_session_inner(
+    session_id: &str,
     cfg: &SshConfig,
     password: Option<String>,
     private_key_pem: Option<String>,
@@ -396,7 +520,7 @@ async fn run_session_inner(
     let verified_id = verified.lock().unwrap().clone();
     match (connect_result, verified_id, prompt) {
         (Ok(handle), Some(_), None) => {
-            run_authenticated(handle, cfg, password, private_key_pem, event_tx, input_rx, resize_rx, shutdown_rx).await
+            run_authenticated(handle, session_id, cfg, password, private_key_pem, event_tx, input_rx, resize_rx, shutdown_rx).await
         }
         (_, _, Some(prompt)) => {
             // Refuse: surface the prompt (fingerprint UI) + typed error.
@@ -455,8 +579,9 @@ async fn run_session_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_authenticated<H: client::Handler>(
-    mut handle: russh::client::Handle<H>,
+async fn run_authenticated(
+    mut handle: russh::client::Handle<VerifyClient>,
+    session_id: &str,
     cfg: &SshConfig,
     password: Option<String>,
     private_key_pem: Option<String>,
@@ -514,9 +639,18 @@ async fn run_authenticated<H: client::Handler>(
     }
     diag::ok_elapsed("rust", "AUTH_COMPLETED", "", &addr, t_auth.elapsed().as_millis());
 
+    // Publish the authenticated handle for out-of-band SFTP uploads.
+    // Arc<Mutex<>>: Handle is !Clone/!Sync, lock is held only to open
+    // channels, never across I/O, so uploads never block the PTY pump.
+    let shared = std::sync::Arc::new(tokio::sync::Mutex::new(handle));
+    store_handle(session_id, shared.clone()).await;
+
     diag::record("rust", "CHANNEL_OPEN_START", "", &addr, true, "", "", None);
     let t_ch = std::time::Instant::now();
-    let mut channel = bounded(CHANNEL_SECS, "SSH channel open", handle.channel_open_session()).await?;
+    let mut channel = {
+        let h = shared.lock().await;
+        bounded(CHANNEL_SECS, "SSH channel open", h.channel_open_session()).await?
+    };
     diag::ok_elapsed("rust", "CHANNEL_OPENED", "", &addr, t_ch.elapsed().as_millis());
     let t_pty = std::time::Instant::now();
     bounded(
@@ -573,7 +707,8 @@ async fn run_authenticated<H: client::Handler>(
                 diag::record("rust", "CHANNEL_CLOSED", "", &addr, true, "", "reason=shutdown", None);
                 let _ = channel.eof().await;
                 let _ = channel.close().await;
-                let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
+                let h = shared.lock().await;
+                let _ = h.disconnect(Disconnect::ByApplication, "", "").await;
                 return Ok(());
             }
             Some((c, r)) = resize_rx.recv() => {

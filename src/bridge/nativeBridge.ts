@@ -2,11 +2,37 @@ import type { ConnectionStatus } from "../types"
 
 /**
  * Bitmap-only clipboard fallback: paste events sometimes carry no file item
- * and no text (screenshots on some WebViews). Try the async clipboard API
- * first, then the Tauri native image read (RGBA -> PNG via canvas).
- * Returns a PNG File or null. Never throws.
+ * and no text (screenshots on some WebViews, and all of WebKitGTK on Linux
+ * where ClipboardEvent.clipboardData is always empty). In a Tauri runtime
+ * prefer the native plugin first (no permission prompt, no transient-
+ * activation expiry); the async web Clipboard API is the browser-preview
+ * fallback only. Returns a PNG File or null. Never throws.
  */
 export async function readClipboardImageFile(): Promise<File | null> {
+  if ("__TAURI__" in window) {
+    try {
+      const { readImage } = await import("@tauri-apps/plugin-clipboard-manager")
+      const image = await readImage()
+      const [rgba, { width, height }] = await Promise.all([image.rgba(), image.size()])
+      try {
+        if (!width || !height || rgba.length !== width * height * 4) return null
+        const canvas = document.createElement("canvas")
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return null
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0)
+        const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"))
+        if (!blob?.size) return null
+        return new File([blob], "still-paste.png", { type: "image/png" })
+      } finally {
+        await image.close().catch(() => {})
+      }
+    } catch {
+      // No image in clipboard (plugin throws) — fall through to web API
+      // which may still have it, then null.
+    }
+  }
   try {
     const items = await navigator.clipboard?.read?.()
     for (const item of items ?? []) {
@@ -16,9 +42,9 @@ export async function readClipboardImageFile(): Promise<File | null> {
       if (blob?.size) return new File([blob], "still-paste.png", { type: "image/png" })
     }
   } catch {
-    // Async clipboard unavailable/denied — try the native fallback below.
+    // Async clipboard unavailable/denied.
   }
-  if (!("__TAURI__" in window)) return null
+  if ("__TAURI__" in window) return null
   try {
     const { readImage } = await import("@tauri-apps/plugin-clipboard-manager")
     const image = await readImage()
@@ -156,6 +182,10 @@ export interface NativeBridge {
   clipboardWriteText(text: string): Promise<void>
   clipboardReadText(): Promise<string>
 
+  // --- SFTP image upload (bypasses PTY, safe in fullscreen TUIs) ---
+  /** Upload base64 image to ~/still-uploads. Returns $HOME-style remote path. */
+  uploadImage(sessionId: string, fileName: string, base64Data: string): Promise<{ remotePath: string }>
+
   windowMinimize(): Promise<void>
   windowToggleMaximize(): Promise<void>
   windowClose(): Promise<void>
@@ -251,5 +281,9 @@ export const failingBridge: NativeBridge = {
   },
   async clipboardReadText(): Promise<string> {
     throw new Error("No native runtime: clipboard unavailable.")
+  },
+
+  async uploadImage(): Promise<{ remotePath: string }> {
+    throw new Error("No native runtime: SFTP upload unavailable.")
   },
 }

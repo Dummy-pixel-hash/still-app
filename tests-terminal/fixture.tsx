@@ -24,12 +24,15 @@ const h = {
   deferPaste: false,
   pasteText: "pasted λ\nsecond line",
   closes: 0,
+  uploads: [] as { sessionId: string; fileName: string; base64Len: number }[],
+  rejectUpload: false,
+  failSftp: false,
   get term() { return terminal },
   emit: async (text: string) => {
     sink?.({ type: "data", data: Array.from(new TextEncoder().encode(text)) })
     await new Promise<void>(resolve => terminal.write("", resolve))
   },
-  clear: () => { h.writes.length = 0; h.copies.length = 0; h.reads = 0 },
+  clear: () => { h.writes.length = 0; h.copies.length = 0; h.reads = 0; h.uploads.length = 0 },
   resolvePaste: (text: string) => { readResolve?.(text) },
   reconnect: () => connect(),
   disconnect: () => disconnectSession("fixture"),
@@ -72,6 +75,13 @@ registerNativeBridge({
     if (h.rejectPaste) throw new Error("denied")
     if (h.deferPaste) return new Promise<string>(resolve => { readResolve = resolve })
     return h.pasteText
+  },
+  async uploadImage(sessionId: string, fileName: string, base64Data: string) {
+    if (h.rejectUpload) throw new Error("denied")
+    if (h.failSftp) throw new Error("sftp_unavailable: sftp disabled")
+    h.uploads.push({ sessionId, fileName, base64Len: base64Data.length })
+    const safe = fileName.replace(/[^A-Za-z0-9._-]/g, "_") || "still-paste.png"
+    return { remotePath: `$HOME/still-uploads/${safe}` }
   },
 })
 const connect = () => connectSession({ localId: "fixture", host: "fixture.invalid", port: 22, username: "test", authKind: "password", tmuxSession: "fixture" })
