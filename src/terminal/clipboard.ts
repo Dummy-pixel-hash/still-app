@@ -36,9 +36,32 @@ export function decodeClipboardRequest(data: string): string | null {
   }
 }
 
+/**
+ * Screenshots and WebView clipboard items often arrive with an empty MIME
+ * type, so a `type.startsWith("image/")` check alone drops real images.
+ * Sniff magic bytes to recover the MIME. Returns "" when unknown.
+ */
+export async function sniffImageMime(blob: Blob): Promise<string> {
+  if (blob.type.startsWith("image/")) return blob.type
+  try {
+    const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer())
+    const sig = (...bytes: number[]) => bytes.every((b, i) => head[i] === b)
+    if (sig(0x89, 0x50, 0x4e, 0x47)) return "image/png"
+    if (sig(0xff, 0xd8, 0xff)) return "image/jpeg"
+    if (sig(0x47, 0x49, 0x46)) return "image/gif"
+    if (sig(0x42, 0x4d)) return "image/bmp"
+    if (
+      sig(0x52, 0x49, 0x46, 0x46) &&
+      head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50
+    ) return "image/webp"
+  } catch {
+    // Unreadable — treated as non-image below.
+  }
+  return ""
+}
+
 /** Local copy and explicit, bounded TUI clipboard transfers share one shortcut. */
-export function imageUploadFileName(now: Date, mime: string): string {
-  const ext =
+export function imageUploadFileName(now: Date, mime: string): string {  const ext =
     mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : "png"
   const stamp = now.toISOString().replace(/[:.]/g, "-")
   return `still-paste-${stamp}.${ext}`
@@ -169,6 +192,8 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
   let owner = sessionId()
   let remoteCopy: { text: string; time: number } | null = null
   let clearPreview: (() => void) | null = null
+  /** Last receipt time of a DOM paste event — drives the Ctrl+V backup below. */
+  let lastPasteEventAt = 0
   const syncOwner = () => {
     const current = sessionId()
     if (current !== owner) { owner = current; remoteCopy = null }
@@ -214,7 +239,8 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     if (pasting) return
     const targetSession = syncOwner()
     if (!targetSession) { notify("Connect before pasting."); return }
-    if (!blob.type.startsWith("image/")) {
+    const mime = blob.type || (await sniffImageMime(blob))
+    if (!mime.startsWith("image/")) {
       notify("Only images can be pasted as files.")
       return
     }
@@ -225,7 +251,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
     pasting = true
     try {
       const base64 = await blobToBase64(blob)
-      const remotePath = imageRemotePath(imageUploadFileName(new Date(), blob.type))
+      const remotePath = imageRemotePath(imageUploadFileName(new Date(), mime))
       // Always show the image locally first: the remote `ls -l` output is
       // invisible when a fullscreen app owns the screen, and the user must
       // SEE that the paste landed.
@@ -283,49 +309,107 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
   // the shortcut + bridge path above; only image payloads are intercepted
   // here and uploaded to ~/still-uploads via the live PTY.
   const onPasteEvent = async (event: ClipboardEvent) => {
-    const data = event.clipboardData
-    if (!data) return
-    let image: File | null = null
-    const files = data.files
-    if (files) {
-      for (const file of Array.from(files)) {
-        if (file.type.startsWith("image/")) { image = file; break }
-      }
+    lastPasteEventAt = Date.now()
+    let data: DataTransfer | null = null
+    try {
+      data = event.clipboardData
+    } catch {
+      data = null
     }
-    if (!image && data.items) {
-      for (const item of Array.from(data.items)) {
-        if (item.type.startsWith("image/")) {
-          const file = item.getAsFile()
-          if (file) { image = file; break }
+    if (!data) {
+      if (alive) notify("Paste was blocked — the system gave no clipboard data.")
+      return
+    }
+    try {
+      let image: File | null = null
+      const files = data.files
+      if (files) {
+        for (const file of Array.from(files)) {
+          // Type is often "" for screenshots — verify by content below.
+          if (file.type.startsWith("image/") || file.type === "") {
+            if (file.type || (await sniffImageMime(file))) { image = file; break }
+          }
         }
       }
-    }
-    if (image) {
+      if (!image && data.items) {
+        for (const item of Array.from(data.items)) {
+          if (item.kind === "file" && (item.type.startsWith("image/") || item.type === "")) {
+            const file = item.getAsFile()
+            if (file && (file.type || (await sniffImageMime(file)))) { image = file; break }
+          }
+        }
+      }
+      if (image) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        void pasteImage(image)
+        return
+      }
+      const text = data.getData("text/plain")
+      if (!text) {
+        // Bitmap-only clipboard: no file item and no text (common for
+        // screenshots on some WebViews). Fall back to a native image read.
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        const { readClipboardImageFile } = await import("../bridge/nativeBridge")
+        const fallback = await readClipboardImageFile()
+        if (fallback) void pasteImage(fallback)
+        else if (alive) notify("Nothing to paste. Copy an image or text first.")
+        return
+      }
+      if (!host.contains(document.activeElement)) return
+      const target = syncOwner()
+      if (!target) return
       event.preventDefault()
       event.stopImmediatePropagation()
-      void pasteImage(image)
-      return
+      terminal.paste(text)
+    } catch {
+      if (alive) notify("Paste failed. Try copying again.")
     }
-    const text = data.getData("text/plain")
-    if (!text) {
-      // Bitmap-only clipboard: no file item and no text (common for
-      // screenshots on some WebViews). Fall back to a native image read.
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      const { readClipboardImageFile } = await import("../bridge/nativeBridge")
-      const image = await readClipboardImageFile()
-      if (image) void pasteImage(image)
-      else if (alive) notify("Nothing to paste. Copy an image or text first.")
-      return
-    }
-    if (!host.contains(document.activeElement)) return
-    const target = syncOwner()
-    if (!target) return
-    event.preventDefault()
-    event.stopImmediatePropagation()
-    terminal.paste(text)
   }
   host.addEventListener("paste", onPasteEvent)
+  // Backup for WebViews that swallow the DOM paste event entirely (no event,
+  // no clipboardData — the user sees nothing at all). When Ctrl(+Shift)+V is
+  // pressed inside the terminal and no paste event arrives shortly after,
+  // read the clipboard directly: native image first, then text. The timestamp
+  // guard guarantees the event path and this path never both run.
+  const onCtrlV = (event: KeyboardEvent) => {
+    if (!event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+    if (event.code !== "KeyV" && event.key.toLowerCase() !== "v") return
+    if (event.repeat) return
+    const t = event.target as HTMLElement | null
+    if (!t?.classList?.contains("xterm-helper-textarea")) return
+    const pressedAt = Date.now()
+    window.setTimeout(() => {
+      if (!alive || pasting) return
+      if (lastPasteEventAt >= pressedAt) return
+      void (async () => {
+        try {
+          const { readClipboardImageFile } = await import("../bridge/nativeBridge")
+          const image = await readClipboardImageFile()
+          if (!alive) return
+          if (image) { void pasteImage(image); return }
+          const target = syncOwner()
+          if (!target) { notify("Connect before pasting."); return }
+          try {
+            const text = await bridge().clipboardReadText()
+            if (!alive) return
+            if (text) {
+              if (host.contains(document.activeElement)) terminal.paste(text)
+              else notify("Terminal lost focus — click it and paste again.")
+            } else {
+              notify("Nothing to paste. Copy an image or text first.")
+            }
+          } catch {
+            if (alive) notify("Paste failed. Clipboard access was denied; try again.")
+          }
+        } catch {
+          if (alive) notify("Paste failed. Try copying again.")
+        }
+      })()
+    }, 350)
+  }
+  host.addEventListener("keydown", onCtrlV, { capture: true })
   return {
     endReplay: () => { replaying = false },
     dispose: () => {
@@ -335,6 +419,7 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       clearPreview = null
       osc.dispose()
       host.removeEventListener("keydown", onKey, { capture: true })
+      host.removeEventListener("keydown", onCtrlV, { capture: true })
       host.removeEventListener("paste", onPasteEvent)
     },
   }
