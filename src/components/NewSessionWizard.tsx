@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import type { Project, SessionDraft } from "../types"
-import { loadPresets, presetDetail, type SessionPreset } from "../session/presets"
+import { loadPresets, presetDetail, savePresets, upsertPreset, type SessionPreset } from "../session/presets"
 
 const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
@@ -89,7 +89,7 @@ export default function NewSessionWizard({
   const [step, setStep] = useState(0)
   const [dir, setDir] = useState<1 | -1>(1)
   const [query, setQuery] = useState("")
-  const [presets] = useState<SessionPreset[]>(() => loadPresets())
+  const [presets, setPresets] = useState<SessionPreset[]>(() => loadPresets())
   // Preset fast-path: a chosen preset fills everything, so the flow skips
   // server/login/project and asks only for a name.
   const [fromPreset, setFromPreset] = useState(false)
@@ -129,6 +129,39 @@ export default function NewSessionWizard({
     if (advance) go(1, 1)
   }
 
+  /** Persist the current wizard fields as a reusable user preset. */
+  const saveCurrentAsPreset = () => {
+    const next = upsertPreset(presets, {
+      name: name.trim() || query.trim() || host.trim(),
+      host,
+      port,
+      username,
+      workingDirectory,
+      queryFallback: query,
+    })
+    // upsertPreset is a no-op (same ref) when host is blank.
+    if (next !== presets) setPresets(next)
+  }
+
+  /** Auto-save on successful create: every valid connection becomes a preset. */
+  const autoSavePreset = () => {
+    if (!host.trim() || portError(port)) return
+    const next = upsertPreset(presets, {
+      name: name.trim() || query.trim() || appliedName || host.trim(),
+      host,
+      port,
+      username,
+      workingDirectory,
+      queryFallback: query || appliedName,
+    })
+    if (next !== presets) setPresets(next)
+  }
+
+  /** Remove a user preset (builtins are never deletable). */
+  const removePreset = (id: string) => {
+    setPresets(savePresets(presets.filter((p) => p.id !== id)))
+  }
+
   const presetEnter = () => {
     if (matches.length > 0) applyPreset(matches[0])
     else if (query.trim()) {
@@ -161,6 +194,7 @@ export default function NewSessionWizard({
       return
     }
     const pid = resolveProjectId() || onCreateProject("Default").id
+    autoSavePreset()
     onSubmit({
       name: name.trim(),
       host: host.trim(),
@@ -198,6 +232,8 @@ export default function NewSessionWizard({
       }
     }
     if (!pid) return
+    if (!host.trim() || portError(port)) return
+    autoSavePreset()
     onSubmit({
       name: name.trim(),
       host: host.trim(),
@@ -252,18 +288,33 @@ export default function NewSessionWizard({
             </Field>
             <div className="flex max-h-56 flex-col gap-1.5 overflow-y-auto scroll-quiet">
               {matches.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => applyPreset(p)}
-                  title={presetDetail(p)}
-                  className="group flex items-baseline justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left transition hover:border-[#ff4a4a]/50"
-                >
-                  <span className="truncate text-[13px] text-fg">{p.name}</span>
-                  <span className="shrink-0 font-mono text-[11px] text-faint group-hover:text-dim">
-                    {p.host ? `${p.username ? `${p.username}@` : ""}${p.host}:${p.port}` : "blank"}
-                  </span>
-                </button>
+                <span key={p.id} className="group/preset relative">
+                  <button
+                    type="button"
+                    onClick={() => applyPreset(p)}
+                    title={presetDetail(p)}
+                    className="group flex w-full items-baseline justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left transition hover:border-[#ff4a4a]/50"
+                  >
+                    <span className="truncate text-[13px] text-fg">{p.name}</span>
+                    <span className="shrink-0 font-mono text-[11px] text-faint group-hover:text-dim">
+                      {p.host ? `${p.username ? `${p.username}@` : ""}${p.host}:${p.port}` : "blank"}
+                    </span>
+                  </button>
+                  {!p.id.startsWith("builtin-") ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        removePreset(p.id)
+                      }}
+                      aria-label={`Delete preset ${p.name}`}
+                      title={`Delete preset ${p.name}`}
+                      className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-white/15 bg-[#17171a] text-[9px] leading-none text-dim hover:text-[#ff8080] group-hover/preset:flex"
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                </span>
               ))}
               {noMatch ? (
                 <button
@@ -486,12 +537,23 @@ export default function NewSessionWizard({
               >
                 ← Back
               </button>
-              <button
-                type="submit"
-                className="rounded-full bg-[#e8e2e6] px-5 py-2 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
-              >
-                Create & connect
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={saveCurrentAsPreset}
+                  disabled={!host.trim()}
+                  title="Save current connection as a reusable preset"
+                  className="rounded-full border border-dashed border-white/15 px-4 py-2 text-[13px] text-dim transition hover:border-white/25 hover:text-fg disabled:opacity-40"
+                >
+                  ★ Save preset
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-full bg-[#e8e2e6] px-5 py-2 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
+                >
+                  Create & connect
+                </button>
+              </div>
             </div>
           </form>
         ) : null}

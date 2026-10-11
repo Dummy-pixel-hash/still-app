@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useMemo, type PointerEvent as ReactPointerEvent } from "react"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
@@ -98,50 +98,54 @@ export default function SessionCard({
   conn,
   index,
   dragging,
+  dropHighlight,
   menuOpen,
   onOpen,
   onEdit,
   onRemove,
   onToggleMenu,
-  onDragStart,
-  onDragEnd,
-  onDropOn,
+  onCardPointerDown,
 }: {
   session: Session
   conn: CardConn
   index: number
   dragging: boolean
+  dropHighlight: boolean
   menuOpen: boolean
   onOpen: (session: Session, el: HTMLElement) => void
   onEdit: (session: Session) => void
   onRemove: (session: Session) => void
   onToggleMenu: (id: string | null) => void
-  onDragStart: () => void
-  onDragEnd: () => void
-  onDropOn: () => void
+  onCardPointerDown: (
+    e: ReactPointerEvent,
+    session: Session,
+    el: HTMLElement,
+  ) => void
 }) {
   const meta = statusMeta[conn]
   const live = conn === "connected"
 
   return (
-    <div style={{ perspective: 900 }} className="rise">
+    <div
+      style={{ perspective: 900 }}
+      className="rise"
+      data-card={session.id}
+    >
       <div
         role="button"
         tabIndex={0}
-        data-card={session.id}
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.effectAllowed = "move"
-          onDragStart()
-        }}
-        onDragEnd={onDragEnd}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onDropOn()
+        onPointerDown={(e) => {
+          // Menu / form controls keep native behaviour (click, scroll).
+          const t = e.target as HTMLElement
+          if (t.closest("[data-menu],button,a,input,select,textarea")) {
+            // The grip itself is a span (not a button) so it falls
+            // through to drag even though it lives in the header.
+            if (!t.closest("[data-drag-handle]")) return
+          }
+          onCardPointerDown(e, session, e.currentTarget)
         }}
         onMouseMove={(e) => {
+          if (dragging) return
           const el = e.currentTarget
           const r = el.getBoundingClientRect()
           const x = (e.clientX - r.left) / r.width
@@ -169,11 +173,13 @@ export default function SessionCard({
           animationDelay: `${index * 55}ms`,
           transform: "rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg))",
           transition: `transform 500ms ${EASE}, opacity 300ms, box-shadow 400ms`,
-          // While dragging, the card keeps its full visuals — the drop
-          // target (project section) lights up instead of the card dimming.
+          // Drag source dims slightly while the floating ghost follows the
+          // pointer; drop targets light up instead.
           cursor: dragging ? "grabbing" : undefined,
-          boxShadow:
-            "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 24px 40px -18px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.5)",
+          opacity: dragging ? 0.35 : undefined,
+          boxShadow: dropHighlight
+            ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,74,74,0.65), 0 24px 40px -18px rgba(0,0,0,0.9), 0 0 32px -8px rgba(255,74,74,0.45)"
+            : "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 24px 40px -18px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.5)",
         }}
         className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,90,90,0.18),0_30px_50px_-16px_rgba(0,0,0,1),0_0_60px_-20px_rgba(255,60,60,0.35)]"
       >
@@ -185,8 +191,19 @@ export default function SessionCard({
           }}
         />
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-fg">
-            {session.name}
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span
+              data-drag-handle
+              role="separator"
+              aria-label={`Drag ${session.name}`}
+              title="Drag to move"
+              className="shrink-0 cursor-grab touch-none select-none rounded px-1 font-mono text-[13px] leading-none text-faint transition hover:bg-white/[0.07] hover:text-fg active:cursor-grabbing"
+            >
+              ⠿
+            </span>
+            <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-fg">
+              {session.name}
+            </span>
           </span>
           <span className="flex shrink-0 items-center gap-2 text-[11px] text-dim">
             {meta.label}

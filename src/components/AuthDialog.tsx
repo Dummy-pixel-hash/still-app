@@ -24,13 +24,13 @@ export default function AuthDialog({
 
   useEffect(() => {
     fieldRef.current?.focus()
-    if (session.authMethod === "password") {
+    if (mode === "password") {
       void nativeBridge
         .hasCredential(session.host, session.port, session.username)
         .then(setStored)
         .catch(() => setStored(false))
     }
-  }, [session])
+  }, [session, mode])
 
   // Portalled to document.body: the workspace container underneath gets
   // pointer-events:none while the terminal overlay is open, which would

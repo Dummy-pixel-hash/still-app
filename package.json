@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test:regressions": "node tests-m3/regressions.mjs && node tests-m5/regressions.mjs && node tests-m6/regressions.mjs",
+    "test:presets": "node tests-presets/regressions.mjs",
     "test:hostkey": "node tests-m5/regressions.mjs",
     "test:terminal": "node --test \"tests-terminal/**/*.test.mjs\" && playwright test -c tests-terminal/playwright.config.ts",
     "bench:terminal": "node tests-terminal/benchmark.mjs"

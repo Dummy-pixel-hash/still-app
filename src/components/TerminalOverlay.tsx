@@ -484,7 +484,7 @@ export default function TerminalOverlay({
                 </div>
               </div>
             )}
-            {(state === "connecting" || state === "connected") && (
+            {state === "connecting" && (
               <div className="flex shrink-0 items-center gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-2">
                 <button
                   type="button"
@@ -493,20 +493,12 @@ export default function TerminalOverlay({
                   className="flex items-center gap-2 rounded-full px-1 py-0.5 outline-none transition hover:bg-white/[0.06]"
                 >
                   <span
-                    className={`h-[7px] w-[7px] rounded-full ${
-                      state === "connected"
-                        ? "bg-[#ff4a4a] shadow-[0_0_8px_1px_rgba(255,74,74,0.7)] animate-[breathe_2.4s_ease-in-out_infinite]"
-                        : "animate-pulse bg-[#e8c4a0]"
-                    }`}
+                    className="h-[7px] w-[7px] animate-pulse rounded-full bg-[#e8c4a0]"
                   />
                   <span className="font-mono text-[11px] text-dim">
-                    {state === "connected"
-                      ? `live · tmux ${session?.tmuxSession}`
-                      : hostPrompt
-                        ? "waiting for approval…"
-                        : busy
-                          ? "connecting…"
-                          : "connecting…"}
+                    {hostPrompt
+                      ? "waiting for approval…"
+                      : "connecting…"}
                   </span>
                   <span className="font-mono text-[10px] text-faint">
                     {footerOpen ? "▾" : "▸"}

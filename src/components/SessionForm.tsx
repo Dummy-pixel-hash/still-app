@@ -252,7 +252,8 @@ export default function SessionForm({
         )}
         {draft.authMethod === "ask" && (
           <p className="font-mono text-[11px] text-faint">
-            You’ll be asked for a password or key each time you connect.
+            You’ll be asked for a password or key each time you connect,
+            unless a remembered secret exists for this endpoint.
           </p>
         )}
 

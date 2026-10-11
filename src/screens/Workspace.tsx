@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
 import WindowNav from "../components/WindowNav"
 import SessionCard from "../components/SessionCard"
 import TerminalOverlay, { type OpenState } from "../components/TerminalOverlay"
@@ -15,7 +15,6 @@ import {
   moveSession,
   removeProject,
   removeSession,
-  reorderSession,
   touchSession,
   updateSession,
   useStore,
@@ -51,8 +50,17 @@ export default function Workspace() {
   const [sort, setSort] = useState<Sort>("manual")
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<OpenState | null>(null)
-  const [drag, setDrag] = useState<string | null>(null)
-  const [dragOver, setDragOver] = useState<string | null>(null)
+  // Pointer-based card drag (works in the packaged WebView, where native
+  // HTML5 DnD never starts, plus mouse + touch in the browser).
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropProject, setDropProject] = useState<string | null>(null)
+  const [dropBefore, setDropBefore] = useState<string | null>(null)
+  const [ghost, setGhost] = useState<{
+    x: number
+    y: number
+    w: number
+    name: string
+  } | null>(null)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [showNew, setShowNew] = useState<string | null>(null)
   const [showNewProject, setShowNewProject] = useState(false)
@@ -69,6 +77,27 @@ export default function Workspace() {
   const searchRef = useRef<HTMLInputElement>(null)
   const closeTimer = useRef(0)
   const returnTarget = useRef<HTMLElement | null>(null)
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  // Live refs so window-level pointermove/up handlers (attached once per
+  // gesture) never read stale render closures.
+  const viewRef = useRef<{ project: Project; sessions: Session[] }[]>([])
+  const storeRef = useRef(store)
+  const sortRef = useRef(sort)
+  const qRef = useRef(q)
+  const pendingRef = useRef<{
+    id: string
+    startX: number
+    startY: number
+    active: boolean
+    name: string
+    sourceProject: string
+    w: number
+  } | null>(null)
+  const dropRef = useRef<{ project: string | null; before: string | null }>({
+    project: null,
+    before: null,
+  })
+  const suppressClickUntil = useRef(0)
 
   useEffect(() => () => window.clearTimeout(closeTimer.current), [])
 
@@ -155,7 +184,10 @@ export default function Workspace() {
     async (session: Session) => {
       // Silent path: keyring already holds the secret — skip the dialog
       // unless the stored secret just failed auth (then it is wrong).
-      if (session.authMethod === "password") {
+      // "ask" sessions (the wizard default) save password credentials too,
+      // so they must check as well — otherwise Remember persists but is
+      // never reused and the dialog appears every time.
+      if (session.authMethod === "password" || session.authMethod === "ask") {
         const err = connectionError(session.id) ?? ""
         if (!/auth|wrong|password|incorrect|denied/i.test(err)) {
           try {
@@ -228,7 +260,218 @@ export default function Workspace() {
       })
   }, [q, sort, store.order, store.projects, store.sessions])
 
+  viewRef.current = view
+  storeRef.current = store
+  sortRef.current = sort
+  qRef.current = q
+
   const empty = store.sessions.length === 0
+
+  const cancelDrag = useCallback(() => {
+    pendingRef.current = null
+    dropRef.current = { project: null, before: null }
+    setDragId(null)
+    setDropProject(null)
+    setDropBefore(null)
+    setGhost(null)
+    document.body.style.userSelect = ""
+    document.body.style.cursor = ""
+  }, [])
+
+  const commitDrag = useCallback(() => {
+    const pending = pendingRef.current
+    const drop = dropRef.current
+    const wasActive = pending?.active
+    const id = pending?.id
+    pendingRef.current = null
+    dropRef.current = { project: null, before: null }
+    setDragId(null)
+    setDropProject(null)
+    setDropBefore(null)
+    setGhost(null)
+    document.body.style.userSelect = ""
+    document.body.style.cursor = ""
+    if (!wasActive || !id) return
+    // A real drag just happened: swallow the click that pointerup would
+    // otherwise deliver to the card (which opens the terminal).
+    suppressClickUntil.current = Date.now() + 300
+    if (!drop.project) return
+    const st = storeRef.current
+    const src = st.sessions.find((s) => s.id === id)
+    if (!src) return
+    // Sorted / filtered views don't express manual order: same-project
+    // drops would be invisible, so treat them as a no-op. Cross-project
+    // moves still apply (position follows the target view's sort).
+    if (
+      drop.project === src.projectId &&
+      (sortRef.current !== "manual" || qRef.current.trim() !== "")
+    )
+      return
+    const full: string[] =
+      st.order[drop.project] ??
+      st.sessions.filter((s) => s.projectId === drop.project).map((s) => s.id)
+    const before = drop.before
+    if (before && !full.includes(before) && before !== null) {
+      moveSession(id, drop.project)
+      return
+    }
+    // Same-position no-op: already immediately before `before` (or already
+    // last when appending).
+    if (drop.project === src.projectId) {
+      const at = full.indexOf(id)
+      if (before == null) {
+        if (at === full.length - 1) return
+      } else if (full[at + 1] === before) {
+        return
+      }
+    }
+    moveSession(id, drop.project, before ?? undefined)
+  }, [])
+
+  const handleCardPointerDown = useCallback(
+    (e: ReactPointerEvent, session: Session, el: HTMLElement) => {
+      if (open) return
+      if (e.pointerType === "mouse" && e.button !== 0) return
+      const target = e.target as HTMLElement | null
+      // Touch uses the grip handle so a finger drag never fights scroll;
+      // mouse/pen may grab anywhere except interactive controls.
+      if (
+        e.pointerType === "touch" &&
+        !target?.closest?.("[data-drag-handle]")
+      )
+        return
+      setMenuId(null)
+      setProjectMenuId(null)
+      const rect = el.getBoundingClientRect()
+      pendingRef.current = {
+        id: session.id,
+        startX: e.clientX,
+        startY: e.clientY,
+        active: false,
+        name: session.name,
+        sourceProject: session.projectId,
+        w: Math.max(200, Math.min(340, rect.width)),
+      }
+
+      const onMove = (ev: PointerEvent) => {
+        const pending = pendingRef.current
+        if (!pending) return
+        const dx = ev.clientX - pending.startX
+        const dy = ev.clientY - pending.startY
+        if (!pending.active) {
+          if (Math.hypot(dx, dy) < 7) return
+          pending.active = true
+          setDragId(pending.id)
+          document.body.style.userSelect = "none"
+          document.body.style.cursor = "grabbing"
+        }
+        setGhost({
+          x: ev.clientX,
+          y: ev.clientY,
+          w: pending.w,
+          name: pending.name,
+        })
+
+        // Drop target via hit-testing (works for mouse + touch + pen).
+        const under = document.elementFromPoint(
+          ev.clientX,
+          ev.clientY,
+        ) as HTMLElement | null
+        const cardEl = under?.closest?.("[data-card]") as HTMLElement | null
+        const projEl = under?.closest?.("[data-project]") as HTMLElement | null
+        let project: string | null = null
+        let before: string | null = null
+        if (cardEl) {
+          const targetId = cardEl.dataset.card ?? null
+          if (targetId && targetId !== pending.id) {
+            const group = viewRef.current.find(({ sessions }) =>
+              sessions.some((s) => s.id === targetId),
+            )
+            if (group) {
+              project = group.project.id
+              const r = cardEl.getBoundingClientRect()
+              // Grid-aware half: bottom/right half means "after".
+              const after =
+                ev.clientY > r.top + r.height / 2 ||
+                (Math.abs(ev.clientY - (r.top + r.height / 2)) <
+                  r.height * 0.2 &&
+                  ev.clientX > r.left + r.width / 2)
+              if (after) {
+                const idx = group.sessions.findIndex((s) => s.id === targetId)
+                before = group.sessions[idx + 1]?.id ?? null
+              } else {
+                before = targetId
+              }
+            }
+          } else if (targetId === pending.id) {
+            // Hovering the dragged card itself: keep its project lit so
+            // the user sees where a release would land (appends at end).
+            const group = viewRef.current.find(({ sessions }) =>
+              sessions.some((s) => s.id === targetId),
+            )
+            project = group?.project.id ?? pending.sourceProject
+            before = null
+          }
+        }
+        if (!project && projEl?.dataset.project) {
+          project = projEl.dataset.project
+          before = null
+        }
+        const prev = dropRef.current
+        if (prev.project !== project || prev.before !== before) {
+          dropRef.current = { project, before }
+          setDropProject(project)
+          setDropBefore(before)
+        }
+
+        // Edge auto-scroll the workspace list.
+        const scroller = scrollRef.current
+        if (scroller) {
+          const sr = scroller.getBoundingClientRect()
+          if (ev.clientY < sr.top + 72) scroller.scrollBy(0, -14)
+          else if (ev.clientY > sr.bottom - 72) scroller.scrollBy(0, 14)
+        }
+        if (ev.cancelable) ev.preventDefault()
+      }
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        window.removeEventListener("pointercancel", onCancel)
+        commitDrag()
+      }
+      const onCancel = () => {
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        window.removeEventListener("pointercancel", onCancel)
+        cancelDrag()
+      }
+      window.addEventListener("pointermove", onMove, { passive: false })
+      window.addEventListener("pointerup", onUp)
+      window.addEventListener("pointercancel", onCancel)
+    },
+    [cancelDrag, commitDrag, open],
+  )
+
+  // Escape cancels an in-flight drag.
+  useEffect(() => {
+    if (!dragId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") cancelDrag()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [cancelDrag, dragId])
+
+  const handleCardOpen = useCallback(
+    (sess: Session, el: HTMLElement) => {
+      if (Date.now() < suppressClickUntil.current) return
+      if (pendingRef.current?.active) return
+      setMenuId(null)
+      openSession(sess, el)
+    },
+    [openSession],
+  )
 
   return (
     <div className="grain relative flex h-full flex-col overflow-hidden bg-ink text-fg">
@@ -242,6 +485,7 @@ export default function Workspace() {
       <WindowNav />
 
       <div
+        ref={scrollRef}
         className="relative z-10 min-h-0 flex-1 overflow-y-auto scroll-quiet transition-all duration-[650ms]"
         style={{
           transitionTimingFunction: EASE,
@@ -346,26 +590,12 @@ export default function Workspace() {
             view.map(({ project, sessions }) => (
               <section
                 key={project.id}
-                className={`mt-8 rounded-[20px] transition-shadow ${
-                  drag && dragOver === project.id
+                data-project={project.id}
+                className={`mt-8 rounded-[20px] p-2 transition-shadow ${
+                  dragId && dropProject === project.id
                     ? "shadow-[0_0_0_1px_rgba(255,74,74,0.45),0_0_40px_-12px_rgba(255,74,74,0.35)]"
                     : "shadow-[0_0_0_1px_transparent]"
                 }`}
-                onDragOver={(e) => e.preventDefault()}
-                onDragEnter={(e) => {
-                  e.preventDefault()
-                  setDragOver(project.id)
-                }}
-                onDragLeave={(e) => {
-                  // Child-to-child moves bubble with the child as target;
-                  // only clear when the pointer truly leaves this section.
-                  if (e.target === e.currentTarget) setDragOver(null)
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  setDragOver(null)
-                  if (drag) moveSession(drag, project.id)
-                }}
               >
                 <header className="mb-3 flex items-baseline justify-between gap-3">
                   <div className="min-w-0">
@@ -422,7 +652,13 @@ export default function Workspace() {
                   </div>
                 </header>
                 {sessions.length === 0 ? (
-                  <p className="rounded-2xl border border-dashed border-white/10 px-4 py-6 text-center text-[12px] text-faint">
+                  <p
+                    className={`rounded-2xl border border-dashed px-4 py-6 text-center text-[12px] transition ${
+                      dragId && dropProject === project.id
+                        ? "border-[#ff4a4a]/60 bg-[#ff4a4a]/[0.06] text-fg"
+                        : "border-white/10 text-faint"
+                    }`}
+                  >
                     Drag a card here, or press + to create one.
                   </p>
                 ) : (
@@ -430,56 +666,61 @@ export default function Workspace() {
                     className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
                   >
                     {sessions.map((s, i) => (
-                      <SessionCard
-                        key={s.id}
-                        session={s}
-                        conn={
-                          connectionState(s.id) === "disconnected" &&
-                          !s.lastOpenedAt
-                            ? "never"
-                            : connectionState(s.id)
-                        }
-                        index={i}
-                        dragging={drag === s.id}
-                        menuOpen={menuId === s.id}
-                        onOpen={(sess, el) => {
-                          setMenuId(null)
-                          openSession(sess, el)
-                        }}
-                        onEdit={(sess) => {
-                          setMenuId(null)
-                          setEditing(sess)
-                        }}
-                        onRemove={(sess) => {
-                          setMenuId(null)
-                          if (store.settings.confirmRemove)
-                            setRemoving(sess)
-                          else {
-                            void releaseSession(sess.id).finally(() =>
-                              removeSession(sess.id),
-                            )
+                      <Fragment key={s.id}>
+                        {dragId &&
+                        dropProject === project.id &&
+                        dropBefore === s.id ? (
+                          <div
+                            data-drop-indicator
+                            aria-hidden
+                            className="col-span-full h-[3px] rounded-full bg-[#ff4a4a]/80 shadow-[0_0_16px_rgba(255,74,74,0.6)]"
+                          />
+                        ) : null}
+                        <SessionCard
+                          session={s}
+                          conn={
+                            connectionState(s.id) === "disconnected" &&
+                            !s.lastOpenedAt
+                              ? "never"
+                              : connectionState(s.id)
                           }
-                        }}
-                        onToggleMenu={setMenuId}
-                        onDragStart={() => setDrag(s.id)}
-                        onDragEnd={() => {
-                          setDrag(null)
-                          setDragOver(null)
-                        }}
-                        onDropOn={() => {
-                          if (drag && drag !== s.id) {
-                            const ids = sessions
-                              .map((x) => x.id)
-                              .filter((id) => id !== drag)
-                            const at = ids.indexOf(s.id)
-                            ids.splice(at < 0 ? ids.length : at, 0, drag)
-                            reorderSession(drag, project.id, ids)
-                            moveSession(drag, project.id, s.id)
-                            setDrag(null)
+                          index={i}
+                          dragging={dragId === s.id}
+                          dropHighlight={
+                            dropProject === project.id &&
+                            dropBefore === s.id
                           }
-                        }}
-                      />
+                          menuOpen={menuId === s.id}
+                          onOpen={handleCardOpen}
+                          onEdit={(sess) => {
+                            setMenuId(null)
+                            setEditing(sess)
+                          }}
+                          onRemove={(sess) => {
+                            setMenuId(null)
+                            if (store.settings.confirmRemove)
+                              setRemoving(sess)
+                            else {
+                              void releaseSession(sess.id).finally(() =>
+                                removeSession(sess.id),
+                              )
+                            }
+                          }}
+                          onToggleMenu={setMenuId}
+                          onCardPointerDown={handleCardPointerDown}
+                        />
+                      </Fragment>
                     ))}
+                    {dragId &&
+                    dropProject === project.id &&
+                    (dropBefore == null ||
+                      !sessions.some((s) => s.id === dropBefore)) ? (
+                      <div
+                        data-drop-indicator
+                        aria-hidden
+                        className="col-span-full h-[3px] rounded-full bg-[#ff4a4a]/80 shadow-[0_0_16px_rgba(255,74,74,0.6)]"
+                      />
+                    ) : null}
                   </div>
                 )}
               </section>
@@ -601,6 +842,26 @@ export default function Workspace() {
           mode={authFor.mode}
           onResolve={authFor.resolve}
         />
+      ) : null}
+
+      {ghost && dragId ? (
+        <div
+          aria-hidden
+          className="pointer-events-none fixed z-[80] -translate-x-1/2 -translate-y-1/2 rotate-2 rounded-2xl border border-[#ff4a4a]/40 bg-[#141416]/95 px-4 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.8),0_0_32px_-8px_rgba(255,74,74,0.5)] backdrop-blur-xl"
+          style={{ left: ghost.x, top: ghost.y, width: ghost.w }}
+        >
+          <p className="truncate text-[14px] font-medium text-fg">
+            {ghost.name}
+          </p>
+          <p className="mt-0.5 font-mono text-[10px] text-faint">
+            {dropProject
+              ? `→ ${
+                  viewRef.current.find((v) => v.project.id === dropProject)
+                    ?.project.name ?? "project"
+                }`
+              : "drag to a project"}
+          </p>
+        </div>
       ) : null}
     </div>
   )
