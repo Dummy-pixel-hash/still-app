@@ -198,8 +198,12 @@ function pushTranscript(localId: string, data: number[]) {
     transcriptLastEmit.set(localId, now)
     emitTranscript(localId)
     // Keep the frozen snapshot fresh while output flows (throttled
-    // inside persistFrozenPreview; cheap 900-byte tail decode).
-    persistFrozenPreview(localId, snapshotPreviewLines(localId))
+    // inside persistFrozenPreview; cheap 900-byte tail decode). Skip
+    // while a fullscreen TUI owns the screen: its redraw bytes strip to
+    // fragments, and persisting them would poison the frozen snapshot.
+    if (!isTuiActive(localId)) {
+      persistFrozenPreview(localId, snapshotPreviewLines(localId))
+    }
   }
 }
 
@@ -227,10 +231,18 @@ const frozenLastPersist = new Map<string, number>()
 function stripPreviewAnsi(s: string): string {
   return (
     s
+      // OSC title updates (ESC ] … BEL / ESC\).
       // eslint-disable-next-line no-control-regex
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+      // CSI sequences (SGR colors, cursor moves, alt-screen toggles …).
       // eslint-disable-next-line no-control-regex
       .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+      // Remaining ESC-prefixed bytes (charset ESC ( B / ESC ( 0, ESC =,
+      // ESC M …). Optional introducer class keeps the 3-char charset
+      // form whole — without it the ESC dies below but its letter
+      // survives as stray "B" / "(B".
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[()#]?./g, "")
       // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
   )
@@ -257,9 +269,11 @@ export function isTuiActive(localId: string): boolean {
 export function snapshotPreviewLines(localId: string, max = 4): string[] {
   const bytes = transcriptSnapshot(localId)
   if (bytes.length === 0) return []
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(
-    bytes.slice(Math.max(0, bytes.length - 900)),
-  )
+  // Strip BEFORE slicing: the old slice-then-strip cut escape sequences
+  // in half at the window edge, orphaning tails ("86m", "(B") that
+  // rendered as garble. Stripping the full decode first keeps sequences
+  // whole; the plain-text tail slice then can't split an escape.
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes)
   return stripPreviewAnsi(text)
     .split("\n")
     .map((l) => l.replace(/\s+$/g, ""))
