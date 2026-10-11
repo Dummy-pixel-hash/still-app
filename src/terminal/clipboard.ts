@@ -1,5 +1,6 @@
 import type { Terminal } from "@xterm/xterm"
 import type { NativeBridge } from "../bridge/nativeBridge"
+import type { ImageInsertStyle } from "../types"
 
 export const MAX_REMOTE_COPY_BYTES = 1024 * 1024
 
@@ -135,6 +136,7 @@ function blobToBase64(blob: Blob): Promise<string> {
  */
 function showImagePreview(host: HTMLElement, blob: Blob, caption: string, action?: {
   label: string
+  busyLabel?: string
   onClick: () => void
 }): () => void {
   const url = URL.createObjectURL(blob)
@@ -164,7 +166,7 @@ function showImagePreview(host: HTMLElement, blob: Blob, caption: string, action
     btn.addEventListener("click", (e) => {
       e.stopPropagation()
       btn.setAttribute("disabled", "")
-      btn.textContent = "Uploading…"
+      btn.textContent = action.busyLabel ?? "Uploading…"
       action.onClick()
     })
     box.appendChild(btn)
@@ -192,12 +194,60 @@ function isAlternateScreen(terminal: Terminal): boolean {
   }
 }
 
+/**
+ * Remote-stream verdict: does the transcript tail show a fullscreen TUI that
+ * entered alt-screen without a matching exit? Unlike the xterm display flag
+ * (which sticks forever when the exit sequence is lost), this reflects what
+ * the REMOTE recently sent. Dynamically imported: the connection registry
+ * pulls in React, which this module must not statically load (import cycle
+ * + node test env).
+ */
+async function remoteTuiActive(localId: string | null): Promise<boolean> {
+  if (!localId) return false
+  try {
+    const { isTuiActive } = await import("../session/connections")
+    return isTuiActive(localId)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True when the transcript tail looks like shell output (readable text with
+ * newlines) rather than cursor-addressed TUI redraws (dense escapes that
+ * strip to almost nothing). Used to tell a STUCK fullscreen display (remote
+ * is a shell, xterm flag wrong) from a live-but-quiet TUI. Empty transcript
+ * (fresh session, nothing running) counts as shell-safe.
+ */
+async function transcriptLooksLikeShell(localId: string | null): Promise<boolean> {
+  if (!localId) return false
+  try {
+    const { transcriptSnapshot } = await import("../session/connections")
+    const bytes = transcriptSnapshot(localId)
+    if (bytes.length === 0) return true
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(-4096))
+    // eslint-disable-next-line no-control-regex
+    const stripped = raw
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    if (!stripped.includes("\n")) return false
+    return stripped.length / raw.length > 0.3
+  } catch {
+    return false
+  }
+}
+
 /** Local copy and explicit, bounded TUI clipboard transfers share one shortcut. */
-export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notify, write }: {
+export function bindTerminalClipboard({ terminal, host, bridge, sessionId, sessionLocalId, insertStyle, notify, write }: {
   terminal: Terminal
   host: HTMLElement
   bridge: () => NativeBridge
   sessionId: () => string | null
+  /** Stable local session id (transcript/TUI verdicts are keyed by it). */
+  sessionLocalId: () => string | null
+  /** Current image-insert style from Settings (read live at click time). */
+  insertStyle: () => ImageInsertStyle
   notify: (message: string) => void
   /** Direct session write (bypasses xterm paste/bracketed markers). */
   write?: (bytes: Uint8Array) => Promise<void>
@@ -280,6 +330,10 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
       // enables mode 2004, corrupting the upload. Chunked to avoid one
       // giant IPC payload. No focus gate: focus may move during the async
       // read, and focus is irrelevant to a direct write.
+      // Agent-facing reference: plain path auto-attaches in Claude Code,
+      // Codex and Pi; @path is OpenCode's syntax. ~/ form: attach detectors
+      // match it better than a $HOME-prefixed string.
+      const insertText = `${insertStyle() === "at" ? "@" : ""}${remotePath.replace(/^\$HOME/, "~")} `
       const doUpload = async () => {
         const bytes = new TextEncoder().encode(script)
         const send = write ?? (async (chunk: Uint8Array) => {
@@ -288,15 +342,63 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
         for (let i = 0; i < bytes.length; i += WRITE_CHUNK_BYTES) {
           await send(bytes.slice(i, i + WRITE_CHUNK_BYTES))
         }
-        if (alive) notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
+        if (alive) {
+          notify(`Pasted image → ${remotePath} (${formatBytes(blob.size)})`)
+          clearPreview?.()
+          clearPreview = showImagePreview(host, blob, `Uploaded • ${formatBytes(blob.size)}`, {
+            label: "Insert into agent",
+            busyLabel: "Inserted ✓",
+            onClick: () => {
+              void insertIntoAgent()
+            },
+          })
+        }
+      }
+      // Types the uploaded path into the agent's input (no Enter — the user
+      // reviews and sends). Explicit user action: no fullscreen gate here,
+      // landing in an agent prompt is exactly the point.
+      const insertIntoAgent = async () => {
+        if (!alive || targetSession !== syncOwner()) {
+          if (alive) notify("Session changed — insert cancelled.")
+          return
+        }
+        try {
+          const bytes = new TextEncoder().encode(insertText)
+          if (write) await write(bytes)
+          else terminal.paste(insertText)
+          if (alive) notify("Path inserted — review and press Enter in the agent.")
+        } catch {
+          if (alive) notify(`Insert failed. Type it manually: ${insertText.trim()}`)
+        }
       }
       // Never type a shell script into a fullscreen TUI (agent UI, editor,
       // pager…): those keystrokes land in the app, not a shell — no file is
       // created and the TUI input gets trashed. Upload only at a shell prompt.
-      // The detector can stick (missed exit sequence after a crash, dropped
-      // connection, or truncated repaint), so a stuck "fullscreen" must never
-      // be a dead end: offer an explicit override + a way to unstick the view.
-      const blocked = isAlternateScreen(terminal)
+      //
+      // Two signals, fused: the remote stream verdict (transcript tail shows
+      // an unclosed alt-screen enter) and the xterm display flag. The display
+      // flag sticks forever when the exit sequence is lost (crash, dropped
+      // connection, truncated repaint) while the shell keeps printing into
+      // the invisible alt buffer — everything LOOKS normal but the flag says
+      // fullscreen. When the stream says shell and only the display flag
+      // disagrees, heal the display locally (zero remote bytes: a live TUI
+      // cannot be corrupted by it) and proceed — no click needed.
+      const localId = sessionLocalId()
+      const remoteTui = await remoteTuiActive(localId)
+      if (!alive || targetSession !== syncOwner()) {
+        if (alive) notify("Session changed — image paste cancelled.")
+        return
+      }
+      const alt = isAlternateScreen(terminal)
+      let blocked = remoteTui || alt
+      if (blocked && !remoteTui && alt && (await transcriptLooksLikeShell(localId))) {
+        try {
+          terminal.write("\x1b[?1049l")
+        } catch {
+          // Display-only best effort; the upload below is unaffected.
+        }
+        blocked = false
+      }
       if (alive) {
         clearPreview?.()
         clearPreview = showImagePreview(
@@ -309,7 +411,14 @@ export function bindTerminalClipboard({ terminal, host, bridge, sessionId, notif
             ? {
                 label: "Upload anyway",
                 onClick: () => {
-                  void doUpload().catch(() => {
+                  void (async () => {
+                    try {
+                      terminal.write("\x1b[?1049l")
+                    } catch {
+                      // Display-only best effort.
+                    }
+                    await doUpload()
+                  })().catch(() => {
                     if (alive) notify("Image paste failed. Try copying the file another way.")
                   })
                 },

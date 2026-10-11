@@ -469,6 +469,7 @@ export default function Workspace() {
       <TerminalOverlay
         open={open}
         prefs={store.settings.terminal}
+        imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
         keyTextFor={keyTextFor}
         onClose={close}
         onNeedAuth={onNeedAuth}

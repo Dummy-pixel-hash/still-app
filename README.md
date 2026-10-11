@@ -49,7 +49,9 @@ cards between projects; create and remove projects from the main screen.
 **A terminal that respects TUIs** — correct sizing from the first frame,
 no stale repaints, app shortcuts (close, zoom) never leak keystrokes into
 the shell, touchpad scrolling that keeps its magnitude, `Ctrl+Shift+C` /
-`Ctrl+Shift+V` clipboard, and image paste straight to `~/still-uploads`.
+`Ctrl+Shift+V` clipboard, and image paste straight to `~/still-uploads`
+(paste at a shell prompt, then “Insert into agent” to drop the path into
+Claude Code, Codex, OpenCode or Pi).
 
 **Safe by default** — passwords and keys live in the OS keyring, never in
 app storage. Unknown hosts need an explicit Trust; changed host keys are

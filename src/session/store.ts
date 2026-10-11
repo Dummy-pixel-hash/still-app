@@ -30,6 +30,7 @@ interface StoreShape {
 const DEFAULT_SETTINGS: AppSettings = {
   confirmRemove: true,
   terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 },
+  imageInsertStyle: "path",
 }
 
 function seed(): StoreShape {

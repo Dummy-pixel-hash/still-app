@@ -15,7 +15,7 @@ import {
 } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
 import { updateTerminalPrefs } from "../session/store"
-import type { Session, TerminalPrefs } from "../types"
+import type { ImageInsertStyle, Session, TerminalPrefs } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
@@ -40,12 +40,14 @@ interface AuthPrompt {
 export default function TerminalOverlay({
   open,
   prefs,
+  imageInsertStyle,
   keyTextFor,
   onClose,
   onNeedAuth,
 }: {
   open: OpenState | null
   prefs: TerminalPrefs
+  imageInsertStyle: ImageInsertStyle
   keyTextFor: (keyId: string) => string | null
   onClose: () => void
   onNeedAuth: (
@@ -348,6 +350,7 @@ export default function TerminalOverlay({
                 key={`${open.session.id}-${open.session.updatedAt}`}
                 localId={open.session.id}
                 prefs={prefs}
+                imageInsertStyle={imageInsertStyle}
                 onClose={onClose}
                 onZoom={(d) =>
                   updateTerminalPrefs({

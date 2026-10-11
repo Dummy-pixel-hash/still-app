@@ -15,7 +15,7 @@ import {
 import { nativeBridge } from "../bridge/nativeBridge"
 import { bindTerminalClipboard } from "./clipboard"
 import { bindApplicationWheel } from "./wheel"
-import type { TerminalPrefs } from "../types"
+import type { ImageInsertStyle, TerminalPrefs } from "../types"
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -37,11 +37,13 @@ const textDecoder = new TextDecoder()
 export default function SessionTerminal({
   localId,
   prefs,
+  imageInsertStyle,
   onClose,
   onZoom,
 }: {
   localId: string
   prefs: TerminalPrefs
+  imageInsertStyle: ImageInsertStyle
   onClose?: () => void
   onZoom?: (delta: number | "reset") => void
 }) {
@@ -63,6 +65,10 @@ export default function SessionTerminal({
   onCloseRef.current = onClose
   const onZoomRef = useRef(onZoom)
   onZoomRef.current = onZoom
+  // Live read for the image-insert style: the clipboard binding mounts once,
+  // so it reads through this ref to always honor the current Settings value.
+  const insertStyleRef = useRef(imageInsertStyle)
+  insertStyleRef.current = imageInsertStyle
   // Last dims pushed server-side; skips redundant resize traffic.
   const lastDims = useRef({ nativeId: null as string | null, cols: 0, rows: 0 })
   // Hoisted resizer so font changes can re-push dims (see prefs effect).
@@ -115,6 +121,8 @@ export default function SessionTerminal({
       host,
       bridge: () => nativeBridge,
       sessionId: () => nativeSessionId(localRef.current),
+      sessionLocalId: () => localRef.current,
+      insertStyle: () => insertStyleRef.current,
       notify,
       write: (bytes) => writeSession(localRef.current, bytes),
     })

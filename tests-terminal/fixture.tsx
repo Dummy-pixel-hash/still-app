@@ -78,7 +78,7 @@ const connect = () => connectSession({ localId: "fixture", host: "fixture.invali
 await connect()
 function Surface() {
   const [prefs, setPrefs] = useState({ fontSize: 14, cursorStyle: "block" as const, scrollback: 5000 })
-  return <SessionTerminal localId="fixture" prefs={prefs} onClose={() => h.closes++} onZoom={delta => setPrefs(p => ({ ...p, fontSize: delta === "reset" ? 14 : Math.max(10, Math.min(24, p.fontSize + delta)) }))} />
+  return <SessionTerminal localId="fixture" prefs={prefs} imageInsertStyle="path" onClose={() => h.closes++} onZoom={delta => setPrefs(p => ({ ...p, fontSize: delta === "reset" ? 14 : Math.max(10, Math.min(24, p.fontSize + delta)) }))} />
 }
 const root = createRoot(document.getElementById("root")!)
 root.render(<React.StrictMode><Surface /></React.StrictMode>)

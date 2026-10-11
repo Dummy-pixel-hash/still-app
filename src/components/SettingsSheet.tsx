@@ -195,6 +195,31 @@ export default function SettingsSheet({
 
         <section className="mt-6">
           <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-faint">
+            Images
+          </h3>
+          <label className="mt-2 block">
+            <span className="mb-1 block text-[12px] text-dim">Insert uploaded image as</span>
+            <select
+              value={store.settings.imageInsertStyle ?? "path"}
+              onChange={(e) =>
+                updateSettings({ imageInsertStyle: e.target.value as "path" | "at" })
+              }
+              className={inputClass}
+              aria-label="Image insert style"
+            >
+              <option value="path" className="bg-[#121214]">File path — Claude, Codex, Pi</option>
+              <option value="at" className="bg-[#121214]">@path — OpenCode</option>
+            </select>
+          </label>
+          <p className="mt-1 text-[12px] text-dim">
+            After pasting an image, “Insert into agent” types its location
+            into the agent’s input. Claude Code, Codex and Pi attach plain
+            paths; OpenCode prefers @path.
+          </p>
+        </section>
+
+        <section className="mt-6">
+          <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-faint">
             Sessions
           </h3>
           <label className="mt-2 flex items-center gap-2 text-[13px] text-dim">

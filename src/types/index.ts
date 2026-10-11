@@ -59,9 +59,17 @@ export interface TerminalPrefs {
   scrollback: number
 }
 
+/**
+ * How an uploaded image's location is typed into an agent's input.
+ * "path" (plain file path) auto-attaches in Claude Code, Codex and Pi;
+ * "at" (@path) is OpenCode's reference syntax.
+ */
+export type ImageInsertStyle = "path" | "at"
+
 export interface AppSettings {
   confirmRemove: boolean
   terminal: TerminalPrefs
+  imageInsertStyle: ImageInsertStyle
 }
 
 /** Key-library entry: metadata only. Secret text lives in the OS keyring. */
