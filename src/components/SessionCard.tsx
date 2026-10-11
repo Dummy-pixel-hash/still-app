@@ -2,8 +2,8 @@ import { useMemo, type PointerEvent as ReactPointerEvent } from "react"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
-  isTuiActive,
   snapshotPreviewLines,
+  snapshotPreviewScreen,
   useTranscriptVersion,
 } from "../session/connections"
 
@@ -42,19 +42,12 @@ const statusMeta: Record<CardConn,
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
 /**
- * Card preview lines: live transcript tail while output exists (persisted
- * as the frozen snapshot on the side), else the frozen snapshot kept
- * across disconnect + reload, else null for the idle placeholder.
- */
-/**
- * Card preview state: live scrollback lines, a TUI marker when a
- * fullscreen app owns the screen (its redraw bytes aren't readable
- * lines — the real terminal surface shows it; the card says so), or
- * the frozen snapshot when disconnected, else null for idle.
+ * Card preview state: rows from a headless xterm screen emulator while live,
+ * with plain-text snapshots as a safe fallback after disconnect/reload.
  */
 type PreviewState =
+  | { kind: "screen"; lines: string[] }
   | { kind: "lines"; lines: string[] }
-  | { kind: "tui" }
   | { kind: "none" }
 
 function usePreviewLines(sessionId: string): PreviewState {
@@ -62,10 +55,15 @@ function usePreviewLines(sessionId: string): PreviewState {
   // persisted snapshot exists.
   const version = useTranscriptVersion(sessionId)
   return useMemo(() => {
-    // Fullscreen TUI owns the PTY: its cursor-addressed redraws decode
-    // to fragments ("@@e@"), never lines. Show a marker instead of
-    // garble; the live terminal surface renders the real TUI.
-    if (isTuiActive(sessionId)) return { kind: "tui" }
+    // Read the parsed xterm buffer first. This is the faithful path for both
+    // ordinary shell output and fullscreen alternate-screen applications.
+    const screen = snapshotPreviewScreen(sessionId)
+    // A parsed but blank screen is still a valid terminal screen. Do not
+    // fall back to stream fragments for a cleared/TUI screen.
+    if (screen !== null) return { kind: "screen", lines: screen }
+
+    // If xterm is unavailable, retain a safe plain-text fallback rather than
+    // exposing raw escape sequences.
     const live = snapshotPreviewLines(sessionId)
     if (live.length > 0) return { kind: "lines", lines: live }
     const frozen = frozenPreview(sessionId)
@@ -277,20 +275,6 @@ export default function SessionCard({
  * restored from localStorage across reloads); the idle placeholder only
  * when the session never produced output.
  */
-function TuiPreview() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 py-4" aria-hidden>
-      <span className="relative flex h-8 w-8 items-center justify-center rounded-lg border border-[#ff5a5a]/30 bg-[#ff5a5a]/10">
-        <span className="absolute inset-1 rounded-md border border-[#ff5a5a]/20" />
-        <span className="font-mono text-[13px] font-bold text-[#ff5a5a]">▣</span>
-      </span>
-      <span className="font-mono text-[10px] tracking-[0.08em] text-[#b0aab8] uppercase">
-        TUI active
-      </span>
-      <span className="font-mono text-[9px] text-faint">open to interact</span>
-    </div>
-  )
-}
 
 function CardPreview({ session, live }: { session: Session; live: boolean }) {
   const preview = usePreviewLines(session.id)
@@ -312,9 +296,7 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
         ) : null}
       </div>
       <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
-        {preview.kind === "tui" ? (
-          <TuiPreview />
-        ) : preview.kind === "lines" ? (
+        {preview.kind === "screen" || preview.kind === "lines" ? (
           <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
             {preview.lines.map((line, i) => (
               <div key={i} className="truncate whitespace-pre">

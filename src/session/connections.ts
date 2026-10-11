@@ -6,6 +6,7 @@
 // NOT a disconnect: the worker keeps running until explicit Disconnect.
 
 import { useCallback, useSyncExternalStore } from "react"
+import { Terminal } from "@xterm/xterm"
 import { ByteRing } from "./byteRing"
 import {
   nativeBridge,
@@ -35,6 +36,22 @@ const unsubscribers = new Map<string, () => void>()
 // Monotonic output transcript per local session id (in-memory only, ring).
 const transcripts = new Map<string, ByteRing>()
 const TRANSCRIPT_CAP = 65536
+
+// A headless xterm keeps the card preview in the same state as the real
+// terminal. Parsing the raw stream as text cannot represent cursor-addressed
+// redraws, alternate-screen TUIs, carriage returns, or clears.
+const PREVIEW_COLS = 64
+const PREVIEW_ROWS = 8
+const PREVIEW_FROZEN_PREFIX = "still.preview.screen.v1."
+const PREVIEW_FROZEN_MIN_MS = 2000
+interface PreviewTerminalState {
+  terminal: Terminal
+  /** Total transcript bytes queued into xterm, not just bytes already parsed. */
+  queuedTotal: number
+  /** Total transcript bytes whose xterm write callback has fired. */
+  parsedTotal: number
+}
+const previewTerminals = new Map<string, PreviewTerminalState>()
 
 function emit() {
   snapshotVersion += 1
@@ -145,16 +162,16 @@ export function mapNativeStatus(status: string): ConnState {
   }
 }
 
-// Per-session transcript version: bumped (throttled) as bytes arrive so
-// main-screen card previews can re-render live output without
+// Per-session transcript version: bumped after xterm has parsed a screen
+// update so main-screen card previews can re-render live output without
 // re-rendering the whole workspace per byte burst. Separate listener set
 // from the connection-state store: data arrives far more often than state
 // changes, and only the live card for that session should wake up.
 const transcriptVersions = new Map<string, number>()
 const transcriptListeners = new Map<string, Set<() => void>>()
-const transcriptLastEmit = new Map<string, number>()
-// Max ~3 re-renders/sec per live card preview.
-const TRANSCRIPT_EMIT_MIN_MS = 350
+const transcriptEmitPending = new Set<string>()
+const transcriptEmitQueued = new Set<string>()
+const previewFrozenLastPersist = new Map<string, number>()
 
 function emitTranscript(localId: string) {
   transcriptVersions.set(
@@ -162,6 +179,144 @@ function emitTranscript(localId: string) {
     (transcriptVersions.get(localId) ?? 0) + 1,
   )
   transcriptListeners.get(localId)?.forEach((l) => l())
+}
+
+function newPreviewTerminal(): Terminal {
+  return new Terminal({
+    cols: PREVIEW_COLS,
+    rows: PREVIEW_ROWS,
+    convertEol: false,
+    cursorBlink: false,
+    scrollback: 0,
+    allowProposedApi: false,
+  })
+}
+
+function disposePreviewTerminal(localId: string) {
+  const state = previewTerminals.get(localId)
+  if (!state) return
+  state.terminal.dispose()
+  previewTerminals.delete(localId)
+}
+
+/**
+ * Bring the headless preview emulator up to the current transcript. A full
+ * replay is used whenever the ring changed since the emulator was built; it
+ * is cheap at 64x8 and, unlike incremental bookkeeping, remains correct when
+ * the byte ring evicts its oldest bytes or a session is reloaded.
+ */
+function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
+  try {
+    const bytes = transcriptSnapshot(localId)
+    const total = transcripts.get(localId)?.totalBytes ?? 0
+    let state = previewTerminals.get(localId)
+    if (bytes.length === 0 && total === 0) {
+      if (state) disposePreviewTerminal(localId)
+      return null
+    }
+
+    // The ring's first byte has this absolute transcript offset. If the
+    // emulator has already parsed past it, incremental replay is safe; if it
+    // has fallen behind the retained window, rebuild from the complete window.
+    const retainedStart = total - bytes.length
+    if (
+      !state ||
+      state.queuedTotal < retainedStart ||
+      state.queuedTotal > total
+    ) {
+      if (state) state.terminal.dispose()
+      state = { terminal: newPreviewTerminal(), queuedTotal: 0, parsedTotal: 0 }
+      previewTerminals.set(localId, state)
+      if (bytes.length > 0) {
+        const writeState = state
+        // Set this before write(): headless xterm may invoke its callback
+        // synchronously, while a WebView may complete it asynchronously.
+        state.queuedTotal = total
+        state.terminal.write(bytes, () => {
+          if (previewTerminals.get(localId) !== writeState) return
+          writeState.parsedTotal = total
+          flushPreviewUpdate(localId)
+        })
+      }
+      return state
+    }
+    if (state.queuedTotal === total) return state
+
+    const deltaStart = state.queuedTotal - retainedStart
+    const delta = bytes.subarray(Math.max(0, deltaStart))
+    if (delta.length > 0) {
+      const writeState = state
+      state.queuedTotal = total
+      state.terminal.write(delta, () => {
+        if (previewTerminals.get(localId) !== writeState) return
+        writeState.parsedTotal = total
+        flushPreviewUpdate(localId)
+      })
+    }
+    return state
+  } catch {
+    // The preview is best-effort. A WebView/runtime without xterm resources
+    // must still retain the safe text fallback in the card.
+    disposePreviewTerminal(localId)
+    return null
+  }
+}
+
+function previewRows(state: PreviewTerminalState, maxRows = PREVIEW_ROWS, maxCols = PREVIEW_COLS): string[] {
+  // While a new write is queued, return the last parsed frame. This avoids
+  // flashing back to raw text and keeps the preview stable between frames.
+  const buffer = state.terminal.buffer.active
+  const rows = Math.min(maxRows, state.terminal.rows, buffer.length)
+  const lines: string[] = []
+  for (let y = 0; y < rows; y += 1) {
+    const line = buffer.getLine(y)?.translateToString(true, 0, maxCols) ?? ""
+    lines.push(line)
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+  return lines
+}
+
+function persistRenderedFrozenPreview(localId: string) {
+  const state = previewTerminals.get(localId)
+  if (!state || state.parsedTotal !== state.queuedTotal) return
+  const lines = previewRows(state)
+  if (lines.length === 0) return
+  const now = Date.now()
+  if (now - (previewFrozenLastPersist.get(localId) ?? 0) < PREVIEW_FROZEN_MIN_MS) return
+  previewFrozenLastPersist.set(localId, now)
+  try {
+    localStorage.setItem(PREVIEW_FROZEN_PREFIX + localId, lines.join("\n"))
+  } catch {
+    // Private mode / quota: the in-memory emulator still serves the card.
+  }
+}
+
+function flushPreviewUpdate(localId: string) {
+  const state = previewTerminals.get(localId)
+  // If xterm failed to initialize, still wake the card so it can use the
+  // sanitized text fallback. A present emulator must finish parsing first.
+  if (state && state.parsedTotal !== state.queuedTotal) return
+  if (!transcriptEmitPending.has(localId) || transcriptEmitQueued.has(localId)) return
+
+  // Coalesce writes completed in the same task without introducing a timer.
+  // Unlike reading raw bytes, the card is only invalidated after xterm has
+  // parsed a complete screen update.
+  transcriptEmitQueued.add(localId)
+  queueMicrotask(() => {
+    transcriptEmitQueued.delete(localId)
+    const current = previewTerminals.get(localId)
+    if (current && current.parsedTotal !== current.queuedTotal) return
+    if (!transcriptEmitPending.has(localId)) return
+    transcriptEmitPending.delete(localId)
+    emitTranscript(localId)
+    if (current) persistRenderedFrozenPreview(localId)
+    else persistFrozenPreview(localId, snapshotPreviewLines(localId))
+  })
+}
+
+function requestPreviewUpdate(localId: string) {
+  transcriptEmitPending.add(localId)
+  flushPreviewUpdate(localId)
 }
 
 /** React binding: re-render when this session's transcript grows. */
@@ -191,20 +346,12 @@ function pushTranscript(localId: string, data: number[]) {
   const buf = transcripts.get(localId) ?? new ByteRing(TRANSCRIPT_CAP)
   buf.append(data)
   transcripts.set(localId, buf)
-  // Throttled wake-up for card previews. The terminal surface itself
-  // stays on the unthrottled sessionDataListeners fan-out below.
-  const now = Date.now()
-  if (now - (transcriptLastEmit.get(localId) ?? 0) >= TRANSCRIPT_EMIT_MIN_MS) {
-    transcriptLastEmit.set(localId, now)
-    emitTranscript(localId)
-    // Keep the frozen snapshot fresh while output flows (throttled
-    // inside persistFrozenPreview; cheap 900-byte tail decode). Skip
-    // while a fullscreen TUI owns the screen: its redraw bytes strip to
-    // fragments, and persisting them would poison the frozen snapshot.
-    if (!isTuiActive(localId)) {
-      persistFrozenPreview(localId, snapshotPreviewLines(localId))
-    }
-  }
+
+  // Keep the headless emulator in lockstep with the raw stream. Its callback
+  // is the point at which the active buffer is safe to read; card listeners
+  // are notified there rather than displaying a half-parsed frame.
+  syncPreviewTerminal(localId)
+  requestPreviewUpdate(localId)
 }
 
 /** In-memory scrollback snapshot (bytes) for instant terminal repaint. */
@@ -212,17 +359,47 @@ export function transcriptSnapshot(localId: string): Uint8Array {
   return transcripts.get(localId)?.snapshot() ?? new Uint8Array()
 }
 
+/**
+ * Current visible rows from the same xterm parser used by the live terminal.
+ * The result is plain text: terminal control sequences have already been
+ * applied to the buffer, so alternate-screen TUIs and cursor redraws render
+ * as a real miniature screen instead of leaked escape fragments.
+ */
+export function snapshotPreviewScreen(
+  localId: string,
+  maxRows = PREVIEW_ROWS,
+  maxCols = PREVIEW_COLS,
+): string[] | null {
+  try {
+    const state = syncPreviewTerminal(localId)
+    if (!state) return null
+    if (state.parsedTotal !== state.queuedTotal) {
+      // Keep showing the last parsed screen while a new frame is queued;
+      // never fall back to raw stream text during that small window.
+      requestPreviewUpdate(localId)
+    }
+    return previewRows(state, maxRows, maxCols)
+  } catch {
+    // A preview must never take down the workspace if xterm cannot initialize
+    // in an unusual WebView/runtime. The stripped text path remains available.
+    return null
+  }
+}
+
 export function clearTranscript(localId: string) {
   transcripts.delete(localId)
+  disposePreviewTerminal(localId)
+  transcriptEmitPending.delete(localId)
+  transcriptEmitQueued.delete(localId)
   // Wake the card preview so it falls back to the frozen snapshot
   // or IdlePreview immediately.
-  transcriptLastEmit.delete(localId)
   emitTranscript(localId)
 }
 
 // --- Frozen card snapshot -------------------------------------------------
 // Last output retained for disconnected cards, in-memory AND across
-// reloads (localStorage, plain stripped text only — never raw escapes).
+// reloads (browser storage, plain stripped/rendered text only — never raw
+// escapes).
 // Disconnects keep it; only explicit session removal discards it.
 const FROZEN_PREFIX = "still.preview.v1."
 const FROZEN_MIN_MS = 2000
@@ -231,20 +408,26 @@ const frozenLastPersist = new Map<string, number>()
 function stripPreviewAnsi(s: string): string {
   return (
     s
-      // OSC title updates (ESC ] … BEL / ESC\).
+      // OSC title updates may be BEL- or ST-terminated.
       // eslint-disable-next-line no-control-regex
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
-      // CSI sequences (SGR colors, cursor moves, alt-screen toggles …).
+      // CSI: colors, cursor movement, screen clearing, mode changes, etc.
       // eslint-disable-next-line no-control-regex
-      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
-      // Remaining ESC-prefixed bytes (charset ESC ( B / ESC ( 0, ESC =,
-      // ESC M …). Optional introducer class keeps the 3-char charset
-      // form whole — without it the ESC dies below but its letter
-      // survives as stray "B" / "(B".
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+      // DCS, APC, PM and SOS strings; these should never leak into preview.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[P^_X][\s\S]*?\x1b\\/g, "")
+      // Remaining two-byte and charset ESC sequences.
       // eslint-disable-next-line no-control-regex
       .replace(/\x1b[()#]?./g, "")
+      // C1 CSI/OSC and other control characters.
       // eslint-disable-next-line no-control-regex
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "")
+      // Terminal carriage returns overwrite the current line; keep the final
+      // visible content instead of concatenating progress/status updates.
+      .split("\n")
+      .map((line) => line.split("\r").at(-1) ?? "")
+      .join("\n")
   )
 }
 
@@ -299,6 +482,14 @@ function persistFrozenPreview(localId: string, lines: string[]) {
 /** Frozen snapshot lines, if any (disconnect + reload safe). */
 export function frozenPreview(localId: string): string[] | null {
   try {
+    const rendered = localStorage.getItem(PREVIEW_FROZEN_PREFIX + localId)
+    if (rendered) {
+      const screenLines = rendered.split("\n")
+      while (screenLines.length > 0 && screenLines[screenLines.length - 1] === "") {
+        screenLines.pop()
+      }
+      if (screenLines.length > 0) return screenLines
+    }
     const raw = localStorage.getItem(FROZEN_PREFIX + localId)
     if (!raw) return null
     const lines = raw.split("\n").filter((l) => l.length > 0)
@@ -310,8 +501,10 @@ export function frozenPreview(localId: string): string[] | null {
 
 export function discardFrozenPreview(localId: string) {
   frozenLastPersist.delete(localId)
+  previewFrozenLastPersist.delete(localId)
   try {
     localStorage.removeItem(FROZEN_PREFIX + localId)
+    localStorage.removeItem(PREVIEW_FROZEN_PREFIX + localId)
   } catch {
     // Ignore.
   }
@@ -712,6 +905,8 @@ export async function releaseSession(localId: string): Promise<void> {
   }
   sessionDataListeners.delete(localId)
   clearTranscript(localId)
+  transcriptVersions.delete(localId)
+  transcriptListeners.delete(localId)
   // Explicit removal drops the frozen card snapshot too. Disconnects
   // keep it — only removal discards.
   discardFrozenPreview(localId)
