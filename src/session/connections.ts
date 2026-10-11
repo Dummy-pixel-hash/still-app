@@ -236,6 +236,23 @@ function stripPreviewAnsi(s: string): string {
   )
 }
 
+/**
+ * True when the transcript tail shows a fullscreen TUI owning the screen
+ * (alt-screen enter without a matching exit). Its bytes are
+ * cursor-addressed redraws, not scrollback — stripping escapes leaves
+ * concatenated fragments ("@@e@", "eee"), never readable lines.
+ */
+export function isTuiActive(localId: string): boolean {
+  const bytes = transcriptSnapshot(localId)
+  if (bytes.length === 0) return false
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(
+    bytes.slice(Math.max(0, bytes.length - 4096)),
+  )
+  const enters = (text.match(/\x1b\[\?(?:1049|1047|1048)h/g) ?? []).length
+  const exits = (text.match(/\x1b\[\?(?:1049|1047|1048)l/g) ?? []).length
+  return enters > exits
+}
+
 /** Last non-empty lines of the live transcript tail (plain text). */
 export function snapshotPreviewLines(localId: string, max = 4): string[] {
   const bytes = transcriptSnapshot(localId)

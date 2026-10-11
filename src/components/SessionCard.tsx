@@ -2,6 +2,7 @@ import { useMemo } from "react"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
+  isTuiActive,
   snapshotPreviewLines,
   useTranscriptVersion,
 } from "../session/connections"
@@ -45,14 +46,31 @@ const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
  * as the frozen snapshot on the side), else the frozen snapshot kept
  * across disconnect + reload, else null for the idle placeholder.
  */
-function usePreviewLines(sessionId: string): string[] | null {
+/**
+ * Card preview state: live scrollback lines, a TUI marker when a
+ * fullscreen app owns the screen (its redraw bytes aren't readable
+ * lines — the real terminal surface shows it; the card says so), or
+ * the frozen snapshot when disconnected, else null for idle.
+ */
+type PreviewState =
+  | { kind: "lines"; lines: string[] }
+  | { kind: "tui" }
+  | { kind: "none" }
+
+function usePreviewLines(sessionId: string): PreviewState {
   // Hook order must stay stable: always subscribe, even when only the
   // persisted snapshot exists.
   const version = useTranscriptVersion(sessionId)
   return useMemo(() => {
+    // Fullscreen TUI owns the PTY: its cursor-addressed redraws decode
+    // to fragments ("@@e@"), never lines. Show a marker instead of
+    // garble; the live terminal surface renders the real TUI.
+    if (isTuiActive(sessionId)) return { kind: "tui" }
     const live = snapshotPreviewLines(sessionId)
-    if (live.length > 0) return live
-    return frozenPreview(sessionId)
+    if (live.length > 0) return { kind: "lines", lines: live }
+    const frozen = frozenPreview(sessionId)
+    if (frozen && frozen.length > 0) return { kind: "lines", lines: frozen }
+    return { kind: "none" }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, version])
 }
@@ -242,8 +260,23 @@ export default function SessionCard({
  * restored from localStorage across reloads); the idle placeholder only
  * when the session never produced output.
  */
+function TuiPreview() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 py-4" aria-hidden>
+      <span className="relative flex h-8 w-8 items-center justify-center rounded-lg border border-[#ff5a5a]/30 bg-[#ff5a5a]/10">
+        <span className="absolute inset-1 rounded-md border border-[#ff5a5a]/20" />
+        <span className="font-mono text-[13px] font-bold text-[#ff5a5a]">▣</span>
+      </span>
+      <span className="font-mono text-[10px] tracking-[0.08em] text-[#b0aab8] uppercase">
+        TUI active
+      </span>
+      <span className="font-mono text-[9px] text-faint">open to interact</span>
+    </div>
+  )
+}
+
 function CardPreview({ session, live }: { session: Session; live: boolean }) {
-  const lines = usePreviewLines(session.id)
+  const preview = usePreviewLines(session.id)
   return (
     <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
@@ -262,12 +295,14 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
         ) : null}
       </div>
       <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
-        {lines && lines.length > 0 ? (
+        {preview.kind === "tui" ? (
+          <TuiPreview />
+        ) : preview.kind === "lines" ? (
           <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
-            {lines.map((line, i) => (
+            {preview.lines.map((line, i) => (
               <div key={i} className="truncate whitespace-pre">
                 {line}
-                {live && i === lines.length - 1 ? (
+                {live && i === preview.lines.length - 1 ? (
                   <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[#ff5a5a]" />
                 ) : null}
               </div>
