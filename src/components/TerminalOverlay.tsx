@@ -175,10 +175,14 @@ export default function TerminalOverlay({
       try {
         const host = document.getElementById(`still-term-${s.id}`)
         if (host && host.clientWidth > 0 && host.clientHeight > 0) {
-          const cellW = 8.5
-          const cellH = 21
+          // Mirror FitAddon's math on the padding-free host so the first
+          // attach matches the first real fit exactly (no reflow correction):
+          // Geist Mono 14px = 8.4x19 cells, minus the 14px overview-ruler
+          // reserve it subtracts when scrollback > 0.
+          const cellW = 8.4
+          const cellH = 19
           dims = {
-            cols: Math.max(20, Math.min(500, Math.floor(host.clientWidth / cellW))),
+            cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 14) / cellW))),
             rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
           }
         }

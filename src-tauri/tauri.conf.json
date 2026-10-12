@@ -15,7 +15,8 @@
         "width": 1100,
         "height": 720,
         "decorations": false,
-        "transparent": false
+        "shadow": false,
+        "transparent": true
       }
     ],
     "security": {

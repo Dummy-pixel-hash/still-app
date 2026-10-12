@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
+import { Unicode11Addon } from "@xterm/addon-unicode11"
 import "@xterm/xterm/css/xterm.css"
 import {
   needsReattachMarker,
@@ -57,6 +58,11 @@ export default function SessionTerminal({
     feedbackTimer.current = window.setTimeout(() => setFeedback(""), 4000)
   }, [])
   const hostRef = useRef<HTMLDivElement>(null)
+  // FitAddon measures `.xterm`'s parent's border-box, so the terminal is
+  // opened into a padding-free inner div: with the host's px-3/py-2 padding
+  // it would see 900px instead of 876px, overfit (105 cols → 882px) and
+  // overflow right — i.e. a wider gap on the left than on the right.
+  const fitHostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const localRef = useRef(localId)
@@ -76,15 +82,18 @@ export default function SessionTerminal({
 
   useEffect(() => {
     const host = hostRef.current
-    if (!host) return
+    const fitHost = fitHostRef.current
+    if (!host || !fitHost) return
 
     const terminal = new Terminal({
+      allowProposedApi: true,
       convertEol: false,
       cursorBlink: true,
       cursorStyle: prefs.cursorStyle,
-      fontFamily: "'Geist Mono', ui-monospace, Consolas, monospace",
+      fontFamily:
+        "'Geist Mono', ui-monospace, Consolas, 'Segoe UI Emoji', 'Noto Color Emoji', 'Apple Color Emoji', monospace",
       fontSize: prefs.fontSize,
-      lineHeight: 1.0,
+      lineHeight: 1.2,
       scrollback: prefs.scrollback,
       theme: {
         background: "#08080a",
@@ -112,7 +121,13 @@ export default function SessionTerminal({
     })
     const fit = new FitAddon()
     terminal.loadAddon(fit)
-    terminal.open(host)
+    // Unicode 11 width rules: emoji/CJK that are double-width in newer
+    // Unicode render as a full 2-cell glyph instead of being measured as
+    // 1 cell and getting its right half overwritten / clipped.
+    const unicode11 = new Unicode11Addon()
+    terminal.loadAddon(unicode11)
+    terminal.unicode.activeVersion = "11"
+    terminal.open(fitHost)
     terminalRef.current = terminal
     fitRef.current = fit
 
@@ -201,6 +216,16 @@ export default function SessionTerminal({
     // push below so a pre-connect fit cannot swallow the first real resize.
     const t = window.requestAnimationFrame(pushResize)
 
+    // Webfonts (Geist Mono) can land after the first fit: cell metrics then
+    // change and the already-fitted grid overflows or leaves the screen
+    // off-center. Re-fit once fonts settle; xterm itself doesn't.
+    let disposed = false
+    const refitOnFonts = () => {
+      if (!disposed) debounced()
+    }
+    document.fonts?.ready?.then(refitOnFonts).catch(() => {})
+    document.fonts?.addEventListener?.("loadingdone", refitOnFonts)
+
     // Backstop only: the overlay's capture-phase gate owns shortcuts and
     // stops them before xterm sees them. This covers the case where the
     // gate unmounted but the surface lingers.
@@ -232,11 +257,13 @@ export default function SessionTerminal({
     terminal.focus()
 
     return () => {
+      disposed = true
       window.cancelAnimationFrame(t)
       window.clearTimeout(resizeTimer)
       window.clearTimeout(feedbackTimer.current)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
+      document.fonts?.removeEventListener?.("loadingdone", refitOnFonts)
       clipboard.dispose()
       unbindWheel()
       dataDispose.dispose()
@@ -283,11 +310,13 @@ export default function SessionTerminal({
   return (
     <div
       ref={hostRef}
-      id={`still-term-${localRef.current}`}
       onClick={() => terminalRef.current?.focus()}
       className="relative h-full min-h-0 w-full cursor-text px-3 py-2 [&_.xterm]:h-full"
       aria-label="Terminal"
     >
+      {/* Padding-free: FitAddon measures this div's border-box, so any
+          padding here would make it overfit and push the grid off-center. */}
+      <div ref={fitHostRef} id={`still-term-${localRef.current}`} className="h-full w-full" />
       <div
         role="status"
         aria-live="polite"

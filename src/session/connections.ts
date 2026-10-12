@@ -7,6 +7,7 @@
 
 import { useCallback, useSyncExternalStore } from "react"
 import { Terminal } from "@xterm/xterm"
+import { Unicode11Addon } from "@xterm/addon-unicode11"
 import { ByteRing } from "./byteRing"
 import {
   nativeBridge,
@@ -182,14 +183,44 @@ function emitTranscript(localId: string) {
 }
 
 function newPreviewTerminal(): Terminal {
-  return new Terminal({
+  // Same palette as the main surface so mounted previews match it.
+  const terminal = new Terminal({
     cols: PREVIEW_COLS,
     rows: PREVIEW_ROWS,
     convertEol: false,
     cursorBlink: false,
     scrollback: 0,
-    allowProposedApi: false,
+    fontSize: 5,
+    lineHeight: 1.1,
+    allowProposedApi: true,
+    theme: {
+      background: "#08080a",
+      foreground: "#ded9dd",
+      cursor: "#ff5a5a",
+      cursorAccent: "#08080a",
+      black: "#08080a",
+      brightBlack: "#777078",
+      red: "#ff5a5a",
+      brightRed: "#ff7777",
+      green: "#91b587",
+      brightGreen: "#acd19f",
+      yellow: "#d5aa82",
+      brightYellow: "#e7bf98",
+      blue: "#9a96b8",
+      brightBlue: "#b3afd0",
+      magenta: "#b89ab8",
+      brightMagenta: "#cdb0cd",
+      cyan: "#8eadb2",
+      brightCyan: "#a5c4c9",
+      white: "#d7d2d6",
+      brightWhite: "#f4f0f2",
+    },
   })
+  // Same Unicode 11 width rules as the live surface: keeps preview cells
+  // aligned with what the real terminal renders (emoji are 2 cells).
+  terminal.loadAddon(new Unicode11Addon())
+  terminal.unicode.activeVersion = "11"
+  return terminal
 }
 
 function disposePreviewTerminal(localId: string) {
@@ -259,6 +290,23 @@ function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
     // must still retain the safe text fallback in the card.
     disposePreviewTerminal(localId)
     return null
+  }
+}
+
+/**
+ * Mount the headless preview terminal's live DOM into a card host.
+ * The terminal renders its real screen (colors, TUIs, box drawing) and
+ * the card scales it down with CSS. Open is idempotent: xterm moves its
+ * renderer into the newest host without losing buffer state.
+ */
+export function openPreview(localId: string, host: HTMLElement): boolean {
+  try {
+    const state = syncPreviewTerminal(localId)
+    if (!state) return false
+    state.terminal.open(host)
+    return true
+  } catch {
+    return false
   }
 }
 

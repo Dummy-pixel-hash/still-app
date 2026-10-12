@@ -35,6 +35,33 @@ fn still_ping(state: tauri::State<'_, AppState>) -> PingResponse {
     res
 }
 
+/// Strip Win11 DWM chrome that config alone cannot remove.
+///
+/// `decorations: false` drops the titlebar; `shadow: false` drops the drop
+/// shadow. But on Windows 11 DWM still applies `DWMWCP_ROUND` rounded
+/// corners to frameless windows, which renders as a faint 1px halo around
+/// the dark UI. Force `DWMWCP_DONOTROUND` so the window is square and
+/// fully edge-to-edge (zero chrome).
+#[cfg(target_os = "windows")]
+fn strip_windows_chrome(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let Ok(hwnd) = window.hwnd() else { return };
+    let pref: u32 = DWMWCP_DONOTROUND as u32;
+    // Best-effort: if the attribute call fails, we keep the DWM default
+    // instead of crashing the window create.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as _,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // DIAG-ONLY: first native record — proves the diagnostic build runs.
@@ -42,6 +69,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
+        .setup(|_app| {
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::Manager;
+                if let Some(w) = _app.get_webview_window("main") {
+                    strip_windows_chrome(&w);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             still_ping,
             commands::still_connect,

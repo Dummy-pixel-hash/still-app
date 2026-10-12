@@ -1,7 +1,8 @@
-import { useMemo, type PointerEvent as ReactPointerEvent } from "react"
+import { useEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
+  openPreview,
   snapshotPreviewLines,
   snapshotPreviewScreen,
   useTranscriptVersion,
@@ -71,6 +72,30 @@ function usePreviewLines(sessionId: string): PreviewState {
     return { kind: "none" }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, version])
+}
+
+/**
+ * Live miniature screen: the real headless xterm DOM, scaled down with
+ * CSS. Same bytes as the main terminal, full colors + TUIs, zero PTY
+ * traffic. Falls back to null when no screen exists yet (caller shows
+ * IdlePreview) — never unmounts the terminal, just detaches the host.
+ */
+function LiveScreen({ sessionId, frozen }: { sessionId: string; frozen: boolean }) {
+  const hostRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    // open() moves the renderer into the newest host without losing
+    // buffer state. The terminal itself lives until session removal.
+    openPreview(sessionId, host)
+  }, [sessionId])
+  return (
+    <div
+      ref={hostRef}
+      aria-hidden
+      className={`card-term pointer-events-none overflow-hidden select-none ${frozen ? "opacity-70" : ""}`}
+    />
+  )
 }
 
 function IdlePreview({ session }: { session: Session }) {
@@ -277,7 +302,10 @@ export default function SessionCard({
  */
 
 function CardPreview({ session, live }: { session: Session; live: boolean }) {
+  // Live DOM screen when the emulator has a screen; text snapshot when
+  // disconnected/reloading; idle placeholder when nothing ever rendered.
   const preview = usePreviewLines(session.id)
+  const hasScreen = preview.kind === "screen" && preview.lines.length > 0
   return (
     <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
@@ -296,7 +324,9 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
         ) : null}
       </div>
       <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
-        {preview.kind === "screen" || preview.kind === "lines" ? (
+        {hasScreen ? (
+          <LiveScreen sessionId={session.id} frozen={!live} />
+        ) : preview.kind === "screen" || preview.kind === "lines" ? (
           <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
             {preview.lines.map((line, i) => (
               <div key={i} className="truncate whitespace-pre">

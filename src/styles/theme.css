@@ -28,6 +28,11 @@ html,
 body,
 #root {
   height: 100%;
+  /* Explicit reset — the window is transparent now, so any default body
+     margin/padding would show the desktop as a fake border. Keep it
+     opaque and edge-to-edge; color matches tauri.conf so nothing shifts. */
+  margin: 0;
+  padding: 0;
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
@@ -51,6 +56,29 @@ body,
 }
 .xterm-viewport::-webkit-scrollbar {
   display: none;
+}
+
+/* FitAddon floors to whole columns and reserves 14px for the overview
+   ruler, so the fitted grid is always a bit narrower than its container.
+   Auto margins split that leftover evenly instead of pooling it on the
+   right (which made the left gap look bigger). Safe for input: xterm
+   maps mouse coords from .xterm-screen's own rect, so a shifted screen
+   stays accurate. */
+.xterm .xterm-screen {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Card preview: real headless xterm DOM scaled to fit. */
+.card-term {
+  height: 104px;
+  font-size: 5px;
+}
+.card-term .xterm-viewport {
+  overflow: hidden;
+}
+.card-term canvas {
+  width: 100% !important;
 }
 
 .grain::after {
