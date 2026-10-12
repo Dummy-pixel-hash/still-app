@@ -82,13 +82,16 @@ function usePreviewLines(sessionId: string): PreviewState {
  */
 function LiveScreen({ sessionId, frozen }: { sessionId: string; frozen: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null)
+  // Re-run when parsed frames land: terminal rebuilds (ring wrap) create
+  // a NEW instance, and xterm open() is a no-op on an already-opened
+  // instance — so a stale host keeps the dead canvas without this.
+  const version = useTranscriptVersion(sessionId)
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    // open() moves the renderer into the newest host without losing
-    // buffer state. The terminal itself lives until session removal.
     openPreview(sessionId, host)
-  }, [sessionId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, version])
   return (
     <div
       ref={hostRef}
@@ -324,8 +327,19 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
         ) : null}
       </div>
       <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
-        {preview.kind !== "none" ? (
+        {preview.kind === "screen" ? (
           <LiveScreen sessionId={session.id} frozen={!live} />
+        ) : preview.kind === "lines" ? (
+          <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
+            {preview.lines.map((line, i) => (
+              <div key={i} className="truncate whitespace-pre">
+                {line}
+                {live && i === preview.lines.length - 1 ? (
+                  <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[#ff5a5a]" />
+                ) : null}
+              </div>
+            ))}
+          </div>
         ) : (
           <IdlePreview session={session} />
         )}
