@@ -35,21 +35,22 @@ fn still_ping(state: tauri::State<'_, AppState>) -> PingResponse {
     res
 }
 
-/// Strip Win11 DWM chrome that config alone cannot remove.
+/// Ask Win11 DWM for round window corners.
 ///
 /// `decorations: false` drops the titlebar; `shadow: false` drops the drop
-/// shadow. But on Windows 11 DWM still applies `DWMWCP_ROUND` rounded
-/// corners to frameless windows, which renders as a faint 1px halo around
-/// the dark UI. Force `DWMWCP_DONOTROUND` so the window is square and
-/// fully edge-to-edge (zero chrome).
+/// shadow. The window itself is transparent, so the visible shape comes
+/// from the web content: the Workspace root and the full-window terminal
+/// overlay both clip to the same 8px radius (see `rounded-lg`), which
+/// matches `DWMWCP_ROUND` exactly — a larger CSS radius would be sliced
+/// by the window shape and look broken at the corner tips.
 #[cfg(target_os = "windows")]
-fn strip_windows_chrome(window: &tauri::WebviewWindow) {
+fn round_window_corners(window: &tauri::WebviewWindow) {
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
 
     let Ok(hwnd) = window.hwnd() else { return };
-    let pref: u32 = DWMWCP_DONOTROUND as u32;
+    let pref: u32 = DWMWCP_ROUND as u32;
     // Best-effort: if the attribute call fails, we keep the DWM default
     // instead of crashing the window create.
     let _ = unsafe {
@@ -74,7 +75,7 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(w) = _app.get_webview_window("main") {
-                    strip_windows_chrome(&w);
+                    round_window_corners(&w);
                 }
             }
             Ok(())

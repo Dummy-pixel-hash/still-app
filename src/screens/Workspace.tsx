@@ -474,7 +474,7 @@ export default function Workspace() {
   )
 
   return (
-    <div className="grain relative flex h-full flex-col overflow-hidden bg-ink text-fg">
+    <div className="grain relative flex h-full flex-col overflow-hidden rounded-lg bg-ink text-fg ring-1 ring-white/10">
       <div
         aria-hidden
         className="pointer-events-none absolute -top-48 left-1/2 h-96 w-[46rem] -translate-x-1/2 rounded-full opacity-25 blur-3xl"

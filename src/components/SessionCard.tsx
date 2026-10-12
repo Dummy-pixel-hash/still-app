@@ -302,10 +302,10 @@ export default function SessionCard({
  */
 
 function CardPreview({ session, live }: { session: Session; live: boolean }) {
-  // Live DOM screen when the emulator has a screen; text snapshot when
-  // disconnected/reloading; idle placeholder when nothing ever rendered.
+  // Live DOM screen: the real emulator DOM, always mounted when bytes
+  // exist. Text snapshot only as fallback (xterm unavailable / cleared
+  // terminal disposal); idle placeholder when nothing ever rendered.
   const preview = usePreviewLines(session.id)
-  const hasScreen = preview.kind === "screen" && preview.lines.length > 0
   return (
     <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
@@ -324,19 +324,8 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
         ) : null}
       </div>
       <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
-        {hasScreen ? (
+        {preview.kind !== "none" ? (
           <LiveScreen sessionId={session.id} frozen={!live} />
-        ) : preview.kind === "screen" || preview.kind === "lines" ? (
-          <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
-            {preview.lines.map((line, i) => (
-              <div key={i} className="truncate whitespace-pre">
-                {line}
-                {live && i === preview.lines.length - 1 ? (
-                  <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[#ff5a5a]" />
-                ) : null}
-              </div>
-            ))}
-          </div>
         ) : (
           <IdlePreview session={session} />
         )}

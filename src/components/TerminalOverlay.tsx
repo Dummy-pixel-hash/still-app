@@ -296,7 +296,7 @@ export default function TerminalOverlay({
   const touch = useRef<number | null>(null)
   const r = open?.rect
   const style: React.CSSProperties = full
-    ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 0 }
+    ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 8 }
     : {
         top: r?.top ?? 0,
         left: r?.left ?? 0,
@@ -314,7 +314,10 @@ export default function TerminalOverlay({
       style={{
         ...style,
         transitionTimingFunction: EASE,
-        boxShadow: full ? "none" : "0 0 0 1px rgba(255,255,255,0.08)",
+        // 1px edge definition in both states: on a transparent rounded
+        // window the terminal surface would otherwise melt into the
+        // desktop behind it.
+        boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
       }}
       onMouseMove={(e) => {
         if (e.clientY < 56) show(1800)

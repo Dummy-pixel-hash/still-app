@@ -59,7 +59,11 @@ export default function SessionTerminal({
   }, [])
   const hostRef = useRef<HTMLDivElement>(null)
   // FitAddon measures `.xterm`'s parent's border-box, so the terminal is
-  // opened into a padding-free inner div: with the host's px-3/py-2 padding
+  // opened into a padding-free inner div: with any host side padding the
+  // fit would see a wider box than the real content, overfit and overflow
+  // right — i.e. a wider gap on the left than on the right. Side padding
+  // is zero so the visible gap matches the 8px top: the centered screen
+  // always keeps >=7px from the edge (half of FitAddon's 14px reserve).
   // it would see 900px instead of 876px, overfit (105 cols → 882px) and
   // overflow right — i.e. a wider gap on the left than on the right.
   const fitHostRef = useRef<HTMLDivElement>(null)
@@ -311,7 +315,7 @@ export default function SessionTerminal({
     <div
       ref={hostRef}
       onClick={() => terminalRef.current?.focus()}
-      className="relative h-full min-h-0 w-full cursor-text px-3 py-2 [&_.xterm]:h-full"
+      className="relative h-full min-h-0 w-full cursor-text px-0 py-2 [&_.xterm]:h-full"
       aria-label="Terminal"
     >
       {/* Padding-free: FitAddon measures this div's border-box, so any
