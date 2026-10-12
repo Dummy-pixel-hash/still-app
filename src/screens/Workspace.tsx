@@ -50,6 +50,11 @@ export default function Workspace() {
   const [sort, setSort] = useState<Sort>("manual")
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<OpenState | null>(null)
+  // Temp terminal: memory-only scratch session in its own overlay docked
+  // beside main. Minimize hides the view (worker + transcript survive).
+  const [temp, setTemp] = useState<Session | null>(null)
+  const [tempOpen, setTempOpen] = useState<OpenState | null>(null)
+
   // Pointer-based card drag (works in the packaged WebView, where native
   // HTML5 DnD never starts, plus mouse + touch in the browser).
   const [dragId, setDragId] = useState<string | null>(null)
@@ -121,7 +126,8 @@ export default function Workspace() {
     // Cancelling the overlay cancels any pending auth prompt too — otherwise
     // the AuthDialog would linger with no overlay beneath it.
     const pending = authForRef.current
-    if (pending) {
+    // Temp owns its own auth lifecycle; closing main never cancels it.
+    if (pending && !pending.session.id.startsWith("temp-")) {
       authForRef.current = null
       setAuthFor(null)
       pending.resolve(null)
@@ -139,6 +145,81 @@ export default function Workspace() {
         returnTarget.current?.focus({ preventScroll: true }),
       )
     }, 700)
+  }, [])
+
+  // Center/pill-origin morph for the temp overlay (it has no card).
+  const morphTemp = (s: Session, el: HTMLElement | null) => {
+    const rect =
+      el?.getBoundingClientRect() ??
+      new DOMRect(window.innerWidth / 2 - 360, window.innerHeight - 200, 720, 120)
+    setTempOpen({ session: s, rect, phase: "enter" })
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() =>
+        setTempOpen((o) => (o && o.session.id === s.id ? { ...o, phase: "open" } : o)),
+      ),
+    )
+  }
+
+  const minimizeTemp = useCallback(() => {
+    const pending = authForRef.current
+    if (pending && pending.session.id.startsWith("temp-")) {
+      authForRef.current = null
+      setAuthFor(null)
+      pending.resolve(null)
+    }
+    setTempOpen(null) // instant hide; worker + transcript survive
+  }, [])
+
+  const killTemp = useCallback(() => {
+    if (!temp) return
+    minimizeTemp() // cancels temp-scoped auth, hides view
+    const id = temp.id
+    setTemp(null)
+    void releaseSession(id)
+  }, [temp, minimizeTemp])
+
+  const toggleTemp = useCallback(() => {
+    if (tempOpen) {
+      minimizeTemp()
+      return
+    }
+    if (temp) {
+      morphTemp(temp, document.getElementById("temp-pill"))
+      return
+    }
+    if (authForRef.current) return // main dialog up; retry after it resolves
+    const src =
+      open?.session ??
+      [...store.sessions].sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))[0]
+    if (!src) return
+    const stamp = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const s: Session = {
+      ...src,
+      id: `temp-${stamp}`,
+      name: `Temp ${src.name}`,
+      projectId: "",
+      tmuxSession: `still-tmp-${stamp.replace(/[^A-Za-z0-9_-]/g, "")}`,
+      remember: false,
+    }
+    setTemp(s)
+    morphTemp(s, null)
+  }, [open, temp, tempOpen, store.sessions, minimizeTemp])
+
+  // Temp toggle on capture: runs before xterm sees the key so the combo
+  // never leaks bytes into the PTY (same pattern as the overlay gate).
+  const toggleRef = useRef(toggleTemp)
+  toggleRef.current = toggleTemp
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return
+      if (e.key.toLowerCase() !== "t") return
+      e.preventDefault()
+      e.stopPropagation()
+      toggleRef.current()
+    }
+    window.addEventListener("keydown", onKey, { capture: true })
+    return () => window.removeEventListener("keydown", onKey, { capture: true })
   }, [])
 
   // Global keys: Ctrl/Cmd+K focuses search (workspace only), Ctrl+. or
@@ -736,7 +817,49 @@ export default function Workspace() {
         keyTextFor={keyTextFor}
         onClose={close}
         onNeedAuth={onNeedAuth}
+        slot={tempOpen ? "left" : undefined}
       />
+
+      {tempOpen ? (
+        <TerminalOverlay
+          open={tempOpen}
+          prefs={store.settings.terminal}
+          imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
+          keyTextFor={keyTextFor}
+          onClose={minimizeTemp}
+          onNeedAuth={onNeedAuth}
+          slot="right"
+        />
+      ) : null}
+
+      {temp && !tempOpen ? (
+        <div
+          id="temp-pill"
+          className="fixed bottom-5 right-5 z-[70] flex items-center gap-2.5 rounded-full border border-amber-300/30 bg-black/70 py-2 pl-3 pr-2 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur"
+        >
+          <span
+            aria-hidden
+            className={`h-2 w-2 rounded-full ${connectionState(temp.id) === "connected" ? "bg-emerald-400" : connectionState(temp.id) === "connecting" ? "bg-amber-300" : connectionState(temp.id) === "error" ? "bg-red-400" : "bg-white/30"}`}
+          />
+          <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">
+            Temp · {connectionState(temp.id)}
+          </span>
+          <button
+            type="button"
+            onClick={toggleTemp}
+            className="rounded-full border border-white/10 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-fg transition-colors hover:border-amber-300/50"
+          >
+            Restore
+          </button>
+          <button
+            type="button"
+            onClick={() => void killTemp()}
+            className="rounded-full border border-white/10 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-[#ff4a4a]/50 hover:text-still-fg"
+          >
+            Kill
+          </button>
+        </div>
+      ) : null}
 
       {showNew ? (
         <div

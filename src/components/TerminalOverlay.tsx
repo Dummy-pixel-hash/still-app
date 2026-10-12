@@ -44,11 +44,15 @@ export default function TerminalOverlay({
   keyTextFor,
   onClose,
   onNeedAuth,
+  slot,
 }: {
   open: OpenState | null
   prefs: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
   keyTextFor: (keyId: string) => string | null
+  // slot docks two overlays side-by-side (main left, temp right) instead
+  // of stacking fullscreen.
+  slot?: "left" | "right"
   onClose: () => void
   onNeedAuth: (
     session: Session,
@@ -116,12 +120,17 @@ export default function TerminalOverlay({
 
   const prefsRef = useRef(prefs)
   prefsRef.current = prefs
+  const rootRef = useRef<HTMLDivElement | null>(null)
   // Single capture-phase gate: runs before xterm sees the key, so app
   // shortcuts never leak bytes into the PTY. Backstop lives in
   // SessionTerminal's attachCustomKeyEventHandler for focused-terminal.
+  // Two overlays mounted? A key inside the other overlay isn't ours.
   useEffect(() => {
     if (!full) return
     const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      const other = t?.closest?.("[data-overlay-root]")
+      if (other && !rootRef.current?.contains(t as Node)) return
       if (!e.ctrlKey || e.metaKey || e.altKey) return
       const k = e.key.toLowerCase()
       const isClose = e.code === "Period" || k === "." || k === ">"
@@ -138,7 +147,6 @@ export default function TerminalOverlay({
         e.code === "Equal" ||
         e.code === "NumpadAdd"
       if (!isClose && !isReset && !isZoomOut && !isZoomIn) return
-      const t = e.target as HTMLElement | null
       const inXterm = !!t && !!t.classList?.contains("xterm-helper-textarea")
       const inField =
         !!t &&
@@ -295,18 +303,26 @@ export default function TerminalOverlay({
 
   const touch = useRef<number | null>(null)
   const r = open?.rect
-  const style: React.CSSProperties = full
-    ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 8 }
-    : {
-        top: r?.top ?? 0,
-        left: r?.left ?? 0,
-        width: r?.width ?? 0,
-        height: r?.height ?? 0,
-        borderRadius: 8,
-      }
+  // Docked slot: half-width split. Main left, temp right with a 1px gap.
+  const docked = slot && full
+  const style: React.CSSProperties = docked
+    ? slot === "left"
+      ? { top: 0, left: 0, width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
+      : { top: 0, left: "calc(50vw + 1px)", width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
+    : full
+      ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 8 }
+      : {
+          top: r?.top ?? 0,
+          left: r?.left ?? 0,
+          width: r?.width ?? 0,
+          height: r?.height ?? 0,
+          borderRadius: 8,
+        }
 
   return (
     <div
+      ref={rootRef}
+      data-overlay-root={slot ?? "solo"}
       className={`fixed z-50 overflow-hidden bg-[#08080a] transition-all duration-[650ms] ${
         !open ? "hidden" : ""
       }`}
