@@ -43,16 +43,25 @@ fn still_ping(state: tauri::State<'_, AppState>) -> PingResponse {
 /// overlay both clip to the same 8px radius (see `rounded-lg`), which
 /// matches `DWMWCP_ROUND` exactly — a larger CSS radius would be sliced
 /// by the window shape and look broken at the corner tips.
+///
+/// The second call kills the persistent 1px native frame: frameless
+/// windows keep `WS_THICKFRAME` for resizing, and DWM draws its edge as
+/// a visible border. Extending the frame over the whole client area
+/// (margins -1) makes DWM compose the glass surface instead, so the
+/// border disappears. Purely visual — hit-testing and resizing are
+/// unaffected.
 #[cfg(target_os = "windows")]
-fn round_window_corners(window: &tauri::WebviewWindow) {
+fn tune_windows_frame(window: &tauri::WebviewWindow) {
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
+    use windows_sys::Win32::UI::Controls::MARGINS;
 
     let Ok(hwnd) = window.hwnd() else { return };
+    // Best-effort: if either attribute call fails, we keep the DWM
+    // defaults instead of crashing the window create.
     let pref: u32 = DWMWCP_ROUND as u32;
-    // Best-effort: if the attribute call fails, we keep the DWM default
-    // instead of crashing the window create.
     let _ = unsafe {
         DwmSetWindowAttribute(
             hwnd.0 as _,
@@ -61,6 +70,13 @@ fn round_window_corners(window: &tauri::WebviewWindow) {
             std::mem::size_of::<u32>() as u32,
         )
     };
+    let margins = MARGINS {
+        cxLeftWidth: -1,
+        cxRightWidth: -1,
+        cyTopHeight: -1,
+        cyBottomHeight: -1,
+    };
+    let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd.0 as _, &margins) };
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -75,7 +91,7 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(w) = _app.get_webview_window("main") {
-                    round_window_corners(&w);
+                    tune_windows_frame(&w);
                 }
             }
             Ok(())
