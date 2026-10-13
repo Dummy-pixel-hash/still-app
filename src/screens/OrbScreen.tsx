@@ -5,66 +5,90 @@ import {
   type AgentStatus,
 } from "../bridge/nativeBridge"
 
-const WINDOW = 128
-const ORB = 96
-const CARD_W = 300
-const ROW_H = 52
-const HEAD_H = 96
-const MENU_W = 208
-const MENU_H = 248
-const POS_KEY = "still.orb.pos.v1"
+const WIN = 96
+const ORB = 64
+const POS_KEY = "still.orb.pos.v2"
 
 const URGENCY: Record<AgentStatus, number> = {
   "needs-input": 0,
-  working: 1,
-  error: 2,
+  error: 1,
+  working: 2,
   done: 3,
   idle: 4,
   unknown: 5,
 }
-const STATUS_LABEL: Record<AgentStatus, string> = {
-  working: "Working",
-  "needs-input": "Needs input",
-  idle: "Idle",
-  done: "Finished",
-  error: "Error",
-  unknown: "—",
+
+/** Face color per state: working = violet-blue glow (the "Generating" ball),
+ *  needs-input = warm amber (the only one that needs YOU), done = calm
+ *  green, error = red, idle/unknown = dim hollow. */
+export function orbFace(status: AgentStatus, hasSessions: boolean): string {
+  if (!hasSessions) return "orb-face-idle"
+  switch (status) {
+    case "needs-input":
+      return "orb-face-question"
+    case "working":
+      return "orb-face-working"
+    case "error":
+      return "orb-face-error"
+    case "done":
+      return "orb-face-done"
+    default:
+      return "orb-face-idle"
+  }
+}
+
+export function orbPulse(status: AgentStatus): string {
+  if (status === "needs-input") return "orb-pulse-fast"
+  if (status === "working") return "orb-pulse-slow"
+  return ""
 }
 
 function aggregate(rows: OrbRow[]): AgentStatus {
-  const worst = rows.reduce<AgentStatus | null>((acc, r) => {
-    if (acc === null) return r.status
-    return URGENCY[r.status] < URGENCY[acc] ? r.status : acc
-  }, null)
-  return worst ?? "idle"
+  let worst: AgentStatus = "idle"
+  let first = true
+  for (const r of rows) {
+    if (first || URGENCY[r.status] < URGENCY[worst]) worst = r.status
+    first = false
+  }
+  return rows.length === 0 ? "idle" : worst
 }
 
-function ring(status: AgentStatus, hasSessions: boolean): string {
-  if (!hasSessions) return "border-white/10"
-  switch (status) {
-    case "needs-input":
-      return "border-[#f5b942] shadow-[0_0_28px_3px_rgba(245,185,66,0.4)]"
-    case "working":
-      return "border-[#ff4a4a] shadow-[0_0_28px_3px_rgba(255,74,74,0.4)]"
-    case "error":
-      return "border-[#ff4a4a]/70"
-    case "done":
-      return "border-[#4ade80]"
-    default:
-      return "border-white/10"
-  }
+const DOT: Record<AgentStatus, string> = {
+  "needs-input": "#f5b942",
+  working: "#8b7cf6",
+  error: "#ff5a5a",
+  done: "#4ade80",
+  idle: "rgba(255,255,255,0.28)",
+  unknown: "rgba(255,255,255,0.20)",
+}
+
+/** Segmented rim: one arc per live session (max 8), worst-first. A single
+ *  session is a solid ring; a mix reads as a gradient like the reference. */
+function rimBackground(rows: OrbRow[]): string | undefined {
+  if (rows.length <= 1) return undefined
+  const sorted = [...rows]
+    .sort((a, b) => URGENCY[a.status] - URGENCY[b.status])
+    .slice(0, 8)
+  const n = sorted.length
+  const segs = sorted.map((r, i) => {
+    const a0 = (i / n) * 360
+    const a1 = ((i + 1) / n) * 360
+    return `${DOT[r.status]} ${a0}deg ${a1}deg`
+  })
+  return `conic-gradient(${segs.join(", ")})`
 }
 
 function savePos(x: number, y: number) {
   try {
     localStorage.setItem(POS_KEY, JSON.stringify({ x, y }))
   } catch {
-    /* private-mode storage — in-memory copy is fine */
+    /* private mode — in-memory is fine */
   }
 }
 function loadPos(): { x: number; y: number } | null {
   try {
-    const raw = localStorage.getItem(POS_KEY)
+    const raw =
+      localStorage.getItem(POS_KEY) ?? localStorage.getItem("still.orb.pos.v1")
     return raw ? (JSON.parse(raw) as { x: number; y: number }) : null
   } catch {
     return null
@@ -72,28 +96,25 @@ function loadPos(): { x: number; y: number } | null {
 }
 
 /**
- * Orb companion (rendered in the tiny `orb` webview at `?orb=1`).
- * A floating status circle: breathe = busy, amber = blocked, green = finished
- * while away. Hover floats the live session stack; click restores the main
- * window. Renders ONLY renderer-pushed snapshot rows — never SSH bytes.
+ * Orb companion (tiny `orb` webview at `?orb=1`). Fixed 96px window that
+ * NEVER resizes — the old hover-expand resized the OS window and fought
+ * DPI scaling. The face shows the worst live state; the rim shows the mix
+ * (one arc per session). Click restores the neediest session's workspace.
+ * Renders ONLY renderer-pushed snapshot rows — never SSH bytes.
  */
 export default function OrbScreen() {
   const [rows, setRows] = useState<OrbRow[]>([])
   const [menu, setMenu] = useState(false)
-  const hoverRef = useRef(false)
-
   const posRef = useRef<{ x: number; y: number }>(loadPos() ?? { x: 0, y: 0 })
   const dragPending = useRef(false)
   const dragTimer = useRef<number | null>(null)
-  const leaveTimer = useRef<number | null>(null)
 
-  // ---------- snapshot feed ----------
   useEffect(() => {
     let alive = true
     const refresh = async () => {
       try {
         const snap = await nativeBridge.orbSnapshot()
-        if (alive) setRows(snap.rows)
+        if (alive) setRows(snap.rows.slice(0, 8))
       } catch {
         /* no native runtime: keep last known rows */
       }
@@ -106,73 +127,6 @@ export default function OrbScreen() {
     }
   }, [])
 
-  // ---------- window geometry ----------
-  const clearLeaveTimer = useCallback(() => {
-    if (leaveTimer.current !== null) {
-      window.clearTimeout(leaveTimer.current)
-      leaveTimer.current = null
-    }
-  }, [])
-
-  const applySizePos = useCallback(
-    async (w: number, h: number, x: number, y: number) => {
-      await nativeBridge.orbSetSize(w, h)
-      await nativeBridge.orbSetPosition(x, y)
-    },
-    [],
-  )
-
-  const expand = useCallback(async () => {
-    const n = Math.min(rows.length, 4)
-    const h = HEAD_H + n * ROW_H
-    // Read the true window position (accounts for native drags since the
-    // last hover) and persist it so geometry stays accurate across launches.
-    const p = await nativeBridge.orbGetPosition().catch(() => posRef.current)
-    posRef.current = p
-    savePos(p.x, p.y)
-    const mon = await nativeBridge.orbGetMonitorBounds()
-    // Keep the circle pinned at its screen spot; card grows upward, flipping
-    // below when the orb sits too close to the top edge.
-    const cardAbove = p.y + WINDOW - h - ROW_H >= mon.y
-    const nx = Math.min(
-      Math.max(p.x + WINDOW / 2 - CARD_W / 2, mon.x),
-      mon.x + mon.width - CARD_W,
-    )
-    const ny = cardAbove ? p.y - (h - WINDOW) : p.y
-    await applySizePos(CARD_W, h, nx, ny)
-    posRef.current = { x: nx, y: ny }
-  }, [rows.length, applySizePos])
-
-  const collapse = useCallback(async () => {
-    const { x, y } = posRef.current
-    await applySizePos(WINDOW, WINDOW, x, y)
-  }, [applySizePos])
-
-  // Right-click menu needs a taller window than the 128px circle: grow
-  // upward (menu on top, circle pinned at the bottom) so the OS window
-  // never clips it. Mirrors expand() geometry.
-  const openMenu = useCallback(async () => {
-    setMenu(true)
-    const p = await nativeBridge.orbGetPosition().catch(() => posRef.current)
-    posRef.current = p
-    savePos(p.x, p.y)
-    const mon = await nativeBridge.orbGetMonitorBounds()
-    const above = p.y + WINDOW - MENU_H >= mon.y
-    const nx = Math.min(
-      Math.max(p.x + WINDOW / 2 - MENU_W / 2, mon.x),
-      mon.x + mon.width - MENU_W,
-    )
-    const ny = above ? p.y - (MENU_H - WINDOW) : p.y
-    await applySizePos(MENU_W, MENU_H, nx, ny)
-    posRef.current = { x: nx, y: ny }
-  }, [applySizePos])
-
-  const closeMenu = useCallback(async () => {
-    setMenu(false)
-    await collapse()
-  }, [collapse])
-
-  // ---------- actions ----------
   const restore = useCallback(() => {
     void nativeBridge.restoreFromOrb()
   }, [])
@@ -181,18 +135,26 @@ export default function OrbScreen() {
   }, [])
 
   // Restore saved position on boot (after Rust's bottom-right default).
+  // Fixed window: size never changes, only position.
   useEffect(() => {
     const saved = loadPos()
     if (saved && (saved.x !== 0 || saved.y !== 0)) {
       posRef.current = saved
-      void applySizePos(WINDOW, WINDOW, saved.x, saved.y)
+      void nativeBridge.orbSetSize(WIN, WIN).catch(() => {})
+      void nativeBridge.orbSetPosition(saved.x, saved.y).catch(() => {})
     }
-  }, [applySizePos])
+  }, [])
 
-  // ---------- pointer: drag vs click ----------
   const beginDrag = useCallback(() => {
-    void nativeBridge.orbStartDrag().catch(() => {
-      /* drag unavailable — nothing to do */
+    void nativeBridge.orbStartDrag().catch(() => {}).finally(() => {
+      // Persist wherever the OS dropped us.
+      void nativeBridge
+        .orbGetPosition()
+        .then((p) => {
+          posRef.current = p
+          savePos(p.x, p.y)
+        })
+        .catch(() => {})
     })
   }, [])
 
@@ -220,7 +182,10 @@ export default function OrbScreen() {
   }
 
   const onPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (dragPending.current && (Math.abs(e.movementX) > 2 || Math.abs(e.movementY) > 2)) {
+    if (
+      dragPending.current &&
+      (Math.abs(e.movementX) > 2 || Math.abs(e.movementY) > 2)
+    ) {
       dragPending.current = false
       clearDragTimer()
       beginDrag()
@@ -236,10 +201,12 @@ export default function OrbScreen() {
     } catch {
       /* already released */
     }
-    if (wasClick) restore()
+    if (wasClick) {
+      if (menu) setMenu(false)
+      else restore()
+    }
   }
 
-  // ---------- keyboard ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === " " || e.key === "Enter") {
@@ -247,175 +214,154 @@ export default function OrbScreen() {
         e.stopPropagation()
         restore()
       } else if (e.key === "Escape") {
-        void closeMenu()
+        setMenu(false)
       }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [restore, closeMenu, clearLeaveTimer])
+  }, [restore])
 
-  const visibleCount = rows.length
   const status = aggregate(rows)
-  const ringClassName = ring(status, visibleCount > 0)
-
-  const onRootPointerEnter = () => {
-    if (menu) return
-    clearLeaveTimer()
-    hoverRef.current = true
-    void expand()
-  }
-  const onRootPointerLeave = () => {
-    if (menu) return
-    hoverRef.current = false
-    // Debounce so moving from circle into the card (both inside the window)
-    // never collapses underneath the user.
-    clearLeaveTimer()
-    leaveTimer.current = window.setTimeout(() => {
-      if (!hoverRef.current) void collapse()
-    }, 240)
-  }
+  const rim = rimBackground(rows)
+  const face = orbFace(status, rows.length > 0)
+  const pulse = orbPulse(status)
+  const tip =
+    rows.length === 0
+      ? "Still — idle"
+      : rows
+          .slice()
+          .sort((a, b) => URGENCY[a.status] - URGENCY[b.status])
+          .map((r) => `${r.name}: ${r.status}`)
+          .join("\n")
 
   return (
     <div
-      className="flex h-full w-full flex-col overflow-hidden"
+      className="grid h-full w-full place-items-center overflow-hidden"
       style={{ background: "transparent", fontFamily: "var(--font-sans)" }}
-      onPointerEnter={onRootPointerEnter}
-      onPointerLeave={onRootPointerLeave}
+      title={tip}
     >
-      {/* live card area (height 0 until expanded) */}
-      <div className="min-h-0 flex-1 overflow-hidden px-2 pt-2">
-        {menu ? (
-          <div className="flex h-full flex-col justify-end pb-1">
-            <div className="rounded-xl border border-white/10 bg-[#0b0b0e] p-1 shadow-[0_12px_40px_rgba(0,0,0,0.6)]">
-              <button
-                className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-still-fg hover:bg-white/5"
-                onClick={() => {
-                  void closeMenu().then(() => restore())
-                }}
-              >
-                Restore window
-              </button>
-              <div className="my-1 h-px bg-white/10" />
-              <button
-                className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-[#ff6b6b] hover:bg-white/5"
-                onClick={() => {
-                  setMenu(false)
-                  quit()
-                }}
-              >
-                Quit Still
-              </button>
-            </div>
-          </div>
-        ) : (
-          rows.length > 0 && (
-            <div className="flex h-full flex-col">
-              <div className="mb-1 flex items-baseline justify-between px-1">
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-still-faint">
-                  live
-                </span>
-                <span className="font-mono text-[10px] text-still-faint">
-                  {rows.length}/{rows.length}
-                </span>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-0.5">
-                {rows.map((r) => (
-                  <div
-                    key={r.sessionId}
-                    className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1.5"
-                  >
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-full"
-                      style={{
-                        background:
-                          r.status === "needs-input"
-                            ? "#f5b942"
-                            : r.status === "working"
-                              ? "#ff6b6b"
-                              : r.status === "done"
-                                ? "#4ade80"
-                                : r.status === "error"
-                                  ? "#ff4a4a"
-                                  : "rgba(255,255,255,0.25)",
-                      }}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-[11px] font-medium text-still-fg">
-                          {r.name}
-                        </span>
-                        <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-still-faint">
-                          {STATUS_LABEL[r.status]}
-                        </span>
-                      </div>
-                      <div className="truncate text-[10px] text-still-dim">{r.snippet}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )
-        )}
-      </div>
-
-      {/* floating circle strip */}
-      <div className="flex h-[128px] w-full shrink-0 items-center justify-center">
+      {menu ? (
+        <div
+          role="menu"
+          aria-label="Still orb menu"
+          className="flex h-[96px] w-[96px] flex-col items-stretch justify-center gap-1 rounded-2xl border border-white/10 bg-[#0b0b0e]/95 p-1.5"
+          style={{ background: "rgba(11,11,14,0.95)" }}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            autoFocus
+            onClick={() => {
+              setMenu(false)
+              restore()
+            }}
+            className="rounded-lg px-2 py-1.5 text-left text-[11px] text-still-fg hover:bg-white/10"
+          >
+            Restore
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenu(false)
+              quit()
+            }}
+            className="rounded-lg px-2 py-1.5 text-left text-[11px] text-[#ff6b6b] hover:bg-white/10"
+          >
+            Quit
+          </button>
+        </div>
+      ) : (
         <button
           type="button"
-          onPointerDown={(e) => onPointerDown(e)}
-          onPointerMove={(e) => onPointerMove(e)}
-          onPointerUp={(e) => onPointerUp(e)}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
           onContextMenu={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            if (menu) void closeMenu()
-            else void openMenu()
+            setMenu(true)
           }}
-          aria-label={`Still — ${rows.length} live session${rows.length === 1 ? "" : "s"}`}
-          // Flat translucent fill, NO backdrop-blur: WebView2 renders blur
-          // over a transparent window as a black smear (the "black box").
-          className={`group relative grid select-none place-items-center rounded-full border bg-[rgba(5,5,5,0.88)] p-0 shadow-[0_0_0_1px_rgba(255,255,255,0.06)] transition-transform duration-200 ${ringClassName} hover:scale-[1.06] active:scale-[0.96]`}
-          style={{ width: ORB, height: ORB }}
+          aria-label={`Still — ${rows.length} live session${rows.length === 1 ? "" : "s"} — ${status}`}
+          title={tip}
+          className="orb-hit relative grid select-none place-items-center rounded-full p-0"
+          style={{ width: WIN, height: WIN, background: "transparent" }}
         >
-          {/* inner "still" mark */}
-          <span className="pointer-events-none h-[30px] w-[30px] rounded-full border border-white/10 transition-colors duration-300 group-hover:border-white/25" />
-          <span className="pointer-events-none absolute bottom-[16px] left-1/2 h-[3px] w-[20px] -translate-x-1/2 rounded-full bg-white/25" />
-
-          {/* status ember */}
+          {/* segmented rim: solid color for one session, conic arcs for many */}
           <span
-            className={`pointer-events-none absolute right-[10px] top-[10px] h-2.5 w-2.5 rounded-full ${
-              status === "needs-input"
-                ? "bg-[#f5b942]"
-                : status === "working"
-                  ? "bg-[#ff6b6b]"
-                  : status === "done"
-                    ? "bg-[#4ade80]"
-                    : status === "error"
-                      ? "bg-[#ff4a4a]"
-                      : "bg-white/25"
-            }`}
+            aria-hidden
+            className="absolute rounded-full"
+            style={
+              rim
+                ? {
+                    width: ORB + 6,
+                    height: ORB + 6,
+                    background: rim,
+                    opacity: 0.9,
+                    filter: "saturate(1.1)",
+                  }
+                : {
+                    width: ORB + 6,
+                    height: ORB + 6,
+                    background: "transparent",
+                    border: `2px solid ${DOT[status]}`,
+                    opacity: rows.length === 0 ? 0.35 : 0.9,
+                  }
+            }
           />
-          {/* live count badge */}
-          {visibleCount > 0 && (
-            <span className="pointer-events-none absolute right-0 top-0 grid h-[19px] min-w-[18px] -translate-y-1/2 translate-x-1/2 place-items-center rounded-full bg-[#ff4a4a] px-1 font-mono text-[10px] font-bold leading-none text-[#08080a]">
-              {visibleCount}
+          {/* glossy face */}
+          <span
+            aria-hidden
+            className={`relative rounded-full ${face} ${pulse}`}
+            style={{ width: ORB, height: ORB }}
+          >
+            {/* specular highlight */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 rounded-full"
+              style={{
+                background:
+                  "radial-gradient(circle at 32% 26%, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.12) 22%, transparent 42%), radial-gradient(circle at 50% 115%, rgba(0,0,0,0.55) 0%, transparent 55%)",
+              }}
+            />
+            {/* status eyes: two pills when live, none when idle */}
+            {rows.length > 0 && status !== "idle" && status !== "unknown" ? (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 gap-[7px]"
+              >
+                <span className="orb-eye" />
+                <span className="orb-eye" />
+              </span>
+            ) : null}
+          </span>
+          {/* live count */}
+          {rows.length > 1 && (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute bottom-[6px] right-[6px] grid h-[18px] min-w-[18px] place-items-center rounded-full px-1 font-mono text-[10px] font-bold leading-none"
+              style={{ background: DOT[status], color: "#08080a" }}
+            >
+              {rows.length}
             </span>
           )}
-          {/* breathing wash while a session is actively working */}
-          {status === "working" && (
-            <span className="pointer-events-none absolute inset-0 rounded-full bg-[#ff4a4a]/10 orb-wash" />
-          )}
         </button>
-      </div>
+      )}
 
-      {/* menu now lives in the card area (window grows to fit it) — the old
-          absolute overlay clipped against the 128px OS window. */}
       <style>{`
-        @keyframes orb-wash {
-          0%, 100% { opacity: 0.5; transform: scale(1); }
-          50% { opacity: 0.9; transform: scale(1.05); }
-        }
-        .orb-wash { animation: orb-wash 2.4s ease-in-out infinite; }
+        .orb-hit { outline: none; cursor: pointer; -webkit-app-region: no-drag; }
+        .orb-hit:focus-visible { filter: brightness(1.25); }
+        .orb-face-working { background: radial-gradient(circle at 50% 42%, #3b2f7a 0%, #241d4e 46%, #12101f 78%, #0a0a12 100%); box-shadow: 0 0 18px 2px rgba(139,124,246,0.45), inset 0 0 12px rgba(139,124,246,0.35); }
+        .orb-face-question { background: radial-gradient(circle at 50% 42%, #7a5a24 0%, #4e3a17 46%, #221a0e 78%, #100c06 100%); box-shadow: 0 0 20px 3px rgba(245,185,66,0.55), inset 0 0 12px rgba(245,185,66,0.4); }
+        .orb-face-done { background: radial-gradient(circle at 50% 42%, #1e4d33 0%, #143324 46%, #0c1f16 78%, #060f0b 100%); box-shadow: 0 0 14px 2px rgba(74,222,128,0.4), inset 0 0 12px rgba(74,222,128,0.3); }
+        .orb-face-error { background: radial-gradient(circle at 50% 42%, #6e1f1f 0%, #471414 46%, #200b0b 78%, #100606 100%); box-shadow: 0 0 18px 2px rgba(255,90,90,0.5), inset 0 0 12px rgba(255,90,90,0.35); }
+        .orb-face-idle { background: radial-gradient(circle at 50% 42%, #26262b 0%, #17171b 52%, #0e0e11 80%, #08080a 100%); box-shadow: 0 0 0 1px rgba(255,255,255,0.07), inset 0 0 10px rgba(255,255,255,0.05); }
+        .orb-eye { width: 5px; height: 11px; border-radius: 999px; background: rgba(255,255,255,0.92); box-shadow: 0 0 6px rgba(255,255,255,0.6); }
+        @keyframes orb-breathe-slow { 0%,100% { transform: scale(1); filter: brightness(1); } 50% { transform: scale(1.045); filter: brightness(1.18); } }
+        @keyframes orb-breathe-fast { 0%,100% { transform: scale(1); filter: brightness(1); } 50% { transform: scale(1.08); filter: brightness(1.35); } }
+        .orb-pulse-slow { animation: orb-breathe-slow 2.6s ease-in-out infinite; }
+        .orb-pulse-fast { animation: orb-breathe-fast 1.1s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .orb-pulse-slow, .orb-pulse-fast { animation: none; } }
       `}</style>
     </div>
   )

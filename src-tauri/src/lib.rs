@@ -175,6 +175,8 @@ pub fn run() {
             commands::still_orb_smart_status,
             commands::still_orb_smart_set,
             commands::still_orb_smart_probe,
+            commands::still_orb_smart_has_key,
+            commands::still_orb_smart_forget_key,
             commands::still_app_exit,
         ])
         .run(tauri::generate_context!())

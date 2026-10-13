@@ -254,12 +254,14 @@ export const tauriBridge: NativeBridge = {
     await getCurrentWindow().startDragging()
   },
   async orbSetSize(width, height) {
-    const { PhysicalSize } = await import("@tauri-apps/api/dpi")
-    await getCurrentWindow().setSize(new PhysicalSize(width, height))
+    // Logical px in, logical px out: the old PhysicalSize call fed CSS px
+    // as device px, so the hover card landed wrong on any scaled display.
+    const { LogicalSize } = await import("@tauri-apps/api/dpi")
+    await getCurrentWindow().setSize(new LogicalSize(width, height))
   },
   async orbSetPosition(x, y) {
-    const { PhysicalPosition } = await import("@tauri-apps/api/dpi")
-    await getCurrentWindow().setPosition(new PhysicalPosition(x, y))
+    const { LogicalPosition } = await import("@tauri-apps/api/dpi")
+    await getCurrentWindow().setPosition(new LogicalPosition(x, y))
   },
   async orbGetPosition() {
     return await invoke<{ x: number; y: number }>("still_orb_get_position")
@@ -292,13 +294,39 @@ export const tauriBridge: NativeBridge = {
   async smartStatus(): Promise<SmartConfig> {
     return await invoke<SmartConfig>("still_orb_smart_status")
   },
-  async smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig> {
-    return await invoke<SmartConfig>("still_orb_smart_set", { args: patch })
-  },
-  async smartProbe(text, endpoint?, cutoff?): Promise<SmartProbeResult> {
-    return await invoke<SmartProbeResult>("still_orb_smart_probe", {
-      args: { text, endpoint, cutoff },
+  async smartSet(
+    patch: Partial<SmartConfig> & { apiKey?: string },
+  ): Promise<SmartConfig> {
+    const { apiKey, ...rest } = patch
+    return await invoke<SmartConfig>("still_orb_smart_set", {
+      args: { ...rest, apiKey },
     })
+  },
+  async smartProbe(
+    text,
+    endpoint?,
+    cutoff?,
+    opts?: import("./nativeBridge").SmartProbeOptions,
+  ): Promise<SmartProbeResult> {
+    return await invoke<SmartProbeResult>("still_orb_smart_probe", {
+      args: {
+        text,
+        endpoint: opts?.endpoint ?? endpoint,
+        cutoff: opts?.cutoff ?? cutoff,
+        model: opts?.model,
+        kind: opts?.kind,
+        questionCutoff: opts?.questionCutoff,
+        timeoutSecs: opts?.timeoutSecs,
+        budgetChars: opts?.budgetChars,
+        allowRemote: opts?.allowRemote,
+      },
+    })
+  },
+  async smartHasKey(): Promise<boolean> {
+    return await invoke<boolean>("still_orb_smart_has_key")
+  },
+  async smartForgetKey(): Promise<void> {
+    await invoke("still_orb_smart_forget_key")
   },
   async quit() {
     await invoke("still_app_exit")

@@ -9,6 +9,7 @@ anyhow = "1.0.104"
 base64 = "0.22"
 tauri-plugin-clipboard-manager = "2"
 keyring = "4.2.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
 russh = "0.63.3"
 russh-sftp = "3"
 serde = { version = "1.0.229", features = ["derive"] }

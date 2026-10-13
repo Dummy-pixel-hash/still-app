@@ -182,6 +182,7 @@ export const mockBridge: NativeBridge = {
           status: "working",
           snippet: "Running go test ./... (agent turn in progress)",
           changedAt: Date.now(),
+          tmuxSession: "agent_run-abc1",
         },
         {
           sessionId: "mock-2",
@@ -191,6 +192,7 @@ export const mockBridge: NativeBridge = {
           status: "needs-input",
           snippet: "awaiting permission: run rm -rf dist",
           changedAt: Date.now(),
+          tmuxSession: "infra-def2",
         },
         {
           sessionId: "mock-3",
@@ -200,6 +202,7 @@ export const mockBridge: NativeBridge = {
           status: "idle",
           snippet: "zsh: 12:42 ~/work 2 jobs",
           changedAt: Date.now(),
+          tmuxSession: "notes-ghi3",
         },
       ],
     }
@@ -229,7 +232,17 @@ export const mockBridge: NativeBridge = {
   },
   async smartStatus(): Promise<SmartConfig> {
     // Dev preview: smart off, localhost default, mid cutoff.
-    return { enabled: false, endpoint: "http://127.0.0.1:8080", cutoff: 0.55 }
+    return {
+      enabled: false,
+      endpoint: "http://127.0.0.1:8080",
+      model: "",
+      kind: "auto",
+      cutoff: 0.55,
+      questionCutoff: 0.35,
+      timeoutSecs: 8,
+      budgetChars: 2000,
+      allowRemote: false,
+    }
   },
   async smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig> {
     const cur = await this.smartStatus()
@@ -238,6 +251,12 @@ export const mockBridge: NativeBridge = {
   async smartProbe(): Promise<SmartProbeResult> {
     // Dev preview: canned confident verdict so the Settings UI is testable.
     return { verdict: "working", confidence: 0.91, accepted: true }
+  },
+  async smartHasKey(): Promise<boolean> {
+    return false
+  },
+  async smartForgetKey(): Promise<void> {
+    return undefined
   },
   async quit() {
     return undefined

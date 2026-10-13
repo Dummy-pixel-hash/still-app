@@ -156,6 +156,9 @@ export interface OrbRow {
   status: AgentStatus
   snippet: string
   changedAt: number
+  /** Stable remote tmux identity: lets Rust correlate its capture-pane
+   *  sniff (keyed by tmux) with the renderer's row (keyed by local id). */
+  tmuxSession?: string
 }
 
 export interface OrbSnapshot {
@@ -245,13 +248,20 @@ export interface NativeBridge {
    * no-op for the zero-config scrape. Returns "installed" | "script-only". */
   hooksInstall(sessionId: string, agent: string): Promise<{ status: string; detail: string }>
 
-  // --- Orb Smart layer (BYO local-AI endpoint, default OFF) ---
-  /** Smart-orb settings the user picked (experimental, localhost only). */
+  // --- Orb Smart layer (BYO model endpoint, default OFF) ---
+  /** Smart-orb settings the user picked (experimental, opt-in). */
   smartStatus(): Promise<SmartConfig>
-  /** Update Smart-orb settings. Endpoint must be loopback or it is refused. */
-  smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig>
+  /** Update Smart-orb settings. Remote endpoints need https + ack + model. */
+  smartSet(patch: Partial<SmartConfig> & { apiKey?: string }): Promise<SmartConfig>
   /** One-shot classify of already-stripped pane text (Settings Test button). */
-  smartProbe(text: string, endpoint?: string, cutoff?: number): Promise<SmartProbeResult>
+  smartProbe(
+    text: string,
+    endpoint?: string,
+    cutoff?: number,
+    opts?: SmartProbeOptions,
+  ): Promise<SmartProbeResult>
+  smartHasKey(): Promise<boolean>
+  smartForgetKey(): Promise<void>
   /** Exit Still entirely (tmux keeps running server-side). */
   quit(): Promise<void>
 }
@@ -260,13 +270,30 @@ export interface NativeBridge {
 export interface SmartConfig {
   enabled: boolean
   endpoint: string
+  model: string
+  kind: string
   cutoff: number
+  questionCutoff: number
+  timeoutSecs: number
+  budgetChars: number
+  allowRemote: boolean
 }
 
 export interface SmartProbeResult {
   verdict: string
   confidence: number
   accepted: boolean
+}
+
+export interface SmartProbeOptions {
+  endpoint?: string
+  model?: string
+  kind?: string
+  cutoff?: number
+  questionCutoff?: number
+  timeoutSecs?: number
+  budgetChars?: number
+  allowRemote?: boolean
 }
 
 // The active adapter is assigned once at startup in main.tsx.
@@ -344,6 +371,12 @@ export const failingBridge: NativeBridge = {
     throw new Error("No native runtime: smart orb unavailable.")
   },
   async smartProbe(): Promise<SmartProbeResult> {
+    throw new Error("No native runtime: smart orb unavailable.")
+  },
+  async smartHasKey(): Promise<boolean> {
+    throw new Error("No native runtime: smart orb unavailable.")
+  },
+  async smartForgetKey(): Promise<void> {
     throw new Error("No native runtime: smart orb unavailable.")
   },
   async quit(): Promise<void> {

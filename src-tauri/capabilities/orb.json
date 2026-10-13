@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "orb",
-  "description": "Orb companion window: float + hover-expand + drag geometry.",
+  "description": "Orb companion window: fixed-size float + drag + restore.",
   "windows": ["orb"],
   "permissions": [
     "core:default",

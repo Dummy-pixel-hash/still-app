@@ -43,16 +43,13 @@ const isOrbRoute =
   (window.location.search.includes("orb=1") || window.location.hash.includes("orb=1"))
 
 if (isOrbRoute && typeof document !== "undefined") {
-  // The orb window is transparent at the OS level (tauri.conf), but the
-  // shared theme paints html/body/#root opaque — that mismatch is the
-  // "black box" behind the circle. Force transparency before first paint.
-  const css = "transparent !important"
-  document.documentElement.style.setProperty("background", css)
-  document.body?.style.setProperty("background", css)
+  // Tag the document so the transparent-orb CSS rule (theme.css
+  // `html.orb …`) applies before first paint. Inline-style forcing is
+  // deliberately gone: it raced the stylesheet and lost, leaving the
+  // opaque app background behind the circle (the black box).
+  document.documentElement.classList.add("orb")
+  document.body?.classList.add("orb")
   document.body?.style.setProperty("overflow", "hidden")
-  window.addEventListener("DOMContentLoaded", () => {
-    document.getElementById("root")?.style.setProperty("background", css)
-  })
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

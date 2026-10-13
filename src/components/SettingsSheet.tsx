@@ -15,46 +15,68 @@ const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
 
 /**
- * Smart orb (experimental): BYO local decision-model endpoint. The toggle is
- * OFF unless the user opts in; the endpoint must be loopback (enforced in
- * Rust, refused otherwise). Copy-paste setup + a Test button so users can
- * verify their server before relying on it.
+ * Smart orb (experimental): BYO model endpoint — llama.cpp server or any
+ * OpenAI-compatible `/v1/chat/completions` (plus legacy `/v1/systemone`).
+ * OFF unless the user opts in. Loopback always fine; remote needs https +
+ * an explicit ack (pane snippets leave the machine) + a model name. The API
+ * key lives in the OS keyring, never in app storage.
  */
 function SmartOrbSection() {
   const [cfg, setCfg] = useState<SmartConfig | null>(null)
   const [endpointDraft, setEndpointDraft] = useState("")
+  const [modelDraft, setModelDraft] = useState("")
+  const [keyDraft, setKeyDraft] = useState("")
+  const [hasKey, setHasKey] = useState(false)
+  const [sample, setSample] = useState("⠋ thinking…\nreading files…\n(esc to interrupt)")
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [probeOut, setProbeOut] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
-    void nativeBridge
-      .smartStatus()
-      .then((s) => {
+    void Promise.all([nativeBridge.smartStatus(), nativeBridge.smartHasKey().catch(() => false)])
+      .then(([s, k]) => {
         if (!live) return
         setCfg(s)
         setEndpointDraft(s.endpoint)
+        setModelDraft(s.model ?? "")
+        setHasKey(Boolean(k))
       })
       .catch(() => {
-        if (live) setCfg({ enabled: false, endpoint: "http://127.0.0.1:8080", cutoff: 0.55 })
+        if (live)
+          setCfg({
+            enabled: false,
+            endpoint: "http://127.0.0.1:8080",
+            model: "",
+            kind: "auto",
+            cutoff: 0.55,
+            questionCutoff: 0.35,
+            timeoutSecs: 8,
+            budgetChars: 2000,
+            allowRemote: false,
+          })
       })
     return () => {
       live = false
     }
   }, [])
 
-  const save = async (patch: Partial<SmartConfig>) => {
+  const save = async (patch: Partial<SmartConfig> & { apiKey?: string }) => {
     setBusy(true)
     setMsg(null)
     try {
       const next = await nativeBridge.smartSet(patch)
       setCfg(next)
       setEndpointDraft(next.endpoint)
+      setModelDraft(next.model ?? "")
+      if (patch.apiKey !== undefined) {
+        setKeyDraft("")
+        setHasKey(Boolean(patch.apiKey))
+      }
     } catch (e) {
       setMsg({
         ok: false,
-        text: e instanceof Error ? e.message.slice(0, 220) : "Could not save smart-orb settings.",
+        text: e instanceof Error ? e.message.slice(0, 240) : "Could not save smart-orb settings.",
       })
     } finally {
       setBusy(false)
@@ -65,24 +87,27 @@ function SmartOrbSection() {
     setBusy(true)
     setProbeOut(null)
     try {
-      // Representative ambiguous pane: spinner-ish but no agent chrome.
-      const sample = "⠋ thinking…\nreading files…\n(esc to interrupt)"
-      const res = await nativeBridge.smartProbe(
-        sample,
-        endpointDraft.trim() || undefined,
-        cfg?.cutoff,
-      )
+      const res = await nativeBridge.smartProbe(sample, endpointDraft.trim() || undefined, cfg?.cutoff, {
+        model: modelDraft.trim() || undefined,
+        kind: cfg?.kind,
+        questionCutoff: cfg?.questionCutoff,
+        timeoutSecs: cfg?.timeoutSecs,
+        budgetChars: cfg?.budgetChars,
+        allowRemote: cfg?.allowRemote,
+      })
       setProbeOut(
         res.accepted
           ? `Server answered: ${res.verdict} (${Math.round(res.confidence * 100)}% confident) — verdict would be used.`
           : "Server answered but below your cutoff (or unreachable) — the keyword scrape stays in charge.",
       )
     } catch (e) {
-      setProbeOut(e instanceof Error ? e.message.slice(0, 220) : "Probe failed.")
+      setProbeOut(e instanceof Error ? e.message.slice(0, 240) : "Probe failed.")
     } finally {
       setBusy(false)
     }
   }
+
+  const remote = !/^(http:\/\/(127\.|localhost|\[::1\]))/i.test(endpointDraft.trim())
 
   return (
     <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/30 p-3">
@@ -93,10 +118,9 @@ function SmartOrbSection() {
         </span>
       </div>
       <p className="mt-1 text-[12px] leading-relaxed text-dim">
-        A tiny local decision model (e.g. Julia-1) classifies panes when the
-        keyword scrape is unsure. Runs on <span className="font-mono">your</span> machine
-        only — pane text goes to localhost, never the cloud. Still ships no
-        model; point it at a server you already run.
+        Your model classifies panes when the keyword scrape is unsure.
+        llama.cpp or any OpenAI-style server — local or remote. Pane text
+        only ever goes to the URL below, secrets scrubbed first.
       </p>
       <label className="mt-2 flex items-center gap-2 text-[13px] text-dim">
         <input
@@ -106,38 +130,191 @@ function SmartOrbSection() {
           onChange={(e) => void save({ enabled: e.target.checked })}
           className="accent-[#ff4a4a]"
         />
-        Use my local model when unsure
+        Use my model when unsure
       </label>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_140px]">
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">Endpoint (base URL)</span>
+          <input
+            value={endpointDraft}
+            onChange={(e) => setEndpointDraft(e.target.value)}
+            onBlur={() => {
+              if (cfg && endpointDraft.trim() && endpointDraft.trim() !== cfg.endpoint) {
+                void save({ endpoint: endpointDraft.trim() })
+              }
+            }}
+            placeholder="http://127.0.0.1:8080"
+            spellCheck={false}
+            className={`${inputClass} font-mono`}
+            aria-label="Smart orb endpoint"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">Dialect</span>
+          <select
+            value={cfg?.kind ?? "auto"}
+            disabled={!cfg || busy}
+            onChange={(e) => void save({ kind: e.target.value })}
+            className={inputClass}
+            aria-label="Smart orb dialect"
+          >
+            <option value="auto" className="bg-[#121214]">Auto</option>
+            <option value="openai" className="bg-[#121214]">OpenAI chat</option>
+            <option value="systemone" className="bg-[#121214]">SystemOne</option>
+          </select>
+        </label>
+      </div>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">Model {remote ? "(required for remote)" : "(blank = server default)"}</span>
+          <input
+            value={modelDraft}
+            onChange={(e) => setModelDraft(e.target.value)}
+            onBlur={() => {
+              if (cfg && modelDraft.trim() !== (cfg.model ?? "")) {
+                void save({ model: modelDraft.trim() })
+              }
+            }}
+            placeholder="e.g. qwen3-0.6b"
+            spellCheck={false}
+            className={`${inputClass} font-mono`}
+            aria-label="Smart orb model"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">
+            API key {hasKey ? "● stored" : "(optional, keyring only)"}
+          </span>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              placeholder={hasKey ? "Stored — paste to replace" : "sk-… (local servers need none)"}
+              aria-label="Smart orb API key"
+              className={`${inputClass} font-mono`}
+            />
+            {keyDraft.trim() ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void save({ apiKey: keyDraft.trim() })}
+                className="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[13px] text-fg transition hover:bg-white/10 disabled:opacity-40"
+              >
+                Save
+              </button>
+            ) : hasKey ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  void nativeBridge
+                    .smartForgetKey()
+                    .catch(() => {})
+                    .finally(() => setHasKey(false))
+                }}
+                className="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[13px] text-dim transition hover:bg-white/10 disabled:opacity-40"
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+        </label>
+      </div>
+      {remote && (
+        <label className="mt-2 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-950/30 p-2 text-[12px] text-amber-200/90">
+          <input
+            type="checkbox"
+            checked={cfg?.allowRemote ?? false}
+            disabled={!cfg || busy}
+            onChange={(e) => void save({ allowRemote: e.target.checked })}
+            className="mt-0.5 accent-[#f5b942]"
+          />
+          <span>
+            This host is not on this machine — pane snippets will be sent to
+            it over https. Tick to acknowledge.
+          </span>
+        </label>
+      )}
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">
+            Cutoff — use at/above {Math.round((cfg?.cutoff ?? 0.55) * 100)}%
+          </span>
+          <input
+            type="range"
+            min={0.3}
+            max={0.95}
+            step={0.05}
+            value={cfg?.cutoff ?? 0.55}
+            disabled={!cfg || busy}
+            onChange={(e) => void save({ cutoff: Number(e.target.value) })}
+            className="w-full accent-[#ff4a4a]"
+            aria-label="Smart orb confidence cutoff"
+          />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-dim">
+            Question bar — {Math.round((cfg?.questionCutoff ?? 0.35) * 100)}%
+          </span>
+          <input
+            type="range"
+            min={0.15}
+            max={0.8}
+            step={0.05}
+            value={cfg?.questionCutoff ?? 0.35}
+            disabled={!cfg || busy}
+            onChange={(e) => void save({ questionCutoff: Number(e.target.value) })}
+            className="w-full accent-[#f5b942]"
+            aria-label="Smart orb question cutoff"
+          />
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="mb-1 block text-[12px] text-dim">Timeout s</span>
+            <input
+              type="number"
+              min={2}
+              max={30}
+              value={cfg?.timeoutSecs ?? 8}
+              disabled={!cfg || busy}
+              onChange={(e) => {
+                const v = Math.min(30, Math.max(2, Number(e.target.value) || 8))
+                void save({ timeoutSecs: v })
+              }}
+              className={inputClass}
+              aria-label="Smart orb timeout seconds"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12px] text-dim">Context</span>
+            <input
+              type="number"
+              min={400}
+              max={8000}
+              step={100}
+              value={cfg?.budgetChars ?? 2000}
+              disabled={!cfg || busy}
+              onChange={(e) => {
+                const v = Math.min(8000, Math.max(400, Number(e.target.value) || 2000))
+                void save({ budgetChars: v })
+              }}
+              className={inputClass}
+              aria-label="Smart orb context budget"
+            />
+          </label>
+        </div>
+      </div>
       <label className="mt-2 block">
-        <span className="mb-1 block text-[12px] text-dim">Model endpoint (localhost only)</span>
-        <input
-          value={endpointDraft}
-          onChange={(e) => setEndpointDraft(e.target.value)}
-          onBlur={() => {
-            if (cfg && endpointDraft.trim() && endpointDraft.trim() !== cfg.endpoint) {
-              void save({ endpoint: endpointDraft.trim() })
-            }
-          }}
-          placeholder="http://127.0.0.1:8080"
+        <span className="mb-1 block text-[12px] text-dim">Test with your own pane text</span>
+        <textarea
+          value={sample}
+          onChange={(e) => setSample(e.target.value)}
+          rows={3}
           spellCheck={false}
           className={`${inputClass} font-mono`}
-          aria-label="Smart orb endpoint"
-        />
-      </label>
-      <label className="mt-2 block">
-        <span className="mb-1 block text-[12px] text-dim">
-          Confidence cutoff — use the model at or above {Math.round((cfg?.cutoff ?? 0.55) * 100)}%
-        </span>
-        <input
-          type="range"
-          min={0.3}
-          max={0.95}
-          step={0.05}
-          value={cfg?.cutoff ?? 0.55}
-          disabled={!cfg || busy}
-          onChange={(e) => void save({ cutoff: Number(e.target.value) })}
-          className="w-full accent-[#ff4a4a]"
-          aria-label="Smart orb confidence cutoff"
+          aria-label="Smart orb test pane text"
         />
       </label>
       <div className="mt-2 flex items-center gap-2">
@@ -157,18 +334,15 @@ function SmartOrbSection() {
         </p>
       )}
       <details className="mt-2 text-[12px] text-dim">
-        <summary className="cursor-pointer text-fg">Setup: run Julia-1 locally</summary>
+        <summary className="cursor-pointer text-fg">Setup: run llama.cpp locally</summary>
         <ol className="mt-1 list-decimal space-y-1 pl-5">
-          <li>
-            Install <span className="font-mono">llama-server</span> (any recent
-            build with <span className="font-mono">/v1/systemone</span> support).
-          </li>
           <li className="break-all">
             <span className="font-mono">
-              llama-server -hf ggml-org/Julia-1-GGUF --port 8080 -c 2048 -b 1024
+              llama-server -hf ggml-org/Qwen3-0.6B-GGUF --port 8080 -c 2048 -b 1024
             </span>
           </li>
           <li>Paste the address above, press Test, then flip the toggle on.</li>
+          <li>Remote OpenAI-style servers need https, a model name, and the ack box ticked.</li>
         </ol>
       </details>
     </div>

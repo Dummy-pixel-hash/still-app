@@ -869,9 +869,11 @@ pub fn still_orb_smart_status(
         .unwrap_or_default())
 }
 
-/// [ORB smart] Update Smart-orb config. `endpoint` must be loopback —
-/// anything else is refused BEFORE it is stored, so a bad value can never
-/// become the dial target.
+/// [ORB smart] Update Smart-orb config. The endpoint is validated by policy
+/// BEFORE it is stored (loopback always fine; remote needs https + explicit
+/// ack + model), so a bad value can never become the dial target. An
+/// optional `apiKey` is moved straight to the OS keyring — never stored in
+/// config, never returned.
 #[tauri::command]
 pub fn still_orb_smart_set(
     app: AppHandle,
@@ -887,10 +889,19 @@ pub fn still_orb_smart_set(
     if let Some(endpoint) = args.endpoint {
         let endpoint = endpoint.trim().to_string();
         if !endpoint.is_empty() {
-            crate::orb_model::loopback_addr(&endpoint)
+            let model = args.model.clone().unwrap_or_else(|| cfg.model.clone());
+            let allow_remote = args.allow_remote.unwrap_or(cfg.allow_remote);
+            crate::orb_model::endpoint_policy(&endpoint, &model, allow_remote)
                 .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
             cfg.endpoint = endpoint;
         }
+    }
+    if let Some(model) = args.model {
+        cfg.model = model.trim().to_string();
+    }
+    if let Some(kind) = args.kind {
+        let k = crate::orb_model::normalize_kind(&kind).to_string();
+        cfg.kind = k;
     }
     if let Some(cutoff) = args.cutoff {
         if !(0.0..=1.0).contains(&cutoff) {
@@ -900,6 +911,49 @@ pub fn still_orb_smart_set(
             ));
         }
         cfg.cutoff = cutoff;
+    }
+    if let Some(qc) = args.question_cutoff {
+        if !(0.0..=1.0).contains(&qc) {
+            return Err(StillError::friendly(
+                "smart_cutoff_range",
+                "Question cutoff must be between 0 and 1.",
+            ));
+        }
+        cfg.question_cutoff = qc;
+    }
+    if let Some(t) = args.timeout_secs {
+        if !(2..=30).contains(&t) {
+            return Err(StillError::friendly(
+                "smart_range",
+                "Timeout must be 2–30 seconds.",
+            ));
+        }
+        cfg.timeout_secs = t;
+    }
+    if let Some(b) = args.budget_chars {
+        if !(400..=8000).contains(&b) {
+            return Err(StillError::friendly(
+                "smart_range",
+                "Context budget must be 400–8000 chars.",
+            ));
+        }
+        cfg.budget_chars = b as usize;
+    }
+    if let Some(allow_remote) = args.allow_remote {
+        cfg.allow_remote = allow_remote;
+    }
+    // Re-validate the whole triple after the patch (model/ack may have
+    // changed independently of the URL).
+    crate::orb_model::endpoint_policy(&cfg.endpoint, &cfg.model, cfg.allow_remote)
+        .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
+    if let Some(key) = args.api_key {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            crate::orb_model::forget_api_key();
+        } else {
+            crate::orb_model::save_api_key(&key)
+                .map_err(|m| StillError::friendly("keyring", m))?;
+        }
     }
     if let Some(state) = app.try_state::<crate::orb_model::SmartState>() {
         state.set(cfg.clone());
@@ -912,12 +966,35 @@ pub fn still_orb_smart_set(
 pub struct SmartSetArgs {
     pub enabled: Option<bool>,
     pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub kind: Option<String>,
     pub cutoff: Option<f64>,
+    pub question_cutoff: Option<f64>,
+    pub timeout_secs: Option<u64>,
+    pub budget_chars: Option<u32>,
+    pub allow_remote: Option<bool>,
+    /// Optional secret: moved to the keyring, never echoed back.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
-/// [ORB smart] Manual probe: classify one pane text through the configured
-/// endpoint RIGHT NOW (Settings "Test" button). Never touches sessions —
-/// the renderer passes already-stripped text. Times out in 3s, fail-open.
+/// Whether a Smart API key is stored (boolean only — the key itself never
+/// crosses IPC back to the renderer).
+#[tauri::command]
+pub fn still_orb_smart_has_key() -> Result<bool, StillError> {
+    Ok(crate::orb_model::has_api_key())
+}
+
+/// Forget the stored Smart API key.
+#[tauri::command]
+pub fn still_orb_smart_forget_key() -> Result<(), StillError> {
+    crate::orb_model::forget_api_key();
+    Ok(())
+}
+
+/// [ORB smart] Manual probe: classify one pane text through the endpoint
+/// RIGHT NOW (Settings "Test" button). Never touches sessions — the
+/// renderer passes already-stripped text. Fails open to the scrape.
 #[tauri::command]
 pub async fn still_orb_smart_probe(
     app: AppHandle,
@@ -927,11 +1004,49 @@ pub async fn still_orb_smart_probe(
         .try_state::<crate::orb_model::SmartState>()
         .map(|s| s.get())
         .unwrap_or_default();
-    let endpoint = args.endpoint.unwrap_or(cfg.endpoint);
-    let cutoff = args.cutoff.unwrap_or(cfg.cutoff);
-    crate::orb_model::loopback_addr(&endpoint)
-        .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
-    match crate::orb_model::classify(&endpoint, cutoff, &args.text).await {
+    let mut probe_cfg = cfg.clone();
+    if let Some(e) = args.endpoint {
+        if !e.trim().is_empty() {
+            probe_cfg.endpoint = e.trim().to_string();
+        }
+    }
+    if let Some(m) = args.model {
+        probe_cfg.model = m.trim().to_string();
+    }
+    if let Some(k) = args.kind {
+        probe_cfg.kind = crate::orb_model::normalize_kind(&k).to_string();
+    }
+    if let Some(c) = args.cutoff {
+        if !(0.0..=1.0).contains(&c) {
+            return Err(StillError::friendly(
+                "smart_cutoff_range",
+                "Cutoff must be between 0 and 1.",
+            ));
+        }
+        probe_cfg.cutoff = c;
+    }
+    if let Some(qc) = args.question_cutoff {
+        if !(0.0..=1.0).contains(&qc) {
+            return Err(StillError::friendly(
+                "smart_cutoff_range",
+                "Question cutoff must be between 0 and 1.",
+            ));
+        }
+        probe_cfg.question_cutoff = qc;
+    }
+    if let Some(t) = args.timeout_secs {
+        probe_cfg.timeout_secs = t.clamp(2, 30);
+    }
+    if let Some(b) = args.budget_chars {
+        probe_cfg.budget_chars = (b as usize).clamp(400, 8000);
+    }
+    crate::orb_model::endpoint_policy(
+        &probe_cfg.endpoint,
+        &probe_cfg.model,
+        args.allow_remote.unwrap_or(probe_cfg.allow_remote),
+    )
+    .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
+    match crate::orb_model::classify_cfg(&probe_cfg, &args.text).await {
         Some((state, confidence)) => Ok(SmartProbeResult {
             verdict: state.as_str().to_string(),
             confidence,
@@ -950,7 +1065,13 @@ pub async fn still_orb_smart_probe(
 pub struct SmartProbeArgs {
     pub text: String,
     pub endpoint: Option<String>,
+    pub model: Option<String>,
+    pub kind: Option<String>,
     pub cutoff: Option<f64>,
+    pub question_cutoff: Option<f64>,
+    pub timeout_secs: Option<u64>,
+    pub budget_chars: Option<u32>,
+    pub allow_remote: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

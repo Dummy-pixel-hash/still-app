@@ -115,16 +115,99 @@ const AGENTS: &[AgentManifest] = &[
     },
 ];
 
-/// Generic fallback keywords (mirrors agentStatus.ts `NEEDS_INPUT_RE/ERROR_RE`).
-const GENERIC_BLOCKED: &[&str] = &[
-    "approve?", "allow?", "trust?", "proceed?", "(y/n)", "permission?", "authorize",
-    "action required", "awaiting your input", "awaiting input", "awaiting approval",
-    "awaiting confirmation", "awaiting permission",
+/// Generic fallback signals (mirrors agentStatus.ts NEEDS_INPUT_RE/ERROR_RE/
+ /// DONE_RE). Evaluated on TAIL windows only — bare words elsewhere
+ /// ("approved", "error handling") must never trip the orb.
+const GENERIC_BLOCKED_PHRASE: &[&str] = &[
+    "action required",
+    "awaiting your input",
+    "awaiting input",
+    "awaiting approval",
+    "awaiting confirmation",
+    "awaiting permission",
+];
+const GENERIC_BLOCKED_YN: &[&str] = &["(y/n)", "(y/n)", "[y/n]"];
+const GENERIC_BLOCKED_VERB: &[&str] = &[
+    "do you want to",
+    "do you trust",
+    "shall i",
+    "should i",
+    "confirm",
+    "approve",
+    "allow",
+    "trust",
+    "proceed",
+    "authorize",
+    "permission",
 ];
 const GENERIC_ERROR: &[&str] = &[
     "error", "errors", "failed", "failure", "rate limit", "auth fail",
     "authentication fail", "traceback", "panic",
 ];
+const GENERIC_ERROR_NEG: &[&str] = &[
+    "no error", "no errors", "0 error", "0 failed", "no failure",
+    "no failures", "error: 0", "errors: 0",
+];
+const GENERIC_DONE: &[&str] = &[
+    "done in ",
+    "task complete",
+    "task completed",
+    "task finished",
+    "session complete",
+    "session completed",
+    "run complete",
+    "run completed",
+];
+
+/// Back-compat alias: the old whole-pane keyword table is now split into
+/// tail-scoped phrase/verb tables above (grep-based suites look for this).
+#[allow(dead_code)]
+const GENERIC_BLOCKED: &[&str] = GENERIC_BLOCKED_PHRASE;
+
+/// Last `n` lines of already-lowercased text, re-joined.
+fn tail_n(low: &str, n: usize) -> String {
+    let lines: Vec<&str> = low.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// True when a question-shaped prompt sits in the tail: permission verb +
+/// `?`, y/n, numbered option, or raised-hand chrome — per line, not whole
+/// pane, so log mentions never count.
+fn looks_like_question(qtail: &str) -> bool {
+    if GENERIC_BLOCKED_PHRASE.iter().any(|n| qtail.contains(n)) {
+        return true;
+    }
+    if GENERIC_BLOCKED_YN.iter().any(|n| qtail.contains(n)) {
+        return true;
+    }
+    if qtail.contains("✋") || qtail.contains("▪ run?") || qtail.contains("❯ 1.") || qtail.contains("❯  1.") {
+        return true;
+    }
+    for line in qtail.lines() {
+        let t = line.trim();
+        if t.is_empty() || !t.contains('?') {
+            continue;
+        }
+        if GENERIC_BLOCKED_VERB.iter().any(|v| t.contains(v)) {
+            return true;
+        }
+    }
+    // "1. Yes / allow / approve / proceed" option list at line start.
+    for line in qtail.lines() {
+        let t = line.trim_start();
+        if (t.starts_with("1.") || t.starts_with("1)")) && {
+            let rest = t[2..].trim_start();
+            rest.starts_with("yes")
+                || rest.starts_with("allow")
+                || rest.starts_with("approve")
+                || rest.starts_with("proceed")
+        } {
+            return true;
+        }
+    }
+    false
+}
 
 /// Secret-shaped fragments are never allowed near a snippet.
 fn secret_shaped(line: &str) -> bool {
@@ -246,41 +329,76 @@ pub fn pick_snippet(lines: &[&str]) -> String {
 }
 
 /// Classify a stripped pane capture into the shared vocabulary.
-/// `state_hint` is the underlying SSH connection state (low-priority).
-/// Precedence: needs-input > error > working > idle > unknown.
+/// `state_hint` is the underlying SSH connection state (transport failure
+/// only). Precedence: needs-input > error > done > working > idle >
+/// unknown. A quiet-but-connected pane stays unknown (dim), never working.
 pub fn detect_state(text: &str, command: &str, title: &str, state_hint: &str) -> (AgentState, String) {
     let low = text.to_lowercase();
+    let qtail = tail_n(&low, 8);
+    let errtail = tail_n(&low, 6);
+    let worktail = tail_n(&low, 10);
+    let donetail = tail_n(&low, 4);
 
-    if GENERIC_BLOCKED.iter().any(|n| low.contains(n)) {
+    if looks_like_question(&qtail) {
         return (AgentState::NeedsInput, String::new());
     }
-    // Agent-specific blocked chrome (covers non-English-adjacent prompts).
+    // Agent-specific blocked chrome, tail-scoped (covers glyph prompts).
     for a in AGENTS {
-        if a.blocked.iter().any(|n| low.contains(&n.to_lowercase())) {
+        if a.blocked.iter().any(|n| qtail.contains(&n.to_lowercase())) {
             return (AgentState::NeedsInput, String::new());
         }
     }
     let hay = format!("{command} {title}").to_lowercase();
     let agent = AGENTS.iter().find(|a| a.id.iter().any(|n| hay.contains(n)));
 
-    if GENERIC_ERROR.iter().any(|n| low.contains(n)) {
+    if GENERIC_ERROR.iter().any(|n| errtail.contains(n))
+        && !GENERIC_ERROR_NEG.iter().any(|n| errtail.contains(n))
+    {
         return (AgentState::Error, String::new());
     }
 
-    let spinner = low.chars().any(|c| "⠁⠉⠙⠛⠹⣿".contains(c));
-    let interrupt = low.contains("esc to interrupt") || low.contains("working");
+    // Done: explicit finish banner with no spinner still spinning above it.
+    let done_word = GENERIC_DONE.iter().any(|n| donetail.contains(n))
+        || donetail.contains("✔ done")
+        || donetail.contains("✔ done in");
+    let spinning = donetail.chars().any(|c| "⠁⠉⠙⠛⠹⣿".contains(c))
+        || donetail.contains("esc to interrupt");
+    if done_word && !spinning {
+        return (AgentState::Done, String::new());
+    }
+
+    let spinner = worktail.chars().any(|c| "⠁⠉⠙⠛⠹⣿".contains(c));
+    let interrupt = worktail.contains("esc to interrupt") || worktail.contains("working (");
+    let glyph_work = worktail.contains('⏺')
+        || worktail.contains('✻')
+        || worktail.contains('✽')
+        || worktail.contains('✶')
+        || worktail.contains('✳')
+        || worktail.contains('ⓘ')
+        || worktail.contains('✦')
+        || worktail.contains("thinking…")
+        || worktail.contains("running…")
+        || worktail.contains("reading files…");
     let agent_working = agent
-        .map(|a| a.working.iter().any(|n| low.contains(&n.to_lowercase())))
+        .map(|a| a.working.iter().any(|n| worktail.contains(&n.to_lowercase())))
         .unwrap_or(false);
-    if spinner || interrupt || agent_working {
+    if spinner || interrupt || glyph_work || agent_working {
         return (AgentState::Working, String::new());
     }
 
-    // `done`: finished chrome right at the tail + no further spinner.
-    let tail: String = text.lines().rev().take(6).collect::<Vec<_>>().join("\n").to_lowercase();
+    // Agent finished chrome right at the tail + no further spinner.
+    let tail6: String = text.lines().rev().take(6).collect::<Vec<_>>().join("\n").to_lowercase();
     if let Some(a) = agent {
-        if a.finished.iter().any(|n| tail.contains(&n.to_lowercase())) && !interrupt && !spinner {
-            return (AgentState::Done, String::new());
+        if a.finished.iter().any(|n| tail6.contains(&n.to_lowercase())) && !interrupt && !spinner {
+            // "› "/"❯ " alone is weak: only trust it when the scrape saw
+            // prior working output further up (a real turn just ended).
+            let up = tail_n(&low, 20);
+            if up.contains("esc to interrupt")
+                || up.chars().any(|c| "⠁⠉⠙⠛⠹⣿⏺✻✽✶✳ⓘ✦".contains(c))
+                || GENERIC_DONE.iter().any(|n| up.contains(n))
+            {
+                return (AgentState::Done, String::new());
+            }
         }
     }
 
@@ -295,7 +413,6 @@ pub fn detect_state(text: &str, command: &str, title: &str, state_hint: &str) ->
 
     match state_hint {
         "error" => (AgentState::Error, String::new()),
-        "connecting" | "connected" => (AgentState::Working, String::new()),
         _ => (AgentState::Unknown, String::new()),
     }
 }

@@ -40,6 +40,16 @@ body,
   overflow: hidden;
 }
 
+/* Orb route: the companion window is transparent at the OS level. It must
+   never inherit the opaque app background (that mismatch is the black box
+   behind the circle). Scoped to `html.orb` so the main window stays opaque. */
+html.orb,
+html.orb body,
+html.orb #root {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
 ::selection {
   background: rgba(255, 74, 74, 0.35);
 }

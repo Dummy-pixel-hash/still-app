@@ -11,11 +11,10 @@ import { connectionState } from "./connections"
 import { frozenPreview, snapshotPreviewLines } from "./connections"
 import { detectStatus, pickSnippet, redactLine } from "./agentStatus"
 
-/** Precedence used to order the orb stack: most urgent first. */
 const URGENCY: Record<AgentStatus, number> = {
   "needs-input": 0,
-  working: 1,
-  error: 2,
+  error: 1,
+  working: 2,
   done: 3,
   idle: 4,
   unknown: 5,
@@ -54,6 +53,7 @@ export function buildOrbSnapshot(sessions: Session[]): OrbSnapshot {
       status,
       snippet,
       changedAt: s.updatedAt ?? Date.now(),
+      tmuxSession: s.tmuxSession,
     })
   }
   return { rows: sortOrbRows(rows) }
