@@ -81,6 +81,17 @@ html.orb #root {
   display: none !important;
   width: 0 !important;
 }
+/* The fitted grid floors to whole rows, so a fractional strip of the
+   container always remains below the last row. xterm.css paints that
+   strip pure #000 (the .xterm-viewport fallback); match the terminal
+   theme instead so it blends invisibly. Higher specificity than the
+   stock rule is required. Both renderers benefit: DOM rows and the
+   WebGL canvas each cover exactly rows x cellHeight. */
+.xterm .xterm-viewport {
+  /* !important: theme.css loads before xterm.css, so only importance
+     beats the stock #000 fallback at equal specificity. */
+  background-color: #08080a !important;
+}
 /* No decorations are registered in this app; the ruler canvas would only
    sit invisibly under the custom thumb lane. */
 .xterm-decoration-overview-ruler {
