@@ -334,7 +334,7 @@ fn position_bottom_right_once(app: &AppHandle, orb: &tauri::WebviewWindow) {
     let Ok(Some(monitor)) = app.primary_monitor() else { return };
     let pos = monitor.position();
     let size = monitor.size();
-    let (w, h) = orb.outer_size().map(|s| (s.width, s.height)).unwrap_or((112, 112));
+    let (w, h) = orb.outer_size().map(|s| (s.width, s.height)).unwrap_or((128, 128));
     let inset: i32 = 16;
     let x = pos.x + size.width as i32 - w as i32 - inset;
     let y = pos.y + size.height as i32 - h as i32 - inset;

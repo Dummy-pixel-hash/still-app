@@ -26,7 +26,10 @@ pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080";
 /// Classify timeout: the tick must never stall on a slow model.
 pub const CLASSIFY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Pane budget sent to the model (chars, rough ~4 chars/token guard).
-pub const STATE_BUDGET_CHARS: usize = 4096;
+/// Kept small on purpose: the default `llama-server` physical batch is 512
+/// tokens, and the criteria block eats ~200 of those. Tail-only — the newest
+/// pane lines carry the current state; stale scrollback only adds tokens.
+pub const STATE_BUDGET_CHARS: usize = 1200;
 
 /// User-facing smart-orb settings (managed Tauri state, renderer-editable).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,10 +82,19 @@ pub fn criterion(label: &str) -> &'static str {
 }
 
 /// Build the `/v1/systemone` request body for one pane capture.
+/// Takes the TAIL (newest lines carry the current state; stale scrollback
+/// only burns batch budget the server may not have).
 pub fn classify_body(pane_text: &str) -> serde_json::Value {
-    let state: String = pane_text.chars().take(STATE_BUDGET_CHARS).collect();
+    let tail: String = pane_text
+        .chars()
+        .rev()
+        .take(STATE_BUDGET_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     serde_json::json!({
-        "state": state,
+        "state": tail,
         "questions": {
             "status": {
                 "type": "choice",

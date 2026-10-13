@@ -5,11 +5,13 @@ import {
   type AgentStatus,
 } from "../bridge/nativeBridge"
 
-const WINDOW = 112
+const WINDOW = 128
 const ORB = 96
 const CARD_W = 300
 const ROW_H = 52
 const HEAD_H = 96
+const MENU_W = 208
+const MENU_H = 248
 const POS_KEY = "still.orb.pos.v1"
 
 const URGENCY: Record<AgentStatus, number> = {
@@ -146,6 +148,30 @@ export default function OrbScreen() {
     await applySizePos(WINDOW, WINDOW, x, y)
   }, [applySizePos])
 
+  // Right-click menu needs a taller window than the 128px circle: grow
+  // upward (menu on top, circle pinned at the bottom) so the OS window
+  // never clips it. Mirrors expand() geometry.
+  const openMenu = useCallback(async () => {
+    setMenu(true)
+    const p = await nativeBridge.orbGetPosition().catch(() => posRef.current)
+    posRef.current = p
+    savePos(p.x, p.y)
+    const mon = await nativeBridge.orbGetMonitorBounds()
+    const above = p.y + WINDOW - MENU_H >= mon.y
+    const nx = Math.min(
+      Math.max(p.x + WINDOW / 2 - MENU_W / 2, mon.x),
+      mon.x + mon.width - MENU_W,
+    )
+    const ny = above ? p.y - (MENU_H - WINDOW) : p.y
+    await applySizePos(MENU_W, MENU_H, nx, ny)
+    posRef.current = { x: nx, y: ny }
+  }, [applySizePos])
+
+  const closeMenu = useCallback(async () => {
+    setMenu(false)
+    await collapse()
+  }, [collapse])
+
   // ---------- actions ----------
   const restore = useCallback(() => {
     void nativeBridge.restoreFromOrb()
@@ -221,24 +247,25 @@ export default function OrbScreen() {
         e.stopPropagation()
         restore()
       } else if (e.key === "Escape") {
-        setMenu(false)
-        void collapse()
+        void closeMenu()
       }
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [restore, collapse, clearLeaveTimer])
+  }, [restore, closeMenu, clearLeaveTimer])
 
   const visibleCount = rows.length
   const status = aggregate(rows)
   const ringClassName = ring(status, visibleCount > 0)
 
   const onRootPointerEnter = () => {
+    if (menu) return
     clearLeaveTimer()
     hoverRef.current = true
     void expand()
   }
   const onRootPointerLeave = () => {
+    if (menu) return
     hoverRef.current = false
     // Debounce so moving from circle into the card (both inside the window)
     // never collapses underneath the user.
@@ -257,57 +284,82 @@ export default function OrbScreen() {
     >
       {/* live card area (height 0 until expanded) */}
       <div className="min-h-0 flex-1 overflow-hidden px-2 pt-2">
-        {rows.length > 0 && (
-          <div className="flex h-full flex-col">
-            <div className="mb-1 flex items-baseline justify-between px-1">
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-still-faint">
-                live
-              </span>
-              <span className="font-mono text-[10px] text-still-faint">
-                {rows.length}/{rows.length}
-              </span>
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-0.5">
-              {rows.map((r) => (
-                <div
-                  key={r.sessionId}
-                  className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1.5"
-                >
-                  <span
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{
-                      background:
-                        r.status === "needs-input"
-                          ? "#f5b942"
-                          : r.status === "working"
-                            ? "#ff6b6b"
-                            : r.status === "done"
-                              ? "#4ade80"
-                              : r.status === "error"
-                                ? "#ff4a4a"
-                                : "rgba(255,255,255,0.25)",
-                    }}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-[11px] font-medium text-still-fg">
-                        {r.name}
-                      </span>
-                      <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-still-faint">
-                        {STATUS_LABEL[r.status]}
-                      </span>
-                    </div>
-                    <div className="truncate text-[10px] text-still-dim">{r.snippet}</div>
-                  </div>
-                </div>
-              ))}
+        {menu ? (
+          <div className="flex h-full flex-col justify-end pb-1">
+            <div className="rounded-xl border border-white/10 bg-[#0b0b0e] p-1 shadow-[0_12px_40px_rgba(0,0,0,0.6)]">
+              <button
+                className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-still-fg hover:bg-white/5"
+                onClick={() => {
+                  void closeMenu().then(() => restore())
+                }}
+              >
+                Restore window
+              </button>
+              <div className="my-1 h-px bg-white/10" />
+              <button
+                className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-[#ff6b6b] hover:bg-white/5"
+                onClick={() => {
+                  setMenu(false)
+                  quit()
+                }}
+              >
+                Quit Still
+              </button>
             </div>
           </div>
+        ) : (
+          rows.length > 0 && (
+            <div className="flex h-full flex-col">
+              <div className="mb-1 flex items-baseline justify-between px-1">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-still-faint">
+                  live
+                </span>
+                <span className="font-mono text-[10px] text-still-faint">
+                  {rows.length}/{rows.length}
+                </span>
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-0.5">
+                {rows.map((r) => (
+                  <div
+                    key={r.sessionId}
+                    className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2 py-1.5"
+                  >
+                    <span
+                      className="h-1.5 w-1.5 shrink-0 rounded-full"
+                      style={{
+                        background:
+                          r.status === "needs-input"
+                            ? "#f5b942"
+                            : r.status === "working"
+                              ? "#ff6b6b"
+                              : r.status === "done"
+                                ? "#4ade80"
+                                : r.status === "error"
+                                  ? "#ff4a4a"
+                                  : "rgba(255,255,255,0.25)",
+                      }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="truncate text-[11px] font-medium text-still-fg">
+                          {r.name}
+                        </span>
+                        <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-still-faint">
+                          {STATUS_LABEL[r.status]}
+                        </span>
+                      </div>
+                      <div className="truncate text-[10px] text-still-dim">{r.snippet}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
         )}
       </div>
 
       {/* floating circle strip */}
-      <div className="flex h-[112px] w-full shrink-0 items-center justify-center">
+      <div className="flex h-[128px] w-full shrink-0 items-center justify-center">
         <button
           type="button"
           onPointerDown={(e) => onPointerDown(e)}
@@ -316,10 +368,13 @@ export default function OrbScreen() {
           onContextMenu={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            setMenu((m) => !m)
+            if (menu) void closeMenu()
+            else void openMenu()
           }}
           aria-label={`Still — ${rows.length} live session${rows.length === 1 ? "" : "s"}`}
-          className={`group relative grid select-none place-items-center rounded-full bg-[#050505]/85 p-0 shadow-[0_0_0_1px_rgba(255,255,255,0.06)] backdrop-blur-xl transition-transform duration-200 ${ringClassName} hover:scale-[1.06] active:scale-[0.96]`}
+          // Flat translucent fill, NO backdrop-blur: WebView2 renders blur
+          // over a transparent window as a black smear (the "black box").
+          className={`group relative grid select-none place-items-center rounded-full border bg-[rgba(5,5,5,0.88)] p-0 shadow-[0_0_0_1px_rgba(255,255,255,0.06)] transition-transform duration-200 ${ringClassName} hover:scale-[1.06] active:scale-[0.96]`}
           style={{ width: ORB, height: ORB }}
         >
           {/* inner "still" mark */}
@@ -353,34 +408,8 @@ export default function OrbScreen() {
         </button>
       </div>
 
-      {/* ----- context menu ----- */}
-      {menu && (
-        <div
-          className="absolute bottom-[106%] left-1/2 z-50 w-44 -translate-x-1/2 rounded-xl border border-white/10 bg-[#0b0b0e]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.6)] backdrop-blur-xl"
-          onPointerLeave={() => setMenu(false)}
-        >
-          <button
-            className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-still-fg hover:bg-white/5"
-            onClick={() => {
-              setMenu(false)
-              restore()
-            }}
-          >
-            Restore window
-          </button>
-          <div className="my-1 h-px bg-white/10" />
-          <button
-            className="block w-full rounded-lg px-3 py-2 text-left text-[13px] text-[#ff6b6b] hover:bg-white/5"
-            onClick={() => {
-              setMenu(false)
-              quit()
-            }}
-          >
-            Quit Still
-          </button>
-        </div>
-      )}
-
+      {/* menu now lives in the card area (window grows to fit it) — the old
+          absolute overlay clipped against the 128px OS window. */}
       <style>{`
         @keyframes orb-wash {
           0%, 100% { opacity: 0.5; transform: scale(1); }

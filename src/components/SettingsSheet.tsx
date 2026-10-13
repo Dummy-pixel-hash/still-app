@@ -165,7 +165,7 @@ function SmartOrbSection() {
           </li>
           <li className="break-all">
             <span className="font-mono">
-              llama-server -hf ggml-org/Julia-1-GGUF --port 8080
+              llama-server -hf ggml-org/Julia-1-GGUF --port 8080 -c 2048 -b 1024
             </span>
           </li>
           <li>Paste the address above, press Test, then flip the toggle on.</li>
