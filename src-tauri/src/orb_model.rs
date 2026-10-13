@@ -478,10 +478,11 @@ fn chat_body(cfg: &SmartConfig, pane_text: &str) -> serde_json::Value {
     );
     m.insert("temperature".to_string(), serde_json::json!(0));
     m.insert("max_tokens".to_string(), serde_json::json!(64));
-    m.insert(
-        "response_format".to_string(),
-        serde_json::json!({ "type": "json_object" }),
-    );
+    // NOTE: no `response_format: {type: json_object}` — llama.cpp builds a
+    // GBNF grammar for constrained decoding and fails sampler init on some
+    // templates ("Failed to initialize samplers"). We don't need it: the
+    // prompt already demands strict JSON and parse_chat_response extracts
+    // the first {...} even wrapped in fences/prose.
     serde_json::Value::Object(m)
 }
 
