@@ -341,7 +341,7 @@ function SmartOrbSection() {
               llama-server -hf ggml-org/Qwen3-0.6B-GGUF --port 8080 -c 2048 -b 1024
             </span>
           </li>
-          <li>Paste the address above, press Test, then flip the toggle on.</li>
+          <li>Paste the address above, pick the matching Dialect (Julia-1 decision models speak SystemOne, chat models speak OpenAI), press Test, then flip the toggle on.</li>
           <li>Remote OpenAI-style servers need https, a model name, and the ack box ticked.</li>
         </ol>
       </details>

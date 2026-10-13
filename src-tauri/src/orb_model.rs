@@ -486,6 +486,30 @@ fn chat_body(cfg: &SmartConfig, pane_text: &str) -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
+/// Dialect affinity: remembers which dialect last succeeded per base URL so
+/// `auto` stops hammering the wrong endpoint every tick (e.g. Julia-1 only
+/// speaks systemone — retrying chat first each time just spams server logs).
+fn dialect_affinity_get(base: &str) -> Option<String> {
+    static AFFINITY: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    AFFINITY
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(base)
+        .cloned()
+}
+
+fn dialect_affinity_set(base: &str, kind: &str) {
+    static AFFINITY: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    AFFINITY
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(base.to_string(), kind.to_string());
+}
+
 fn reqwest_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(timeout)
@@ -558,11 +582,32 @@ pub async fn classify_cfg(
         "systemone" => post_systemone(&base, api_key.as_deref(), timeout, pane_text, budget).await,
         "openai" => post_openai(&base, api_key.as_deref(), timeout, cfg, pane_text).await,
         _ => {
-            // auto: OpenAI first (universal), systemone on miss.
-            match post_openai(&base, api_key.as_deref(), timeout, cfg, pane_text).await {
-                Some(v) => Some(v),
-                None => post_systemone(&base, api_key.as_deref(), timeout, pane_text, budget).await,
+            // auto: try the last-working dialect first (affinity), fall back
+            // to the other within the same budget. Julia-1 decision models
+            // only speak systemone — after one tick auto stops knocking on
+            // chat and the server-log spam ends.
+            let first = dialect_affinity_get(&base);
+            let (v, used) = if first.as_deref() == Some("systemone") {
+                match post_systemone(&base, api_key.as_deref(), timeout, pane_text, budget).await {
+                    Some(v) => (Some(v), "systemone"),
+                    None => (
+                        post_openai(&base, api_key.as_deref(), timeout, cfg, pane_text).await,
+                        "openai",
+                    ),
+                }
+            } else {
+                match post_openai(&base, api_key.as_deref(), timeout, cfg, pane_text).await {
+                    Some(v) => (Some(v), "openai"),
+                    None => (
+                        post_systemone(&base, api_key.as_deref(), timeout, pane_text, budget).await,
+                        "systemone",
+                    ),
+                }
+            };
+            if v.is_some() {
+                dialect_affinity_set(&base, used);
             }
+            v
         }
     };
     let (state, confidence) = verdict?;
