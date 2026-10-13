@@ -51,19 +51,38 @@ body,
   display: none;
 }
 
+/* Exactly one scrollbar: the custom thumb in CustomScrollbar.tsx.
+   xterm 6 draws TWO bars — the legacy `.xterm-viewport` native track
+   (overflow-y: scroll) and the VS Code-style slider inside
+   .xterm-scrollable-element. `scrollbar-width: none` alone misses the
+   slider (not a native scrollbar), and WebKitGTK ignores some
+   ::-webkit-scrollbar styling, so every layer is killed explicitly. */
 .xterm-viewport {
   scrollbar-width: none;
 }
 .xterm-viewport::-webkit-scrollbar {
-  display: none;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+.xterm .xterm-scrollable-element > .scrollbar,
+.xterm .xterm-scrollable-element > .scrollbar > .slider,
+.xterm .xterm-scrollable-element > .scrollbar > .scra {
+  display: none !important;
+  width: 0 !important;
+}
+/* No decorations are registered in this app; the ruler canvas would only
+   sit invisibly under the custom thumb lane. */
+.xterm-decoration-overview-ruler {
+  display: none !important;
 }
 
-/* FitAddon floors to whole columns and reserves 14px for the overview
-   ruler, so the fitted grid is always a bit narrower than its container.
-   Auto margins split that leftover evenly instead of pooling it on the
-   right (which made the left gap look bigger). Safe for input: xterm
-   maps mouse coords from .xterm-screen's own rect, so a shifted screen
-   stays accurate. */
+/* FitAddon floors to whole columns and reserves overviewRuler.width (6px,
+   the custom thumb lane) so the fitted grid is always a bit narrower than
+   its container. Auto margins split that leftover evenly instead of
+   pooling it on the right (which made the left gap look bigger). Safe for
+   input: xterm maps mouse coords from .xterm-screen's own rect, so a
+   shifted screen stays accurate. */
 .xterm .xterm-screen {
   margin-left: auto;
   margin-right: auto;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
-import { nativeBridge } from "../bridge/nativeBridge"
+import { nativeBridge, type SmartConfig } from "../bridge/nativeBridge"
+import { connectionState, nativeSessionId } from "../session/connections"
 import {
   addKey,
   removeKey,
@@ -12,6 +13,167 @@ import {
 
 const inputClass =
   "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+
+/**
+ * Smart orb (experimental): BYO local decision-model endpoint. The toggle is
+ * OFF unless the user opts in; the endpoint must be loopback (enforced in
+ * Rust, refused otherwise). Copy-paste setup + a Test button so users can
+ * verify their server before relying on it.
+ */
+function SmartOrbSection() {
+  const [cfg, setCfg] = useState<SmartConfig | null>(null)
+  const [endpointDraft, setEndpointDraft] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [probeOut, setProbeOut] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    void nativeBridge
+      .smartStatus()
+      .then((s) => {
+        if (!live) return
+        setCfg(s)
+        setEndpointDraft(s.endpoint)
+      })
+      .catch(() => {
+        if (live) setCfg({ enabled: false, endpoint: "http://127.0.0.1:8080", cutoff: 0.55 })
+      })
+    return () => {
+      live = false
+    }
+  }, [])
+
+  const save = async (patch: Partial<SmartConfig>) => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const next = await nativeBridge.smartSet(patch)
+      setCfg(next)
+      setEndpointDraft(next.endpoint)
+    } catch (e) {
+      setMsg({
+        ok: false,
+        text: e instanceof Error ? e.message.slice(0, 220) : "Could not save smart-orb settings.",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const test = async () => {
+    setBusy(true)
+    setProbeOut(null)
+    try {
+      // Representative ambiguous pane: spinner-ish but no agent chrome.
+      const sample = "⠋ thinking…\nreading files…\n(esc to interrupt)"
+      const res = await nativeBridge.smartProbe(
+        sample,
+        endpointDraft.trim() || undefined,
+        cfg?.cutoff,
+      )
+      setProbeOut(
+        res.accepted
+          ? `Server answered: ${res.verdict} (${Math.round(res.confidence * 100)}% confident) — verdict would be used.`
+          : "Server answered but below your cutoff (or unreachable) — the keyword scrape stays in charge.",
+      )
+    } catch (e) {
+      setProbeOut(e instanceof Error ? e.message.slice(0, 220) : "Probe failed.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/30 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[13px] font-medium text-fg">Smart orb</span>
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+          experimental · opt-in
+        </span>
+      </div>
+      <p className="mt-1 text-[12px] leading-relaxed text-dim">
+        A tiny local decision model (e.g. Julia-1) classifies panes when the
+        keyword scrape is unsure. Runs on <span className="font-mono">your</span> machine
+        only — pane text goes to localhost, never the cloud. Still ships no
+        model; point it at a server you already run.
+      </p>
+      <label className="mt-2 flex items-center gap-2 text-[13px] text-dim">
+        <input
+          type="checkbox"
+          checked={cfg?.enabled ?? false}
+          disabled={!cfg || busy}
+          onChange={(e) => void save({ enabled: e.target.checked })}
+          className="accent-[#ff4a4a]"
+        />
+        Use my local model when unsure
+      </label>
+      <label className="mt-2 block">
+        <span className="mb-1 block text-[12px] text-dim">Model endpoint (localhost only)</span>
+        <input
+          value={endpointDraft}
+          onChange={(e) => setEndpointDraft(e.target.value)}
+          onBlur={() => {
+            if (cfg && endpointDraft.trim() && endpointDraft.trim() !== cfg.endpoint) {
+              void save({ endpoint: endpointDraft.trim() })
+            }
+          }}
+          placeholder="http://127.0.0.1:8080"
+          spellCheck={false}
+          className={`${inputClass} font-mono`}
+          aria-label="Smart orb endpoint"
+        />
+      </label>
+      <label className="mt-2 block">
+        <span className="mb-1 block text-[12px] text-dim">
+          Confidence cutoff — use the model at or above {Math.round((cfg?.cutoff ?? 0.55) * 100)}%
+        </span>
+        <input
+          type="range"
+          min={0.3}
+          max={0.95}
+          step={0.05}
+          value={cfg?.cutoff ?? 0.55}
+          disabled={!cfg || busy}
+          onChange={(e) => void save({ cutoff: Number(e.target.value) })}
+          className="w-full accent-[#ff4a4a]"
+          aria-label="Smart orb confidence cutoff"
+        />
+      </label>
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void test()}
+          className="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[13px] text-fg transition hover:bg-white/10 disabled:opacity-40"
+        >
+          {busy ? "Testing…" : "Test my server"}
+        </button>
+        {probeOut && <p className="text-[12px] text-dim">{probeOut}</p>}
+      </div>
+      {msg && (
+        <p className={`mt-2 text-[12px] ${msg.ok ? "text-[#91b587]" : "text-[#ff6b6b]"}`}>
+          {msg.text}
+        </p>
+      )}
+      <details className="mt-2 text-[12px] text-dim">
+        <summary className="cursor-pointer text-fg">Setup: run Julia-1 locally</summary>
+        <ol className="mt-1 list-decimal space-y-1 pl-5">
+          <li>
+            Install <span className="font-mono">llama-server</span> (any recent
+            build with <span className="font-mono">/v1/systemone</span> support).
+          </li>
+          <li className="break-all">
+            <span className="font-mono">
+              llama-server -hf ggml-org/Julia-1-GGUF --port 8080
+            </span>
+          </li>
+          <li>Paste the address above, press Test, then flip the toggle on.</li>
+        </ol>
+      </details>
+    </div>
+  )
+}
 
 /**
  * Live miniature-terminal preview. Reads the same prefs the real xterm
@@ -76,6 +238,10 @@ export default function SettingsSheet({
   const [rename, setRename] = useState("")
   const [hasSecret, setHasSecret] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
+  // Orb hook installer state (session picker + one-shot result message).
+  const [hookSession, setHookSession] = useState("")
+  const [hookBusy, setHookBusy] = useState(false)
+  const [hookMsg, setHookMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     let live = true
@@ -107,6 +273,38 @@ export default function SettingsSheet({
     } finally {
       setBusy(null)
       setKeyText("")
+    }
+  }
+
+  // Live sessions = install targets (a hook install needs a live worker).
+  const liveSessions = store.sessions.filter(
+    (s) => connectionState(s.id) === "connected",
+  )
+
+  const installHooks = async () => {
+    const localId = hookSession
+    if (!localId) return
+    const nativeId = nativeSessionId(localId)
+    if (!nativeId) {
+      setHookMsg({ ok: false, text: "That session isn't connected right now — connect first, then install." })
+      return
+    }
+    setHookBusy(true)
+    setHookMsg(null)
+    try {
+      const res = await nativeBridge.hooksInstall(nativeId, "claude")
+      setHookMsg(
+        res.status === "installed"
+          ? { ok: true, text: "Hooks installed on the remote host — the orb will now show this agent's own status." }
+          : { ok: true, text: "Stamp script installed. No python3 on that host, so merge ~/.still/hooks/claude-hooks.json into ~/.claude/settings.json by hand." },
+      )
+    } catch (e) {
+      setHookMsg({
+        ok: false,
+        text: e instanceof Error ? e.message.slice(0, 220) : "Install failed — is the session still connected?",
+      })
+    } finally {
+      setHookBusy(false)
     }
   }
 
@@ -216,6 +414,97 @@ export default function SettingsSheet({
             into the agent’s input. Claude Code, Codex and Pi attach plain
             paths; OpenCode prefers @path.
           </p>
+        </section>
+
+        <section className="mt-6">
+          <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-faint">
+            Orb companion
+          </h3>
+          <label className="mt-2 flex items-center gap-2 text-[13px] text-dim">
+            <input
+              type="checkbox"
+              checked={store.settings.orb?.enabled ?? true}
+              onChange={(e) =>
+                updateSettings({ orb: { ...(store.settings.orb ?? { minimizeBehavior: "orb" as const }), enabled: e.target.checked } })
+              }
+              className="accent-[#ff4a4a]"
+            />
+            Minimize to the floating orb
+          </label>
+          <label className="mt-2 block">
+            <span className="mb-1 block text-[12px] text-dim">Minimize button does</span>
+            <select
+              value={store.settings.orb?.minimizeBehavior ?? "orb"}
+              onChange={(e) =>
+                updateSettings({ orb: { ...(store.settings.orb ?? { enabled: true }), minimizeBehavior: e.target.value as "orb" | "taskbar" } })
+              }
+              className={inputClass}
+              aria-label="Minimize button behavior"
+            >
+              <option value="orb" className="bg-[#121214]">Float the orb (Ctrl+Shift+M)</option>
+              <option value="taskbar" className="bg-[#121214]">Plain taskbar minimize</option>
+            </select>
+          </label>
+          <p className="mt-1 text-[12px] text-dim">
+            The orb stays on top while the window is tucked away, shows live
+            agent statuses on hover, and restores with one click.
+          </p>
+
+          {/* Smart orb (experimental, opt-in): a local decision model on YOUR
+              machine classifies panes when the keyword scrape is unsure. BYO
+              endpoint only in v1 — Still never downloads or ships a model. */}
+          <SmartOrbSection />
+
+          {/* Precise agent state (opt-in): installs Still's stamp script on
+              the selected session's remote host so Claude Code announces its
+              own transitions. Everything else keeps the zero-config scrape. */}
+          <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/30 p-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[13px] font-medium text-fg">
+                Precise agent state
+              </span>
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                claude · opt-in
+              </span>
+            </div>
+            <p className="mt-1 text-[12px] leading-relaxed text-dim">
+              Installs a tiny stamp script + hook entries in the remote
+              <span className="font-mono"> ~/.claude/settings.json</span> (backed
+              up once). The agent then reports working → done → needs-input
+              itself instead of being guessed from the screen.
+            </p>
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                value={hookSession}
+                onChange={(e) => {
+                  setHookSession(e.target.value)
+                  setHookMsg(null)
+                }}
+                className={`${inputClass} flex-1`}
+                aria-label="Session whose remote host gets the hooks"
+              >
+                <option value="" className="bg-[#121214]">Pick a live session…</option>
+                {liveSessions.map((s) => (
+                  <option key={s.id} value={s.id} className="bg-[#121214]">
+                    {s.name} — {s.host}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={!hookSession || hookBusy}
+                onClick={() => void installHooks()}
+                className="shrink-0 rounded-lg border border-[#ff4a4a]/40 bg-[#ff4a4a]/10 px-3 py-2 text-[13px] text-fg transition hover:bg-[#ff4a4a]/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {hookBusy ? "Installing…" : "Install hooks"}
+              </button>
+            </div>
+            {hookMsg && (
+              <p className={`mt-2 text-[12px] ${hookMsg.ok ? "text-[#91b587]" : "text-[#ff6b6b]"}`}>
+                {hookMsg.text}
+              </p>
+            )}
+          </div>
         </section>
 
         <section className="mt-6">

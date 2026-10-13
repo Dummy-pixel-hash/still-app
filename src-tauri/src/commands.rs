@@ -21,9 +21,12 @@ use crate::core::{
 };
 use crate::diag;
 use crate::hostkeys;
+use crate::orb;
+use crate::orb::OrbSnapshot;
 use crate::ssh_worker;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
@@ -273,10 +276,69 @@ async fn still_connect_inner(
         let handle = tauri::async_runtime::spawn(async move {
             // Forward worker events -> window events + mirror status.
             let forward = async move {
-                while let Some(event) = event_rx.recv().await {
-                    match &event {
+                // Output coalescing: russh delivers TCP-sized Data chunks,
+            // often hundreds of tiny events per second during a
+            // fullscreen TUI redraw. Emitting one Tauri event per chunk
+            // serializes each into JSON (a per-byte number array) and
+            // starves the WebView, which then repaints in bursts — the
+            // "breaks into lines" tearing. Batch Data events: flush on
+            // >=64KB, after 8ms of no more output, or immediately before
+            // any non-data event so ordering (final bytes -> Closed or
+            // Error status) is preserved. Byte-stream semantics are
+            // unchanged: xterm parses arbitrary chunk boundaries.
+            //
+            // Non-data events (Status/Error/HostKeyPrompt) are ALWAYS
+            // forwarded to the renderer after flushing: the registry
+            // (connection state), the error panel, and the Trust/Reject
+            // dialog all consume the event stream, not Rust-side state.
+            const BATCH_WINDOW: std::time::Duration =
+                std::time::Duration::from_millis(8);
+            const BATCH_MAX: usize = 64 * 1024;
+            const BATCH_CAP: usize = 16 * 1024;
+            let topic = format!("still://session-event/{sid_e}");
+            let mut batch: Vec<u8> = Vec::with_capacity(BATCH_CAP);
+            let flush = |batch: &mut Vec<u8>| {
+                if !batch.is_empty() {
+                    let data = std::mem::replace(batch, Vec::with_capacity(BATCH_CAP));
+                    let _ = app_e.emit(&topic, &SessionEvent::Data { data });
+                }
+            };
+                loop {
+                    let event = if batch.is_empty() {
+                        match event_rx.recv().await {
+                            Some(e) => e,
+                            None => break,
+                        }
+                    } else {
+                        match tokio::time::timeout(
+                            BATCH_WINDOW,
+                            event_rx.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some(e)) => e,
+                            // Worker gone: flush the tail, then stop.
+                            Ok(None) => {
+                                flush(&mut batch);
+                                break;
+                            }
+                            // Quiet window elapsed: emit the frame we have.
+                            Err(_) => {
+                                flush(&mut batch);
+                                continue;
+                            }
+                        }
+                    };
+                    match event {
+                        SessionEvent::Data { data } => {
+                            batch.extend_from_slice(&data);
+                            if batch.len() >= BATCH_MAX {
+                                flush(&mut batch);
+                            }
+                        }
                         SessionEvent::Status { status } => {
-                            live_clone.lock().await.status = *status;
+                            flush(&mut batch);
+                            live_clone.lock().await.status = status;
                             diag::record(
                                 "rust",
                                 "EVENT_EMITTED_STATUS",
@@ -287,10 +349,14 @@ async fn still_connect_inner(
                                 &format!("{status:?}"),
                                 None,
                             );
+                            let _ = app_e.emit(
+                                &topic,
+                                &SessionEvent::Status { status },
+                            );
                         }
                         SessionEvent::Error { error } => {
-                            live_clone.lock().await.last_error =
-                                Some(error.clone());
+                            flush(&mut batch);
+                            live_clone.lock().await.last_error = Some(error.clone());
                             diag::record(
                                 "rust",
                                 "EVENT_EMITTED_ERROR",
@@ -301,22 +367,27 @@ async fn still_connect_inner(
                                 &error.message,
                                 None,
                             );
+                            let _ = app_e.emit(
+                                &topic,
+                                &SessionEvent::Error { error },
+                            );
                         }
-                        SessionEvent::Data { .. } => {
-                            // Terminal output must not wait for synchronous disk logging.
-                        }
-                        SessionEvent::HostKeyPrompt { .. } => {
+                        SessionEvent::HostKeyPrompt { prompt } => {
+                            flush(&mut batch);
                             diag::ok(
                                 "rust",
                                 "EVENT_EMITTED_HOSTKEY_PROMPT",
                                 &diag_local_e,
                                 &sid_e,
                             );
+                            let _ = app_e.emit(
+                                &topic,
+                                &SessionEvent::HostKeyPrompt { prompt },
+                            );
                         }
                     }
-                    let topic = format!("still://session-event/{sid_e}");
-                    let _ = app_e.emit(&topic, &event);
                 }
+                flush(&mut batch);
                 diag::ok("rust", "FORWARD_LOOP_ENDED", &diag_local_e, &sid_e);
             };
             let run = ssh_worker::run_session(
@@ -727,4 +798,242 @@ pub async fn still_forget_host(args: HostArgs) -> Result<(), StillError> {
     let (host, port) = host_args_valid(&args)?;
     let _ = hostkeys::forget_trusted(&host, port);
     Ok(())
+}
+
+/// [ORB] Hide main + float the orb circle (button AND shortcut path).
+#[tauri::command]
+pub fn still_minimize_to_orb(app: AppHandle) -> Result<(), StillError> {
+    orb::minimize_to_orb(&app).map_err(|m| StillError::friendly("orb", m))
+}
+
+/// [ORB] Hide orb + show & focus main.
+#[tauri::command]
+pub fn still_restore_from_orb(app: AppHandle) -> Result<(), StillError> {
+    orb::restore_from_orb(&app).map_err(|m| StillError::friendly("orb", m))
+}
+
+/// [ORB] Hide only the orb (no restore).
+#[tauri::command]
+pub fn still_orb_hide(app: AppHandle) -> Result<(), StillError> {
+    orb::orb_hide(&app).map_err(|m| StillError::friendly("orb", m))
+}
+
+/// [ORB] Current orb stack snapshot (renderer-pushed, served by Rust).
+#[tauri::command]
+pub fn still_orb_snapshot(app: AppHandle) -> OrbSnapshot {
+    orb::get_snapshot(&app)
+}
+
+/// [ORB] Main renderer pushes a fresh snapshot before hiding so the orb has
+/// live data on show without the orb touching SSH.
+#[tauri::command]
+pub fn still_orb_push(app: AppHandle, args: OrbPushArgs) -> Result<(), StillError> {
+    orb::set_snapshot(&app, args.snapshot);
+    Ok(())
+}
+
+/// [ORB] Current orb window position (px on the monitor). Used after a drag
+/// to persist the placement across launches.
+#[tauri::command]
+pub fn still_orb_get_position(app: AppHandle) -> Result<OrbPos, StillError> {
+    let Some(orb) = app.get_webview_window(crate::orb::ORB_LABEL) else {
+        return Err(StillError::friendly("orb", "orb window unavailable"));
+    };
+    let pos = orb.outer_position().map_err(|e| StillError::friendly("orb", e.to_string()))?;
+    Ok(OrbPos { x: pos.x, y: pos.y })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrbPos {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Exit Still entirely (remote tmux keeps running). Used by the orb's quit
+/// menu so closing the floating companion can't strand an invisible app.
+#[tauri::command]
+pub fn still_app_exit(app: AppHandle) -> Result<(), StillError> {
+    app.exit(0);
+    Ok(())
+}
+
+/// [ORB smart] Current Smart-orb config (default: disabled).
+#[tauri::command]
+pub fn still_orb_smart_status(
+    app: AppHandle,
+) -> Result<crate::orb_model::SmartConfig, StillError> {
+    Ok(app
+        .try_state::<crate::orb_model::SmartState>()
+        .map(|s| s.get())
+        .unwrap_or_default())
+}
+
+/// [ORB smart] Update Smart-orb config. `endpoint` must be loopback —
+/// anything else is refused BEFORE it is stored, so a bad value can never
+/// become the dial target.
+#[tauri::command]
+pub fn still_orb_smart_set(
+    app: AppHandle,
+    args: SmartSetArgs,
+) -> Result<crate::orb_model::SmartConfig, StillError> {
+    let mut cfg = app
+        .try_state::<crate::orb_model::SmartState>()
+        .map(|s| s.get())
+        .unwrap_or_default();
+    if let Some(enabled) = args.enabled {
+        cfg.enabled = enabled;
+    }
+    if let Some(endpoint) = args.endpoint {
+        let endpoint = endpoint.trim().to_string();
+        if !endpoint.is_empty() {
+            crate::orb_model::loopback_addr(&endpoint)
+                .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
+            cfg.endpoint = endpoint;
+        }
+    }
+    if let Some(cutoff) = args.cutoff {
+        if !(0.0..=1.0).contains(&cutoff) {
+            return Err(StillError::friendly(
+                "smart_cutoff_range",
+                "Cutoff must be between 0 and 1.",
+            ));
+        }
+        cfg.cutoff = cutoff;
+    }
+    if let Some(state) = app.try_state::<crate::orb_model::SmartState>() {
+        state.set(cfg.clone());
+    }
+    Ok(cfg)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartSetArgs {
+    pub enabled: Option<bool>,
+    pub endpoint: Option<String>,
+    pub cutoff: Option<f64>,
+}
+
+/// [ORB smart] Manual probe: classify one pane text through the configured
+/// endpoint RIGHT NOW (Settings "Test" button). Never touches sessions —
+/// the renderer passes already-stripped text. Times out in 3s, fail-open.
+#[tauri::command]
+pub async fn still_orb_smart_probe(
+    app: AppHandle,
+    args: SmartProbeArgs,
+) -> Result<SmartProbeResult, StillError> {
+    let cfg = app
+        .try_state::<crate::orb_model::SmartState>()
+        .map(|s| s.get())
+        .unwrap_or_default();
+    let endpoint = args.endpoint.unwrap_or(cfg.endpoint);
+    let cutoff = args.cutoff.unwrap_or(cfg.cutoff);
+    crate::orb_model::loopback_addr(&endpoint)
+        .map_err(|m| StillError::friendly("smart_endpoint_refused", m))?;
+    match crate::orb_model::classify(&endpoint, cutoff, &args.text).await {
+        Some((state, confidence)) => Ok(SmartProbeResult {
+            verdict: state.as_str().to_string(),
+            confidence,
+            accepted: true,
+        }),
+        None => Ok(SmartProbeResult {
+            verdict: "fallback".to_string(),
+            confidence: 0.0,
+            accepted: false,
+        }),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartProbeArgs {
+    pub text: String,
+    pub endpoint: Option<String>,
+    pub cutoff: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartProbeResult {
+    pub verdict: String,
+    pub confidence: f64,
+    pub accepted: bool,
+}
+
+/// Renderer-side payload for `still_orb_push` (camelCase keys).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrbPushArgs {
+    pub snapshot: OrbSnapshot,
+}
+
+/// [ORB hooks] Install Still's stamp script + merge hook entries on the
+/// REMOTE host of one live session, so that agent announces its own
+/// transitions (Layer 1, authoritative while fresh).
+///
+/// - `agent` is `"claude"` in v1 (formats for the other agents are pinned
+///   per-agent as fixtures land; the stamp script itself is agent-agnostic).
+/// - `session_id` is the NATIVE session id (transient per connection).
+/// - The installer backs the remote settings file up once (`.bak-still`),
+///   never overwrites the backup, and prints `STILL_HOOKS_OK` (or
+///   `STILL_HOOKS_NOPYTHON` when python3 is missing — script installed,
+///   hook JSON left at `~/.still/hooks/claude-hooks.json` to merge by hand).
+#[tauri::command]
+pub async fn still_hooks_install(
+    state: State<'_, AppState>,
+    args: HooksInstallArgs,
+) -> Result<HooksInstallResult, StillError> {
+    let agent = args.agent.trim().to_lowercase();
+    if agent != "claude" {
+        return Err(StillError::friendly(
+            "unsupported_agent",
+            "Hook install supports \"claude\" in this build; the zero-config scrape already covers other agents.",
+        ));
+    }
+    let script = crate::agent_state::installer_script(&agent).ok_or_else(|| {
+        StillError::friendly("unsupported_agent", "No installer for that agent yet.")
+    })?;
+    let tmux_name = {
+        let map = state.sessions.lock().await;
+        let live = map.get(&args.session_id).ok_or_else(|| {
+            StillError::friendly("no_session", "Unknown session. Connect first.")
+        })?;
+        live.lock().await.config.tmux_session.clone()
+    };
+    // Export the tmux name so stamps land under the right file even when the
+    // agent's hooks run outside a tmux-attached shell.
+    let script =
+        format!("STILL_TMUX_SESSION={tmux_name:?}\nexport STILL_TMUX_SESSION\n{script}");
+    let out = crate::ssh_worker::run_exec_capture(&args.session_id, &format!("sh -s <<'STILL_INSTALL_EOF'\n{script}\nSTILL_INSTALL_EOF"))
+        .await
+        .map_err(|e| StillError::friendly("hooks_install_failed", format!("{e:#}")))?;
+    let text = String::from_utf8_lossy(&out);
+    if text.contains("STILL_HOOKS_OK") {
+        Ok(HooksInstallResult { status: "installed".to_string(), detail: String::new() })
+    } else if text.contains("STILL_HOOKS_NOPYTHON") {
+        Ok(HooksInstallResult {
+            status: "script-only".to_string(),
+            detail: "Stamp script installed, but the host has no python3: merge ~/.still/hooks/claude-hooks.json into ~/.claude/settings.json by hand.".to_string(),
+        })
+    } else {
+        Err(StillError::friendly(
+            "hooks_install_failed",
+            text.lines().next().unwrap_or("installer produced no confirmation").chars().take(200).collect::<String>(),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksInstallArgs {
+    pub session_id: String,
+    pub agent: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HooksInstallResult {
+    pub status: String,
+    pub detail: String,
 }

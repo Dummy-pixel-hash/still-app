@@ -90,9 +90,8 @@ export default function NewSessionWizard({
   const [dir, setDir] = useState<1 | -1>(1)
   const [query, setQuery] = useState("")
   const [presets, setPresets] = useState<SessionPreset[]>(() => loadPresets())
-  // Preset fast-path: a chosen preset fills everything, so the flow skips
-  // server/login/project and asks only for a name.
-  const [fromPreset, setFromPreset] = useState(false)
+  // Preset pre-fill: a chosen preset fills name/server/login, then the flow
+  // still walks through every step so location and project are always asked.
   const [appliedName, setAppliedName] = useState("")
   const [name, setName] = useState("")
   const [host, setHost] = useState("")
@@ -124,7 +123,6 @@ export default function NewSessionWizard({
     setPort(preset.port)
     setUsername(preset.username)
     setWorkingDirectory(preset.workingDirectory)
-    setFromPreset(true)
     setAppliedName(preset.name)
     if (advance) go(1, 1)
   }
@@ -167,7 +165,7 @@ export default function NewSessionWizard({
     else if (query.trim()) {
       setName(query.trim())
       setQuery("")
-      setFromPreset(false)
+      setAppliedName("")
       go(2, 1)
     }
   }
@@ -177,35 +175,6 @@ export default function NewSessionWizard({
     if (projects.some((p) => p.id === projectId)) return projectId
     if (projects.some((p) => p.id === initialProjectId)) return initialProjectId
     return projects[0]?.id ?? ""
-  }
-
-  /** Preset fast-path submit: name only, project stays where we started. */
-  const finishFromPreset = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!name.trim()) {
-      setTried(true)
-      return
-    }
-    // A blank preset (e.g. "Custom") has nothing filled — fall through to
-    // the full flow instead of creating a hostless session.
-    if (!host.trim() || portError(port)) {
-      setFromPreset(false)
-      go(2, 1)
-      return
-    }
-    const pid = resolveProjectId() || onCreateProject("Default").id
-    autoSavePreset()
-    onSubmit({
-      name: name.trim(),
-      host: host.trim(),
-      port,
-      username: username.trim(),
-      projectId: pid,
-      workingDirectory: workingDirectory.trim() || "~",
-      authMethod: "ask",
-      keyId: "",
-      remember: false,
-    })
   }
 
   const nextFrom = (from: number) => {
@@ -339,7 +308,7 @@ export default function NewSessionWizard({
                 type="button"
                 onClick={() => {
                   setQuery("")
-                  setFromPreset(false)
+                  setAppliedName("")
                   go(1, 1)
                 }}
                 className="rounded-full px-4 py-2 text-[13px] text-dim transition hover:bg-white/[0.06] hover:text-fg"
@@ -355,8 +324,7 @@ export default function NewSessionWizard({
             className="mt-5 flex flex-col gap-3"
             onSubmit={(e) => {
               e.preventDefault()
-              if (fromPreset) finishFromPreset(e)
-              else nextFrom(1)
+              nextFrom(1)
             }}
           >
             <Field label="Name" error={tried && !name.trim() ? "Name is required" : undefined}>
@@ -370,29 +338,11 @@ export default function NewSessionWizard({
               />
             </Field>
             <p className="font-mono text-[11px] leading-relaxed text-faint">
-              {fromPreset && appliedName
-                ? `Preset “${appliedName}” applied — just name it and you’re in.`
+              {appliedName
+                ? `Preset “${appliedName}” applied — review each step and continue.`
                 : "What you’ll call this card on the workspace."}
             </p>
-            {fromPreset ? (
-              <div className="mt-1 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => go(0, -1)}
-                  className="rounded-full px-4 py-2 text-[13px] text-dim transition hover:bg-white/[0.06] hover:text-fg"
-                >
-                  ← Back
-                </button>
-                <button
-                  type="submit"
-                  className="rounded-full bg-[#e8e2e6] px-5 py-2 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
-                >
-                  Create & connect
-                </button>
-              </div>
-            ) : (
-              <WizardFooter onBack={() => go(0, -1)} nextLabel="Continue →" />
-            )}
+            <WizardFooter onBack={() => go(0, -1)} nextLabel="Continue →" />
           </form>
         ) : null}
 

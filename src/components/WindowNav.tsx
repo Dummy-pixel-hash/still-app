@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { nativeBridge } from "../bridge/nativeBridge"
+import { useStore } from "../session/store"
 
 const MIN_PATH = "M6 15h12"
 const MAX_PATH = "M6 6h12v12H6z"
@@ -12,6 +13,34 @@ const CLOSE_PATH = "M7 7l10 10M17 7L7 17"
  */
 export default function WindowNav() {
   const [action, setAction] = useState<string | null>(null)
+  // Settings is store-driven; default to the orb path so the minimize button
+  // works even before the workspace hydrates.
+  let orbEnabled = true
+  let minimizeBehavior: "orb" | "taskbar" = "orb"
+  try {
+    const s = useStore()
+    orbEnabled = s.settings.orb?.enabled ?? true
+    minimizeBehavior = s.settings.orb?.minimizeBehavior ?? "orb"
+  } catch {
+    // Rendering outside a store context (e.g. the orb window itself).
+  }
+
+  // Push a fresh snapshot first so the orb has live rows on show, then swap.
+  const minimize = async () => {
+    if (!orbEnabled || minimizeBehavior === "taskbar") {
+      await nativeBridge.windowMinimize()
+      return
+    }
+    const { buildOrbSnapshot } = await import("../session/orbState")
+    const { getSessionsSnapshot } = await import("../session/store")
+    try {
+      const snap = buildOrbSnapshot(getSessionsSnapshot())
+      await nativeBridge.orbPush(snap)
+    } catch {
+      // Never block minimizing on a stale snapshot push.
+    }
+    await nativeBridge.minimizeToOrb()
+  }
 
   const run = async (label: string, fn: () => Promise<void>) => {
     setAction(label)
@@ -49,7 +78,7 @@ export default function WindowNav() {
         aria-label="Minimize"
         title="Minimize"
         className={`${btn} pointer-events-auto`}
-        onClick={() => void run("minimize", () => nativeBridge.windowMinimize())}
+        onClick={() => void run("minimize", minimize)}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" className={icon} aria-hidden>
           <path d={MIN_PATH} />

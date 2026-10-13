@@ -66,10 +66,17 @@ export interface TerminalPrefs {
  */
 export type ImageInsertStyle = "path" | "at"
 
+export interface OrbSettings {
+  enabled: boolean
+  /** 'orb' = minimize button swaps to orb (default); 'taskbar' = raw OS minimize. */
+  minimizeBehavior: "orb" | "taskbar"
+}
+
 export interface AppSettings {
   confirmRemove: boolean
   terminal: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
+  orb: OrbSettings
 }
 
 /** Key-library entry: metadata only. Secret text lives in the OS keyring. */

@@ -346,6 +346,118 @@ pub async fn upload_via_sftp(
     Ok(format!("$HOME/{remote}"))
 }
 
+/// Run a one-shot READ-ONLY command on the existing authenticated connection
+/// of `session_id`, on a NEW channel (never the live PTY channel — typing
+/// into an agent's stdin would corrupt its TUI).
+///
+/// Used by the orb's agent-state fallback to run `tmux capture-pane` +
+/// `tmux list-panes` without disturbing the agent. Bounded (open 8s + drain
+/// 8s), output capped at 256 KiB. Returns raw stdout bytes (ANSI intact;
+/// the caller strips via `agent_state::strip_ansi`).
+pub async fn run_exec_capture(
+    session_id: &str,
+    command: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let handle_arc = {
+        let locked = session_handles().lock().await;
+        locked.get(session_id).cloned()
+    };
+    let handle_arc =
+        handle_arc.ok_or_else(|| anyhow::anyhow!("unknown session (reconnect first)"))?;
+
+    let mut channel = {
+        let h = handle_arc.lock().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            h.channel_open_session(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("exec channel open timed out"))?
+        .map_err(|e| anyhow::anyhow!("exec channel open failed: {e:#}"))?
+    };
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|e| anyhow::anyhow!("exec request failed: {e:#}"))?;
+
+    // Drain data until EOF/close/timeout. `wait()` yields ChannelMsg::Data,
+    // ExtendedData (stderr), ExitStatus, Eof, Close — we accumulate Data
+    // only and stop on Close/Eof/timeout.
+    let mut out: Vec<u8> = Vec::new();
+    const CAP: usize = 256 * 1024;
+    loop {
+        let msg = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            channel.wait(),
+        )
+        .await;
+        match msg {
+            Err(_) => break, // idle timeout: take what we have
+            Ok(None) => break, // channel closed
+            Ok(Some(russh::ChannelMsg::Data { data })) => {
+                out.extend_from_slice(&data);
+                if out.len() >= CAP {
+                    out.truncate(CAP);
+                    break;
+                }
+            }
+            Ok(Some(russh::ChannelMsg::Eof)) => {
+                // Drain any trailing Data after Eof, then stop on Close.
+                continue;
+            }
+            Ok(Some(russh::ChannelMsg::Close)) => break,
+            Ok(Some(_)) => continue,
+        }
+    }
+    Ok(out)
+}
+
+/// Probe one live session's tmux pane for the orb's zero-config fallback:
+/// `capture-pane -p -J -S -60` (last screenful, joined wrapped lines) plus
+/// `list-panes -F '#{pane_current_command}\t#{pane_title}'` for program id.
+/// Returns `None` when tmux/exec is unavailable (snapshot cache stays).
+pub async fn probe_agent_pane(
+    session_id: &str,
+    tmux_session: &str,
+) -> Option<crate::agent_state::PaneProbe> {
+    // tmux session name: allowlist to the same TmuxPlan charset so the
+    // embedded name can't inject shell metacharacters into the remote exec.
+    let safe: String = tmux_session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let pane = run_exec_capture(
+        session_id,
+        &format!("tmux capture-pane -p -J -S -60 -t {safe} 2>/dev/null; echo __STILL_SEP__; tmux list-panes -F '#{{pane_current_command}}\t#{{pane_title}}' -t {safe} 2>/dev/null | head -1"),
+    )
+    .await
+    .ok()?;
+    let raw = String::from_utf8_lossy(&pane);
+    let (capture, meta) = match raw.split_once("__STILL_SEP__") {
+        Some((c, m)) => (c, m.lines().next().unwrap_or("").trim().to_string()),
+        None => (raw.as_ref(), String::new()),
+    };
+    let (command, title) = match meta.split_once('\t') {
+        Some((c, t)) => (c.trim().to_string(), t.trim().to_string()),
+        None => (meta.clone(), String::new()),
+    };
+    let stripped = crate::agent_state::strip_ansi(capture);
+    Some(crate::agent_state::PaneProbe {
+        text: stripped.to_lowercase(),
+        command,
+        title,
+    })
+}
+
 /// Pace the START of SSH handshakes: the system sshd throttles rapid
 /// unauthenticated KEX, so beginnings stay serialized at least
 /// `HANDSHAKE_PACING` apart. The mutex is held ONLY for this short delay —

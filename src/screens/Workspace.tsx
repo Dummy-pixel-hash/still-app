@@ -222,7 +222,68 @@ export default function Workspace() {
     return () => window.removeEventListener("keydown", onKey, { capture: true })
   }, [])
 
-  // Global keys: Ctrl/Cmd+K focuses search (workspace only), Ctrl+. or
+  // Shift+Ctrl/Cmd+M swaps into the orb (same capture-before-xterm pattern as
+  // the temp toggle above): snapshot first, then hide the main window.
+  const minimizeToOrb = useCallback(async () => {
+    const orb = store.settings.orb
+    if (!(orb?.enabled ?? true) || orb?.minimizeBehavior === "taskbar") {
+      await nativeBridge.windowMinimize().catch(() => {})
+      return
+    }
+    const { buildOrbSnapshot } = await import("../session/orbState")
+    try {
+      await nativeBridge.orbPush(buildOrbSnapshot(store.sessions))
+    } catch {
+      // Never block minimizing on a stale snapshot push.
+    }
+    try {
+      await nativeBridge.minimizeToOrb()
+    } catch {
+      /* native backed out — stay where we are */
+    }
+  }, [store.settings.orb, store.sessions])
+
+  // Ctrl/Cmd+Shift+M → orb. Registered on capture so the combo never reaches
+  // xterm (same contract as Ctrl/Cmd+Shift+T above).
+  const orbRef = useRef(minimizeToOrb)
+  orbRef.current = minimizeToOrb
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return
+      if (e.key.toLowerCase() !== "m") return
+      e.preventDefault()
+      e.stopPropagation()
+      void orbRef.current()
+    }
+    window.addEventListener("keydown", onKey, { capture: true })
+    return () => window.removeEventListener("keydown", onKey, { capture: true })
+  }, [])
+
+  // While the main window is hidden the orb is live: keep pushing snapshots
+  // every 2.5s so its stack reflects working/needs-input flips.
+  // Pushing only fires when the fleet changed (fingerprint gate), so when the
+  // workspace is up and idle this loop stays nearly silent.
+  const orbFpRef = useRef<string | null>(null)
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      import("../session/orbState")
+        .then(({ buildOrbSnapshot, orbFingerprint }) => {
+          const snap = buildOrbSnapshot(store.sessions)
+          if (snap.rows.length === 0) {
+            orbFpRef.current = null
+            return
+          }
+          const fp = orbFingerprint(snap)
+          if (fp === orbFpRef.current) return
+          orbFpRef.current = fp
+          void nativeBridge.orbPush(snap).catch(() => {})
+        })
+        .catch(() => {})
+    }, 2500)
+    return () => window.clearInterval(t)
+  }, [store.sessions])
+
   // Ctrl+` leaves the terminal. Never intercept while the terminal or any
   // editable field (input/textarea/select) has focus.
   useEffect(() => {

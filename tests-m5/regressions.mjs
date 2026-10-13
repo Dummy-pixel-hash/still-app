@@ -26,8 +26,13 @@ ok("unknown-key path still refuses (returns false to russh)",
   /Ok\(false\)/.test(worker));
 
 // SECURITY 2: the renderer never persists or verifies host keys.
+// NOTE: connections.ts legitimately uses localStorage for the frozen card
+// PREVIEW text snapshot ("still.preview.*" — plain text, never raw escapes,
+// never host key material). The guard is therefore scoped to host-key /
+// trust material specifically, not to localStorage as a whole.
 ok("trust store is Rust-owned (no renderer localStorage for host keys)",
-  !conns.includes("localStorage") && !/localStorage[^\n]*known|known[^\n]*localStorage/.test(conns));
+  !/localStorage[^\n]*(known_hosts|host_key|hostKey|fingerprint|trust)/i.test(conns) &&
+  !/(?:known_hosts|host_key|hostKey|fingerprint|trust)[^\n]*localStorage/i.test(conns));
 ok("renderer never writes host-key trust",
   !/localStorage\.setItem\([^)]*(hostKey|known_hosts|fingerprint)/i.test(conns + overlay));
 ok("trust is granted through the typed bridge only",

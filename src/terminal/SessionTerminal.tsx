@@ -2,8 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { Unicode11Addon } from "@xterm/addon-unicode11"
+// GPU renderer: the DOM renderer (xterm's default without an addon) repaints
+// fullscreen TUIs line-by-line, which is exactly the tearing seen when a
+// coding agent redraws at speed. WebGL is dramatically faster; the DOM
+// renderer takes over automatically if WebGL is unavailable or lost.
+import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
 import {
+  isTuiActive,
   needsReattachMarker,
   nativeSessionId,
   noteTranscriptRendered,
@@ -16,10 +22,21 @@ import {
 import { nativeBridge } from "../bridge/nativeBridge"
 import { bindTerminalClipboard } from "./clipboard"
 import { bindApplicationWheel } from "./wheel"
+import CustomScrollbar from "./CustomScrollbar"
 import type { ImageInsertStyle, TerminalPrefs } from "../types"
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
+
+/**
+ * True when the byte window still contains a fullscreen enter sequence
+ * (`CSI ? 1049/1047/1048 h`). Used to decide whether a ring-truncated
+ * replay needs a synthetic alt-screen prefix.
+ */
+function snapshotHasAltEnter(bytes: Uint8Array): boolean {
+  const text = textDecoder.decode(bytes)
+  return /(?:\x1b\[\?1049h|\x1b\[\?1047h|\x1b\[\?1048h)/.test(text)
+}
 
 /**
  * Real session terminal surface, bound to a STABLE local session id.
@@ -39,12 +56,15 @@ export default function SessionTerminal({
   localId,
   prefs,
   imageInsertStyle,
+  paused = false,
   onClose,
   onZoom,
 }: {
   localId: string
   prefs: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
+  /** True while an auth dialog owns focus: input must not reach the PTY. */
+  paused?: boolean
   onClose?: () => void
   onZoom?: (delta: number | "reset") => void
 }) {
@@ -63,11 +83,12 @@ export default function SessionTerminal({
   // fit would see a wider box than the real content, overfit and overflow
   // right — i.e. a wider gap on the left than on the right. Side padding
   // is zero so the visible gap matches the 8px top: the centered screen
-  // always keeps >=7px from the edge (half of FitAddon's 14px reserve).
-  // it would see 900px instead of 876px, overfit (105 cols → 882px) and
-  // overflow right — i.e. a wider gap on the left than on the right.
+  // always keeps >=3px from the edge (half of FitAddon's 6px scrollbar
+  // lane reserve).
   const fitHostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
+  // Rendered into CustomScrollbar once the surface exists; nulled on unmount.
+  const [terminal, setTerminal] = useState<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const localRef = useRef(localId)
   localRef.current = localId
@@ -79,6 +100,12 @@ export default function SessionTerminal({
   // so it reads through this ref to always honor the current Settings value.
   const insertStyleRef = useRef(imageInsertStyle)
   insertStyleRef.current = imageInsertStyle
+  // While an auth dialog is open (paused), every INPUT path — keyboard,
+  // binary, wheel reports, pastes — must stop at this surface. Remote
+  // output keeps rendering: pausing writes froze the screen (the old
+  // pre-refactor behavior) without adding any safety.
+  const pausedRef = useRef(paused)
+  pausedRef.current = paused
   // Last dims pushed server-side; skips redundant resize traffic.
   const lastDims = useRef({ nativeId: null as string | null, cols: 0, rows: 0 })
   // Hoisted resizer so font changes can re-push dims (see prefs effect).
@@ -99,12 +126,28 @@ export default function SessionTerminal({
       fontSize: prefs.fontSize,
       lineHeight: 1.2,
       scrollback: prefs.scrollback,
+      // Smooth viewport animation for local scrollback (normal buffer,
+      // zero IPC). 160ms is quick enough to stay responsive on a mouse
+      // wheel; xterm ignores it for raw trackpad momentum streams
+      // (xtermjs#4412), which already scroll per-frame.
+      smoothScrollDuration: 160,
+      scrollSensitivity: 1,
+      fastScrollSensitivity: 4,
+      // Reserves exactly the custom thumb's 6px lane (instead of the 14px
+      // stock scrollbar) so FitAddon reclaims the rest for columns.
+      overviewRuler: { width: 6 },
       theme: {
         background: "#08080a",
         foreground: "#ded9dd",
         cursor: "#ff5a5a",
         cursorAccent: "#08080a",
         selectionBackground: "#8f2a2a66",
+        // Stock bars are hidden (theme.css + CustomScrollbar); keep the
+        // built-in slider/ruler permanently unpainted as a backstop.
+        scrollbarSliderBackground: "rgba(0,0,0,0)",
+        scrollbarSliderHoverBackground: "rgba(0,0,0,0)",
+        scrollbarSliderActiveBackground: "rgba(0,0,0,0)",
+        overviewRulerBorder: "#00000000",
         black: "#08080a",
         brightBlack: "#777078",
         red: "#ff5a5a",
@@ -133,7 +176,25 @@ export default function SessionTerminal({
     terminal.unicode.activeVersion = "11"
     terminal.open(fitHost)
     terminalRef.current = terminal
+    setTerminal(terminal)
     fitRef.current = fit
+
+    // GPU rendering for the main surface only (never the small card
+    // previews — WebGL context limits). On context loss the addon must be
+    // disposed so xterm falls back to its DOM renderer instead of freezing.
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        try {
+          webgl.dispose()
+        } catch {
+          // Already torn down by the browser.
+        }
+      })
+      terminal.loadAddon(webgl)
+    } catch {
+      // No WebGL2 in this WebView: the DOM renderer still works, just slower.
+    }
 
     const clipboard = bindTerminalClipboard({
       terminal,
@@ -143,13 +204,34 @@ export default function SessionTerminal({
       sessionLocalId: () => localRef.current,
       insertStyle: () => insertStyleRef.current,
       notify,
-      write: (bytes) => writeSession(localRef.current, bytes),
+      write: (bytes) => {
+        // Paste input: dropped while auth is paused (see sendInput).
+        if (pausedRef.current) return Promise.resolve()
+        return writeSession(localRef.current, bytes)
+      },
     })
     // Repaint only remote bytes. App notices must not move the TUI cursor,
     // and replayed OSC 52 sequences must never stage an old clipboard copy.
     const snapshot = transcriptSnapshot(localRef.current)
     if (snapshot.length > 0) {
-      terminal.write(snapshot, clipboard.endReplay)
+      // The ring keeps the LAST 64KB: if the transcript is a fullscreen TUI
+      // whose alt-screen enter (`?1049h`) was evicted, a raw replay paints
+      // cursor-addressed redraw fragments into the NORMAL screen — the
+      // "breaks into lines" glitch. In that case prefix a synthetic
+      // enter+clear so the fragments land on a clean alt screen and the
+      // next redraws reassemble correctly. When the enter survived, replay
+      // raw so xterm enters alt screen naturally.
+      let payload: Uint8Array
+      if (isTuiActive(localRef.current) && !snapshotHasAltEnter(snapshot)) {
+        // `ESC[?1049h ESC[2J ESC[H`: enter alt screen, clear it, home.
+        const prefix = textEncoder.encode("\x1b[?1049h\x1b[2J\x1b[H")
+        payload = new Uint8Array(prefix.length + snapshot.length)
+        payload.set(prefix, 0)
+        payload.set(snapshot, prefix.length)
+      } else {
+        payload = snapshot
+      }
+      terminal.write(payload, clipboard.endReplay)
       if (needsReattachMarker(localRef.current)) notify("Session reattached")
       noteTranscriptRendered(localRef.current)
     } else {
@@ -181,8 +263,11 @@ export default function SessionTerminal({
 
     // One IPC write per wheel gesture, not one per generated mouse report.
     // Ordinary keyboard/paste input remains immediate and in byte order.
+    // Auth-paused: everything is dropped — while the dialog owns focus, no
+    // keystroke (typed, pasted, or wheel-generated) may reach the PTY.
     let inputBatch: Uint8Array[] | null = null
     const sendInput = (bytes: Uint8Array) => {
+      if (pausedRef.current) return
       if (inputBatch) inputBatch.push(bytes)
       else void writeSession(localRef.current, bytes).catch(() => {})
     }
@@ -258,7 +343,8 @@ export default function SessionTerminal({
       terminal.write(Uint8Array.from(data))
     })
 
-    terminal.focus()
+    // Do not grab focus while an auth dialog (or any outer modal) owns it.
+    if (!paused) terminal.focus()
 
     return () => {
       disposed = true
@@ -278,6 +364,7 @@ export default function SessionTerminal({
       // mount can tell growth (marker) from a plain reopen (silent repaint).
       noteTranscriptRendered(localRef.current)
       terminalRef.current = null
+      setTerminal(null)
       fitRef.current = null
       terminal.dispose()
     }
@@ -311,16 +398,28 @@ export default function SessionTerminal({
     }
   }, [prefs.fontSize, prefs.cursorStyle, prefs.scrollback, transportId])
 
+  // Auth un-pause: when the dialog closes, return focus to the terminal.
+  // (Pausing never blurs an already-blurred terminal; un-pausing must give
+  // the user typing straight back.)
+  useEffect(() => {
+    if (!paused && terminalRef.current) terminalRef.current.focus()
+  }, [paused])
+
   return (
     <div
       ref={hostRef}
-      onClick={() => terminalRef.current?.focus()}
+      onClick={() => {
+        // While paused (auth dialog open), clicking the terminal must not
+        // steal focus from the dialog's password/key field.
+        if (!pausedRef.current) terminalRef.current?.focus()
+      }}
       className="relative h-full min-h-0 w-full cursor-text px-0 py-2 [&_.xterm]:h-full"
       aria-label="Terminal"
     >
       {/* Padding-free: FitAddon measures this div's border-box, so any
           padding here would make it overfit and push the grid off-center. */}
       <div ref={fitHostRef} id={`still-term-${localRef.current}`} className="h-full w-full" />
+      <CustomScrollbar terminal={terminal} />
       <div
         role="status"
         aria-live="polite"

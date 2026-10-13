@@ -135,6 +135,34 @@ export interface StatusResult {
 }
 
 /**
+ * Orb agent status — the single state vocabulary shared by the Rust
+ * classifier, hook scripts, and the renderer. UI never displays raw
+ * TUI output; it displays `status` + one stripped `snippet` line.
+ */
+export type AgentStatus =
+  | "working"
+  | "needs-input"
+  | "idle"
+  | "done"
+  | "error"
+  | "unknown"
+
+/** One orb stack row. Metadata only — never secrets, never raw escapes. */
+export interface OrbRow {
+  sessionId: string
+  name: string
+  host: string
+  program: string
+  status: AgentStatus
+  snippet: string
+  changedAt: number
+}
+
+export interface OrbSnapshot {
+  rows: OrbRow[]
+}
+
+/**
  * Renderer-side contract for the native layer.
  *
  * The UI depends on this interface — never on Tauri imports directly.
@@ -190,6 +218,55 @@ export interface NativeBridge {
   windowToggleMaximize(): Promise<void>
   windowClose(): Promise<void>
   windowStartDrag(): Promise<void>
+
+  // --- Orb companion (minimize-to-orb swap) ---
+  /** Hide main + float the orb. Replaces raw minimize when orb enabled. */
+  minimizeToOrb(): Promise<void>
+  /** Hide orb + show & focus main. */
+  restoreFromOrb(): Promise<void>
+  /** Current orb stack snapshot (served by Rust, pushed by main renderer). */
+  orbSnapshot(): Promise<OrbSnapshot>
+  /** Hide only the orb (no restore). */
+  orbHide(): Promise<void>
+  /** Pass the fresh snapshot the main renderer built before hiding. */
+  orbPush(snapshot: OrbSnapshot): Promise<void>
+  /** Begin an OS-level drag of the orb window (pointer press + move). */
+  orbStartDrag(): Promise<void>
+  /** Resize the orb webview window (hover-expand / collapse). */
+  orbSetSize(width: number, height: number): Promise<void>
+  /** Absolute position of the orb window on the current monitor (px). */
+  orbSetPosition(x: number, y: number): Promise<void>
+  /** Read current orb window position (px) — used after drags to persist. */
+  orbGetPosition(): Promise<{ x: number; y: number }>
+  /** Current monitor work-area bounds in px (flips the hover card). */
+  orbGetMonitorBounds(): Promise<{ x: number; y: number; width: number; height: number }>
+  /** Install the orb's agent-state hook script on one live session's REMOTE
+   * host (Claude Code in v1). The agent then stamps its own transitions;
+   * no-op for the zero-config scrape. Returns "installed" | "script-only". */
+  hooksInstall(sessionId: string, agent: string): Promise<{ status: string; detail: string }>
+
+  // --- Orb Smart layer (BYO local-AI endpoint, default OFF) ---
+  /** Smart-orb settings the user picked (experimental, localhost only). */
+  smartStatus(): Promise<SmartConfig>
+  /** Update Smart-orb settings. Endpoint must be loopback or it is refused. */
+  smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig>
+  /** One-shot classify of already-stripped pane text (Settings Test button). */
+  smartProbe(text: string, endpoint?: string, cutoff?: number): Promise<SmartProbeResult>
+  /** Exit Still entirely (tmux keeps running server-side). */
+  quit(): Promise<void>
+}
+
+/** Smart-orb config (mirrors Rust SmartConfig; renderer never dials). */
+export interface SmartConfig {
+  enabled: boolean
+  endpoint: string
+  cutoff: number
+}
+
+export interface SmartProbeResult {
+  verdict: string
+  confidence: number
+  accepted: boolean
 }
 
 // The active adapter is assigned once at startup in main.tsx.
@@ -226,6 +303,51 @@ export const failingBridge: NativeBridge = {
   },
   async write(): Promise<void> {
     throw new Error("No native runtime: cannot write to SSH session.")
+  },
+  async minimizeToOrb(): Promise<void> {
+    throw new Error("No native runtime: cannot swap to orb window.")
+  },
+  async restoreFromOrb(): Promise<void> {
+    throw new Error("No native runtime: no orb window to restore.")
+  },
+  async orbSnapshot(): Promise<OrbSnapshot> {
+    throw new Error("No native runtime: no orb snapshot available.")
+  },
+  async orbHide(): Promise<void> {
+    throw new Error("No native runtime: no orb window to hide.")
+  },
+  async orbPush(): Promise<void> {
+    throw new Error("No native runtime: nothing to push to the orb.")
+  },
+  async orbStartDrag(): Promise<void> {
+    throw new Error("No native runtime: cannot drag the orb.")
+  },
+  async orbSetSize(): Promise<void> {
+    throw new Error("No native runtime: cannot resize the orb.")
+  },
+  async orbSetPosition(): Promise<void> {
+    throw new Error("No native runtime: cannot position the orb.")
+  },
+  async orbGetPosition(): Promise<{ x: number; y: number }> {
+    throw new Error("No native runtime: cannot read orb position.")
+  },
+  async orbGetMonitorBounds(): Promise<{ x: number; y: number; width: number; height: number }> {
+    throw new Error("No native runtime: no monitor bounds.")
+  },
+  async hooksInstall(): Promise<{ status: string; detail: string }> {
+    throw new Error("No native runtime: cannot install hooks.")
+  },
+  async smartStatus(): Promise<SmartConfig> {
+    throw new Error("No native runtime: smart orb unavailable.")
+  },
+  async smartSet(): Promise<SmartConfig> {
+    throw new Error("No native runtime: smart orb unavailable.")
+  },
+  async smartProbe(): Promise<SmartProbeResult> {
+    throw new Error("No native runtime: smart orb unavailable.")
+  },
+  async quit(): Promise<void> {
+    throw new Error("No native runtime: cannot quit Still.")
   },
   async resize(): Promise<void> {
     throw new Error("No native runtime: cannot resize SSH session.")

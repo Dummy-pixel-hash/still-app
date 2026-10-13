@@ -170,6 +170,30 @@ impl TmuxPlan {
     /// they cannot abort the command queue before mouse support is configured.
     /// set-clipboard permits TUI/tmux OSC 52 transfers; the renderer stages
     /// these until an explicit Ctrl+Shift+C and never answers clipboard reads.
+    ///
+    /// Flicker-critical options (all quiet/-q so older tmux versions cannot
+    /// abort the command queue):
+    /// - `allow-passthrough on` (server, tmux >= 3.3): lets inner programs
+    ///   reach the outer terminal through DCS tmux; sequences.
+    /// - `terminal-features ',xterm*:sync'` (server, tmux >= 3.4): makes tmux
+    ///   forward DECSET 2026 synchronized-output frames to the outer
+    ///   terminal. Without it, fullscreen TUIs (coding agents) that wrap
+    ///   each frame in `?2026h...?2026l` tear: tmux flushes every
+    ///   intermediate draw and the screen visibly breaks into lines.
+    /// - `terminal-overrides ',xterm*:Tc'` (server): report truecolor so
+    ///   agents render their exact palettes through tmux.
+    /// - `aggressive-resize on` (window-global): follow the smallest ACTIVE
+    ///   client instead of all-time smallest, so stale clients don't shrink
+    ///   the grid a fullscreen TUI is drawing into.
+    /// - copy-mode wheel bindings (`copy-mode` + `copy-mode-vi` tables):
+    ///   step 1 line per SGR report instead of tmux's default 5. Each wheel
+    ///   tick crosses one SSH RTT, so 5-line jumps render as chunky teleports
+    ///   on remote links; 1-line steps give frame-smooth momentum. Both
+    ///   tables are bound (emacs `copy-mode` is the default; `copy-mode-vi`
+    ///   covers servers with `mode-keys vi`). Auto-exit at the bottom is
+    ///   untouched — the root entry binding's `-e` semantics own that.
+    ///   Binds sit LAST: they need tmux >= 2.1 (same floor as `mouse on`),
+    ///   and a parse failure there can never take the attach options down.
     pub fn attach_command(&self, cols: u32, rows: u32) -> String {
         // `-c` only applies when tmux creates the session; on `-A` attach to an
         // existing session it is ignored, which is intended (a live session's
@@ -180,7 +204,7 @@ impl TmuxPlan {
             .map(|d| format!(" -c {}", shell_quote(d)))
             .unwrap_or_default();
         format!(
-            "tmux -u new-session -A -s {n}{d} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n",
+            "tmux -u new-session -A -s {n}{d} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n",
             n = self.session_name,
             d = start_dir,
             c = cols,
@@ -358,7 +382,7 @@ mod tests {   use super::*;
         let p = TmuxPlan::new("still");
         assert_eq!(
             p.attach_command(80, 24),
-            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -t still mouse on \\; set-option -t still history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n"
+            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -t still mouse on \\; set-option -t still history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n"
         );
     }
 
@@ -371,7 +395,7 @@ mod tests {   use super::*;
             cmd.contains("new-session -A -s still -c '/srv/app' -x 80"),
             "{cmd}"
         );
-        assert!(cmd.ends_with("set-clipboard on\n"), "{cmd}");
+        assert!(cmd.ends_with("copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n"), "{cmd}");
     }
 
     #[test]
@@ -380,9 +404,10 @@ mod tests {   use super::*;
         p.working_directory = Some("/tmp/a b'c;rm -rf ~".into());
         let cmd = p.attach_command(80, 24);
         assert!(cmd.contains(r"-c '/tmp/a b'\''c;rm -rf ~'"), "{cmd}");
-        // The injected `;rm` stays inside quotes: only the six tmux `\;`
-        // separators are unescaped.
-        assert_eq!(cmd.matches(" \\; ").count(), 6, "{cmd}");
+        // The injected `;rm` stays inside quotes: only the fourteen tmux `\;`
+        // separators are unescaped (6 legacy options + 4 sync/truecolor
+        // options + 4 copy-mode wheel bindings).
+        assert_eq!(cmd.matches(" \\; ").count(), 14, "{cmd}");
     }
 
     #[test]

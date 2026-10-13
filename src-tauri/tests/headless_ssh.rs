@@ -133,7 +133,7 @@ async fn headless_real_ssh_tmux_roundtrip() {
     check(
         "T1 tmux attach command",
         still_app::core::TmuxPlan::new("still-m1-test").attach_command(80, 24)
-            == "tmux -u new-session -A -s still-m1-test -x 80 -y 24 \\; set-option -t still-m1-test status off \\; set-option -t still-m1-test mouse on \\; set-option -t still-m1-test history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on\n",
+            == "tmux -u new-session -A -s still-m1-test -x 80 -y 24 \\; set-option -t still-m1-test status off \\; set-option -t still-m1-test mouse on \\; set-option -t still-m1-test history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n",
     );
 
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel();

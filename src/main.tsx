@@ -2,6 +2,7 @@ import "./styles/theme.css"
 import React from "react"
 import ReactDOM from "react-dom/client"
 import App from "./App"
+import OrbScreen from "./screens/OrbScreen"
 import { failingBridge, registerNativeBridge } from "./bridge/nativeBridge"
 import { mockBridge } from "./bridge/mockBridge"
 import { tauriBridge } from "./bridge/tauriBridge"
@@ -35,8 +36,12 @@ if (isTauriRuntime()) {
   registerNativeBridge(mockBridge)
 }
 
+// The orb is a second window in the bundle that reuses the SAME assets at
+// `?orb=1` — rendering ONLY the companion circle (never the workspace).
+const isOrbRoute =
+  typeof window !== "undefined" &&
+  (window.location.search.includes("orb=1") || window.location.hash.includes("orb=1"))
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+  <React.StrictMode>{isOrbRoute ? <OrbScreen /> : <App />}</React.StrictMode>,
 )

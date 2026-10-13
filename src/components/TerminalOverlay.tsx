@@ -60,9 +60,30 @@ export default function TerminalOverlay({
 }) {
   useConnections()
   const full = open?.phase === "open"
+  // The overlay morphs from the card rect to fullscreen over 650ms
+  // (transition-all below). Mounting the terminal + first connect during
+  // that morph attaches tmux at the small card grid and then resizes it
+  // repeatedly as the host grows — TUIs reflow mid-draw and tear. Gate
+  // both on `settled`: the morph has finished, the host has its final
+  // size, and the first fit/attach is the only resize the server sees.
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    if (!full) {
+      setSettled(false)
+      return
+    }
+    const t = window.setTimeout(() => setSettled(true), 680)
+    return () => window.clearTimeout(t)
+  }, [full])
   const [chrome, setChrome] = useState(true)
   const hide = useRef(0)
   const [prompt, setPrompt] = useState<AuthPrompt | null>(null)
+  // True while an auth dialog for this overlay is pending (BUG 3 guard:
+  // the terminal must not swallow keystrokes while the auth dialog owns
+  // focus). Passes down as `paused`: blocks keyboard/paste/wheel input and
+  // focus stealing, but keeps remote output rendering — the screen must
+  // never freeze (that's what the old write-pausing got wrong).
+  const [authOpen, setAuthOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   // Footer starts collapsed: one slim status line, buttons one tap away.
   const [footerOpen, setFooterOpen] = useState(false)
@@ -173,6 +194,20 @@ export default function TerminalOverlay({
     return () => window.removeEventListener("keydown", onKey, { capture: true })
   }, [full, onClose])
 
+  // Wrap the auth dialog so the overlay can pause terminal input for
+  // exactly the dialog's lifetime (mount -> resolve/cancel), never longer.
+  const askAuth = useCallback(
+    async (s: Session): Promise<{ secret?: string; remember: boolean } | null> => {
+      setAuthOpen(true)
+      try {
+        return await onNeedAuth(s)
+      } finally {
+        setAuthOpen(false)
+      }
+    },
+    [onNeedAuth],
+  )
+
   const buildRequest = useCallback(
     async (s: Session): Promise<ConnectRequest | null> => {
       // Attach with the overlay's REAL dims on first try instead of a
@@ -185,12 +220,12 @@ export default function TerminalOverlay({
         if (host && host.clientWidth > 0 && host.clientHeight > 0) {
           // Mirror FitAddon's math on the padding-free host so the first
           // attach matches the first real fit exactly (no reflow correction):
-          // Geist Mono 14px = 8.4x19 cells, minus the 14px overview-ruler
-          // reserve it subtracts when scrollback > 0.
+          // Geist Mono 14px = 8.4x19 cells, minus the 6px custom-scrollbar
+          // lane it subtracts when scrollback > 0.
           const cellW = 8.4
           const cellH = 19
           dims = {
-            cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 14) / cellW))),
+            cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 6) / cellW))),
             rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
           }
         }
@@ -216,7 +251,7 @@ export default function TerminalOverlay({
             remember: prompt.remember,
           }
         }
-        const ans = await onNeedAuth(s)
+        const ans = await askAuth(s)
         if (!ans) return null
         return {
           ...base,
@@ -235,7 +270,7 @@ export default function TerminalOverlay({
             remember: false,
           }
         }
-        const ans = await onNeedAuth(s)
+        const ans = await askAuth(s)
         if (!ans) return null
         return {
           ...base,
@@ -245,7 +280,7 @@ export default function TerminalOverlay({
         }
       }
       // ask: prompt every time, transient only.
-      const ans = await onNeedAuth(s)
+      const ans = await askAuth(s)
       if (!ans) return null
       return {
         ...base,
@@ -256,7 +291,7 @@ export default function TerminalOverlay({
         remember: ans.remember,
       }
     },
-    [keyTextFor, onNeedAuth, prompt],
+    [askAuth, keyTextFor, prompt],
   )
 
   const doConnect = useCallback(async () => {
@@ -294,12 +329,12 @@ export default function TerminalOverlay({
   // means this overlay must NOT start a second attempt. No delays involved.
   const autoTried = useRef<string | null>(null)
   useEffect(() => {
-    if (full && session && connectionState(session.id) === "disconnected" && !isConnectPending(session.id) && !busy && autoTried.current !== session.id) {
+    if (settled && full && session && connectionState(session.id) === "disconnected" && !isConnectPending(session.id) && !busy && autoTried.current !== session.id) {
       autoTried.current = session.id
       void doConnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [full])
+  }, [settled])
 
   const touch = useRef<number | null>(null)
   const r = open?.rect
@@ -366,7 +401,7 @@ export default function TerminalOverlay({
           transitionDelay: full ? "350ms" : "0ms",
         }}
       >
-        {open && full ? (
+        {open && full && settled ? (
           <div className="flex h-full flex-col">
             <div className="min-h-0 flex-1">
               <SessionTerminal
@@ -374,6 +409,7 @@ export default function TerminalOverlay({
                 localId={open.session.id}
                 prefs={prefs}
                 imageInsertStyle={imageInsertStyle}
+                paused={authOpen}
                 onClose={onClose}
                 onZoom={(d) =>
                   updateTerminalPrefs({

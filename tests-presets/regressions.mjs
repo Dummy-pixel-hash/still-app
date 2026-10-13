@@ -91,12 +91,13 @@ reset();
   ok("legacy label -> name", loaded.some((p) => p.name === "deploy@10.0.0.9"));
 }
 
-// 6. Wizard wires auto-save into both submit paths.
+// 6. Wizard wires auto-save into the submit path; presets pre-fill then walk the full flow.
 {
   const wizard = readFileSync("src/components/NewSessionWizard.tsx", "utf8");
   ok("wizard imports upsertPreset", wizard.includes("upsertPreset"));
   ok("finish() auto-saves", wizard.includes("const finish = ") && /const finish[\s\S]*?autoSavePreset\(\)[\s\S]*?onSubmit/.test(wizard));
-  ok("finishFromPreset() auto-saves", /finishFromPreset[\s\S]*?autoSavePreset\(\)[\s\S]*?onSubmit/.test(wizard));
+  ok("no preset fast-path skip", !wizard.includes("finishFromPreset") && !wizard.includes("fromPreset"));
+  ok("applyPreset pre-fills and advances", wizard.includes("const applyPreset") && /applyPreset[\s\S]*?setWorkingDirectory/.test(wizard));
   ok("explicit save + delete kept", wizard.includes("saveCurrentAsPreset") && wizard.includes("removePreset"));
   ok("invalid port never saved", wizard.includes("portError(port)"));
 }

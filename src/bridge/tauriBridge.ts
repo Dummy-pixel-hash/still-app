@@ -8,6 +8,9 @@ import type {
   ConnectResult,
   NativeBridge,
   NativeSessionEvent,
+  OrbSnapshot,
+  SmartConfig,
+  SmartProbeResult,
   StatusResult,
 } from "./nativeBridge"
 
@@ -229,5 +232,75 @@ export const tauriBridge: NativeBridge = {
   },
   async windowStartDrag() {
     await getCurrentWindow().startDragging()
+  },
+
+  // --- Orb companion ---
+  async minimizeToOrb() {
+    await invoke("still_minimize_to_orb")
+  },
+  async restoreFromOrb() {
+    await invoke("still_restore_from_orb")
+  },
+  async orbSnapshot(): Promise<OrbSnapshot> {
+    return await invoke<OrbSnapshot>("still_orb_snapshot")
+  },
+  async orbHide() {
+    await invoke("still_orb_hide")
+  },
+  async orbPush(snapshot: OrbSnapshot) {
+    await invoke("still_orb_push", { args: { snapshot } })
+  },
+  async orbStartDrag() {
+    await getCurrentWindow().startDragging()
+  },
+  async orbSetSize(width, height) {
+    const { PhysicalSize } = await import("@tauri-apps/api/dpi")
+    await getCurrentWindow().setSize(new PhysicalSize(width, height))
+  },
+  async orbSetPosition(x, y) {
+    const { PhysicalPosition } = await import("@tauri-apps/api/dpi")
+    await getCurrentWindow().setPosition(new PhysicalPosition(x, y))
+  },
+  async orbGetPosition() {
+    return await invoke<{ x: number; y: number }>("still_orb_get_position")
+  },
+  async orbGetMonitorBounds() {
+    try {
+      const { currentMonitor } = await import("@tauri-apps/api/window")
+      const mon = await currentMonitor()
+      if (mon) {
+        // workArea = monitor minus taskbar/docks, physical pixels.
+        const { position } = mon
+        const area = mon.workArea ?? mon.position
+        return {
+          x: area.position.x,
+          y: area.position.y,
+          width: area.size.width,
+          height: area.size.height,
+        }
+      }
+    } catch {
+      /* fall through to a conservative default */
+    }
+    return { x: 0, y: 0, width: 1280, height: 720 }
+  },
+  async hooksInstall(sessionId, agent) {
+    return await invoke<{ status: string; detail: string }>("still_hooks_install", {
+      args: { sessionId, agent },
+    })
+  },
+  async smartStatus(): Promise<SmartConfig> {
+    return await invoke<SmartConfig>("still_orb_smart_status")
+  },
+  async smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig> {
+    return await invoke<SmartConfig>("still_orb_smart_set", { args: patch })
+  },
+  async smartProbe(text, endpoint?, cutoff?): Promise<SmartProbeResult> {
+    return await invoke<SmartProbeResult>("still_orb_smart_probe", {
+      args: { text, endpoint, cutoff },
+    })
+  },
+  async quit() {
+    await invoke("still_app_exit")
   },
 }
