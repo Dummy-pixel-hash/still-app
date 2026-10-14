@@ -346,6 +346,46 @@ pub async fn upload_via_sftp(
     Ok(format!("$HOME/{remote}"))
 }
 
+/// Ask tmux to repaint the client(s) attached to `tmux_session` from its own
+/// screen buffer. The terminal surface throws away xterm state whenever it
+/// unmounts (leaving the overlay via Ctrl+., toggling split view) while the
+/// SSH channel — and therefore the tmux client — stays attached: tmux
+/// believes the client still holds the old frames, so a remount that replays
+/// the (lossy, ring-truncated) transcript and re-pushes an unchanged window
+/// size gets NO repaint and a TUI reopens garbled until the user resizes by
+/// hand. `refresh-client` makes tmux resend the visible screen, which is the
+/// authoritative repaint for both alt-screen and inline TUIs.
+///
+/// Out-of-band exec on the existing connection — never typed into the pane
+/// (shell input echoed into a TUI is what made the old inline refresh hack
+/// trash fullscreen apps).
+pub async fn refresh_client(session_id: &str, tmux_session: &str) -> anyhow::Result<()> {
+    let handle_arc = {
+        let locked = session_handles().lock().await;
+        locked.get(session_id).cloned()
+    };
+    let handle_arc =
+        handle_arc.ok_or_else(|| anyhow::anyhow!("unknown session (reconnect first)"))?;
+    let command = crate::core::TmuxPlan::new(tmux_session).refresh_command();
+    let mut channel = {
+        let h = handle_arc.lock().await;
+        bounded(CHANNEL_SECS, "SSH channel open", h.channel_open_session()).await?
+    };
+    bounded(CHANNEL_SECS, "refresh exec", channel.exec(false, command)).await?;
+    // Drain until the exec channel closes so the command actually runs.
+    // Bounded: a wedged peer must not hang the UI's repaint path.
+    let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+        while let Some(msg) = channel.wait().await {
+            if matches!(msg, ChannelMsg::Eof | ChannelMsg::Close) {
+                break;
+            }
+        }
+    })
+    .await;
+    let _ = channel.close().await;
+    Ok(())
+}
+
 /// Pace the START of SSH handshakes: the system sshd throttles rapid
 /// unauthenticated KEX, so beginnings stay serialized at least
 /// `HANDSHAKE_PACING` apart. The mutex is held ONLY for this short delay —

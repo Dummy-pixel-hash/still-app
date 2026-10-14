@@ -444,6 +444,35 @@ pub async fn still_resize(
     Ok(())
 }
 
+/// Out-of-band repaint for a just-remounted terminal surface: makes tmux
+/// resend the visible screen to its attached client(s). Best-effort — a
+/// repaint arriving late is still correct, and a failed one leaves the
+/// existing transcript replay in place.
+#[tauri::command]
+pub async fn still_refresh(
+    state: State<'_, AppState>,
+    args: IdArgs,
+) -> Result<(), StillError> {
+    let tmux_session = {
+        let map = state.sessions.lock().await;
+        let live = map.get(&args.session_id).ok_or_else(|| {
+            StillError::friendly("no_session", "Unknown session. Connect first.")
+        })?;
+        live.lock().await.config.tmux_session.clone()
+    };
+    crate::ssh_worker::refresh_client(&args.session_id, &tmux_session)
+        .await
+        .map_err(|e| {
+            let s = format!("{e:#}");
+            if s.contains("unknown session") {
+                StillError::friendly("no_session", "Unknown session. Connect first.")
+            } else {
+                StillError::friendly("refresh_failed", format!("Repaint request failed ({s})."))
+            }
+        })?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadArgs {

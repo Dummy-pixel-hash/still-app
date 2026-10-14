@@ -212,8 +212,20 @@ impl TmuxPlan {
         )
     }
 
-    pub fn refresh_command() -> &'static str {
-        "tmux refresh-client -S 2>/dev/null || tmux refresh-client 2>/dev/null || true\n"
+    /// Refresh the session's attached client(s) from the server-side screen
+    /// buffer. Sent out-of-band on its own SSH channel (never typed into the
+    /// pane — shell input is what made the old PTY-refresh hack corrupt
+    /// fullscreen TUIs). The session filter keeps other Still sessions on the
+    /// same tmux server untouched.
+    pub fn refresh_command(&self) -> String {
+        let name = shell_quote(&self.session_name);
+        format!(
+            "command -v tmux >/dev/null 2>&1 || exit 0; \
+             tmux list-clients -t {name} -F '#{{client_tty}}' 2>/dev/null | \
+             while IFS= read -r t; do \
+               [ -n \"$t\" ] && tmux refresh-client -t \"$t\" 2>/dev/null; \
+             done"
+        )
     }
 }
 

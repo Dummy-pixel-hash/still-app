@@ -84,6 +84,10 @@ export const mockBridge: NativeBridge = {
     return undefined
   },
 
+  async refresh() {
+    return undefined
+  },
+
   async disconnect(sessionId) {
     window.setTimeout(() => {
       // Notify while the subscriber still exists (the production worker's

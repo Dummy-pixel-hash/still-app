@@ -17,7 +17,9 @@ let readResolve: ((text: string) => void) | undefined
 const h = {
   writes: [] as number[][],
   copies: [] as string[],
+  emits: [] as string[],
   resizes: [] as { cols: number; rows: number }[],
+  refreshes: 0,
   reads: 0,
   rejectCopy: false,
   rejectPaste: false,
@@ -32,7 +34,7 @@ const h = {
     sink?.({ type: "data", data: Array.from(new TextEncoder().encode(text)) })
     await new Promise<void>(resolve => terminal.write("", resolve))
   },
-  clear: () => { h.writes.length = 0; h.copies.length = 0; h.reads = 0; h.uploads.length = 0 },
+  clear: () => { h.writes.length = 0; h.resizes.length = 0; h.emits.length = 0; h.refreshes = 0 },
   resolvePaste: (text: string) => { readResolve?.(text) },
   reconnect: () => connect(),
   disconnect: () => disconnectSession("fixture"),
@@ -66,6 +68,7 @@ registerNativeBridge({
   async subscribeToSession(_id, cb) { sink = cb; return () => { if (sink === cb) sink = undefined } },
   async write(_id, data) { h.writes.push(Array.from(typeof data === "string" ? new TextEncoder().encode(data) : data)) },
   async resize(_id, cols, rows) { h.resizes.push({ cols, rows }) },
+  async refresh() { h.refreshes++ },
   async clipboardWriteText(text) {
     if (h.rejectCopy) throw new Error("denied")
     h.copies.push(text)

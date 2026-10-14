@@ -887,6 +887,20 @@ export async function resizeSession(localId: string, cols: number, rows: number)
   await nativeBridge.resize(nativeId, cols, rows)
 }
 
+/**
+ * Ask tmux to resend the visible screen to this session's attached
+ * client(s). Called when the terminal surface just remounted (leaving the
+ * overlay via Ctrl+., toggling split view): the SSH channel — and therefore
+ * the tmux client — stayed attached the whole time, so a lossy transcript
+ * replay plus an unchanged window size would otherwise leave a TUI garbled
+ * until the user resizes by hand. Best-effort; failures keep the replay.
+ */
+export async function refreshSession(localId: string) {
+  const nativeId = entries.get(localId)?.nativeId
+  if (!nativeId) return
+  await nativeBridge.refresh(nativeId)
+}
+
 export async function disconnectSession(
   localId: string,
   opts?: { silent?: boolean },

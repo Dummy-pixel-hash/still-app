@@ -93,6 +93,10 @@ export const tauriBridge: NativeBridge = {
     await invoke("still_resize", { args: { sessionId, cols, rows } })
   },
 
+  async refresh(sessionId: string): Promise<void> {
+    await invoke("still_refresh", { args: { sessionId } })
+  },
+
   async disconnect(sessionId: string): Promise<void> {
     await invoke("still_disconnect", { args: { sessionId } })
   },

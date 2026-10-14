@@ -152,6 +152,8 @@ export interface NativeBridge {
   connect(args: ConnectArgs): Promise<ConnectResult>
   write(sessionId: string, data: string | Uint8Array): Promise<void>
   resize(sessionId: string, cols: number, rows: number): Promise<void>
+  /** Out-of-band repaint: makes tmux resend the visible screen. Best-effort. */
+  refresh(sessionId: string): Promise<void>
   disconnect(sessionId: string): Promise<void>
   status(sessionId: string): Promise<StatusResult>
   subscribeToSession(
@@ -229,6 +231,9 @@ export const failingBridge: NativeBridge = {
   },
   async resize(): Promise<void> {
     throw new Error("No native runtime: cannot resize SSH session.")
+  },
+  async refresh(): Promise<void> {
+    throw new Error("No native runtime: cannot repaint SSH session.")
   },
   async disconnect(): Promise<void> {
     throw new Error("No native runtime: nothing to disconnect.")

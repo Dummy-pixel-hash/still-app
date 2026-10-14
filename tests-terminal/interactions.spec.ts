@@ -185,6 +185,28 @@ test("normal buffer scroll stays local and alt no-mouse arrow modes are preserve
   expect(await emittedText(page)).toBe("\x1bOA".repeat(3))
 })
 
+test("remount with transcript requests a server-side repaint (TUI reopen)", async ({ page }) => {
+  // Surface mounts empty on first open: no transcript yet, so no repaint.
+  expect(await h(page, "harness.refreshes")).toBe(0)
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[2J\\x1b[Hopencode-tui").then(() => harness.clear())')
+  expect(await h(page, "harness.refreshes")).toBe(0)
+  // Leaving the overlay (Ctrl+.) unmounts; reopening replays the transcript
+  // and — instead of relying on lossy fragments plus an unchanged window
+  // size — requests an authoritative tmux resend of the visible screen.
+  await h(page, "harness.remount()")
+  // React StrictMode double-mounts in dev (prod mounts once): at least one
+  // repaint, and more are idempotent resends of the same screen.
+  await expect.poll(() => h(page, "harness.refreshes")).toBeGreaterThanOrEqual(1)
+  // Remount of the same surface replays the transcript and re-pushes the
+  // current dims once (lastDims resets per mount); the last resize lands at
+  // the already-correct dims, no geometry change, no manual refit needed.
+  // No stray input bytes leaked into the PTY.
+  const resizes = await h(page, "harness.resizes")
+  expect(resizes.length).toBeGreaterThanOrEqual(1)
+  expect(resizes.at(-1)).toEqual({ cols: await h(page, "harness.term.cols"), rows: await h(page, "harness.term.rows") })
+  expect(await emittedText(page)).toBe("")
+})
+
 test("zoom focused in terminal refits and notifies native dimensions without reopening", async ({ page }) => {
   const before = await h(page, "({rows:harness.term.rows, cols:harness.term.cols})")
   await page.keyboard.press("Control+-")

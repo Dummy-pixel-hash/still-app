@@ -13,6 +13,7 @@ import {
   needsReattachMarker,
   nativeSessionId,
   noteTranscriptRendered,
+  refreshSession,
   resizeSession,
   subscribeSessionData,
   transcriptSnapshot,
@@ -231,7 +232,18 @@ export default function SessionTerminal({
       } else {
         payload = snapshot
       }
-      terminal.write(payload, clipboard.endReplay)
+      terminal.write(payload, () => {
+        clipboard.endReplay()
+        // Remount: the ring replay is a lossy approximation of a TUI frame
+        // (cursor-addressed redraws, possibly evicted alt-screen enters),
+        // and tmux — whose client never detached — sees no size change, so
+        // it would never repaint. Ask it to resend the authoritative screen;
+        // its bytes arrive after this write and supersede the fragments.
+        const id = localRef.current
+        void refreshSession(id).catch(() => {
+          // Keep the replay; a missing repaint is the old behavior.
+        })
+      })
       if (needsReattachMarker(localRef.current)) notify("Session reattached")
       noteTranscriptRendered(localRef.current)
     } else {
