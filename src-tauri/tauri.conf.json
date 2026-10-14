@@ -17,21 +17,6 @@
         "decorations": false,
         "shadow": false,
         "transparent": true
-      },
-      {
-        "label": "orb",
-        "title": "Still orb",
-        "url": "index.html?orb=1",
-        "width": 96,
-        "height": 96,
-        "transparent": true,
-        "decorations": false,
-        "shadow": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "visible": false,
-        "focus": false
       }
     ],
     "security": {

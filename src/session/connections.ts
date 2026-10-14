@@ -453,7 +453,7 @@ const FROZEN_PREFIX = "still.preview.v1."
 const FROZEN_MIN_MS = 2000
 const frozenLastPersist = new Map<string, number>()
 
-export function stripPreviewAnsi(s: string): string {
+function stripPreviewAnsi(s: string): string {
   return (
     s
       // OSC title updates may be BEL- or ST-terminated.

@@ -31,7 +31,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   confirmRemove: true,
   terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 },
   imageInsertStyle: "path",
-  orb: { enabled: true, minimizeBehavior: "orb" },
 }
 
 function seed(): StoreShape {
@@ -138,11 +137,6 @@ export function useStore(): StoreShape & { version: number } {
   }, [])
   const store = getStore()
   return { ...store, version }
-}
-
-/** Imperative accessor for non-hook contexts (e.g. the minimize path). */
-export function getSessionsSnapshot(): Session[] {
-  return [...getStore().sessions]
 }
 
 // --- projects ---

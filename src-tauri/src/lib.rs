@@ -7,13 +7,9 @@ mod commands;
 pub mod core;
 pub mod diag;
 pub mod hostkeys;
-pub mod orb;
-pub mod agent_state;
-pub mod orb_model;
 pub mod ssh_worker;
 
 use commands::AppState;
-use tauri::Manager;
 
 /// Typed response for the `still_ping` IPC probe.
 #[derive(Debug, serde::Serialize)]
@@ -90,59 +86,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
-        .manage(crate::orb::OrbState::new())
-        .manage(crate::orb_model::SmartState::new())
-        .setup(|app| {
-            // Taskbar minimize (Win+Down / taskbar icon) never fires the
-            // renderer, so watch the main window's visibility here: when it
-            // becomes non-visible while not closing, route to the orb as well.
-            let app = app.handle();
-            for label in ["main", crate::orb::ORB_LABEL] {
-                let app_window = app.clone();
-                if let Some(w) = app.get_webview_window(label) {
-                    w.on_window_event(move |event| {
-                        match event {
-                            tauri::WindowEvent::CloseRequested { .. } => {
-                                // Closing EITHER window quits Still. The orb always
-                                // exists (invisible at startup), so a plain window
-                                // close could otherwise strand the hidden main.
-                                app_window.exit(0);
-                            }
-                            _ => {}
-                        }
-                    });
-                }
-            }
-            // Zero-config agent sniffing for the orb: every ~2.5s (staggered),
-            // per LIVE session only, run `tmux capture-pane` over a throwaway
-            // exec channel and classify into the shared vocabulary. Runs only
-            // while someone could be looking (orb visible or main hidden) and
-            // stops on its own when nothing is live — ~2 tiny execs per tick
-            // per session, each bounded + capped.
-            let app_sniff = app.clone();
-            tauri::async_runtime::spawn(async move {
-                use tauri::Manager as _;
-                let mut idx: usize = 0;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-                    let orb_visible = app_sniff
-                        .get_webview_window(crate::orb::ORB_LABEL)
-                        .map(|o| o.is_visible().unwrap_or(false))
-                        .unwrap_or(false);
-                    let main_visible = app_sniff
-                        .get_webview_window("main")
-                        .map(|m| m.is_visible().unwrap_or(false))
-                        .unwrap_or(false);
-                    if !orb_visible && main_visible {
-                        continue; // nobody looking: stay quiet
-                    }
-                    crate::orb::agent_tick(&app_sniff, &mut idx).await;
-                }
-            });
+        .setup(|_app| {
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
-                if let Some(w) = app.get_webview_window("main") {
+                if let Some(w) = _app.get_webview_window("main") {
                     tune_windows_frame(&w);
                 }
             }
@@ -165,19 +113,6 @@ pub fn run() {
             commands::still_trust_host,
             commands::still_forget_host,
             commands::still_diag_record,
-            commands::still_minimize_to_orb,
-            commands::still_restore_from_orb,
-            commands::still_orb_hide,
-            commands::still_orb_snapshot,
-            commands::still_orb_push,
-            commands::still_orb_get_position,
-            commands::still_hooks_install,
-            commands::still_orb_smart_status,
-            commands::still_orb_smart_set,
-            commands::still_orb_smart_probe,
-            commands::still_orb_smart_has_key,
-            commands::still_orb_smart_forget_key,
-            commands::still_app_exit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Still");

@@ -1,14 +1,11 @@
 import { readBrowserClipboard, writeBrowserClipboard } from "./browserClipboard"
-import type { NativeBridge, NativeSessionEvent, OrbSnapshot, SmartConfig, SmartProbeResult } from "./nativeBridge"
+import type { NativeBridge, NativeSessionEvent } from "./nativeBridge"
 import type { ConnectionStatus } from "../types"
 
 const sessionSubscribers = new Map<
   string,
   Set<(event: NativeSessionEvent) => void>
 >()
-
-// Orb dev-mode position bookkeeping (mock only).
-let mockOrbPos = { x: 0, y: 0 }
 
 function emit(id: string, event: NativeSessionEvent) {
   sessionSubscribers.get(id)?.forEach((callback) => callback(event))
@@ -150,115 +147,9 @@ export const mockBridge: NativeBridge = {
     return undefined
   },
   async windowClose() {
-    // Fine for dev preview; a browser tab is real (user action).
-    window.close()
     return undefined
   },
   async windowStartDrag() {
-    return undefined
-  },
-
-  // ORB (dev-only simulation): the preview renders a fake live stack so the
-  // orb UI can be designed/developed without a native runtime.
-  async minimizeToOrb() {
-    return undefined
-  },
-  async restoreFromOrb() {
-    return undefined
-  },
-  async orbHide() {
-    // In dev this closes the orb route entirely so `vite dev` stays usable.
-    if (window.location.search.includes("orb=1")) window.close()
-    return undefined
-  },
-  async orbSnapshot(): Promise<OrbSnapshot> {
-    return {
-      rows: [
-        {
-          sessionId: "mock-1",
-          name: "agent-run",
-          host: "dev.local",
-          program: "claude",
-          status: "working",
-          snippet: "Running go test ./... (agent turn in progress)",
-          changedAt: Date.now(),
-          tmuxSession: "agent_run-abc1",
-        },
-        {
-          sessionId: "mock-2",
-          name: "infra",
-          host: "dev.local",
-          program: "codex",
-          status: "needs-input",
-          snippet: "awaiting permission: run rm -rf dist",
-          changedAt: Date.now(),
-          tmuxSession: "infra-def2",
-        },
-        {
-          sessionId: "mock-3",
-          name: "notes",
-          host: "dev.local",
-          program: "shell",
-          status: "idle",
-          snippet: "zsh: 12:42 ~/work 2 jobs",
-          changedAt: Date.now(),
-          tmuxSession: "notes-ghi3",
-        },
-      ],
-    }
-  },
-  async orbPush() {
-    return undefined
-  },
-  async orbStartDrag() {
-    return undefined
-  },
-  async orbSetSize() {
-    return undefined
-  },
-  async orbSetPosition(x, y) {
-    mockOrbPos = { x, y }
-    return undefined
-  },
-  async orbGetPosition() {
-    return mockOrbPos
-  },
-  async orbGetMonitorBounds() {
-    return { x: 0, y: 0, width: 1920, height: 1080 }
-  },
-  async hooksInstall() {
-    // Dev preview: pretend the remote install succeeded instantly.
-    return { status: "installed", detail: "" }
-  },
-  async smartStatus(): Promise<SmartConfig> {
-    // Dev preview: smart off, localhost default, mid cutoff.
-    return {
-      enabled: false,
-      endpoint: "http://127.0.0.1:8080",
-      model: "",
-      kind: "auto",
-      cutoff: 0.55,
-      questionCutoff: 0.35,
-      timeoutSecs: 8,
-      budgetChars: 2000,
-      allowRemote: false,
-    }
-  },
-  async smartSet(patch: Partial<SmartConfig>): Promise<SmartConfig> {
-    const cur = await this.smartStatus()
-    return { ...cur, ...patch }
-  },
-  async smartProbe(): Promise<SmartProbeResult> {
-    // Dev preview: canned confident verdict so the Settings UI is testable.
-    return { verdict: "working", confidence: 0.91, accepted: true }
-  },
-  async smartHasKey(): Promise<boolean> {
-    return false
-  },
-  async smartForgetKey(): Promise<void> {
-    return undefined
-  },
-  async quit() {
     return undefined
   },
 

@@ -8,9 +8,6 @@ import type {
   ConnectResult,
   NativeBridge,
   NativeSessionEvent,
-  OrbSnapshot,
-  SmartConfig,
-  SmartProbeResult,
   StatusResult,
 } from "./nativeBridge"
 
@@ -232,103 +229,5 @@ export const tauriBridge: NativeBridge = {
   },
   async windowStartDrag() {
     await getCurrentWindow().startDragging()
-  },
-
-  // --- Orb companion ---
-  async minimizeToOrb() {
-    await invoke("still_minimize_to_orb")
-  },
-  async restoreFromOrb() {
-    await invoke("still_restore_from_orb")
-  },
-  async orbSnapshot(): Promise<OrbSnapshot> {
-    return await invoke<OrbSnapshot>("still_orb_snapshot")
-  },
-  async orbHide() {
-    await invoke("still_orb_hide")
-  },
-  async orbPush(snapshot: OrbSnapshot) {
-    await invoke("still_orb_push", { args: { snapshot } })
-  },
-  async orbStartDrag() {
-    await getCurrentWindow().startDragging()
-  },
-  async orbSetSize(width, height) {
-    // Logical px in, logical px out: the old PhysicalSize call fed CSS px
-    // as device px, so the hover card landed wrong on any scaled display.
-    const { LogicalSize } = await import("@tauri-apps/api/dpi")
-    await getCurrentWindow().setSize(new LogicalSize(width, height))
-  },
-  async orbSetPosition(x, y) {
-    const { LogicalPosition } = await import("@tauri-apps/api/dpi")
-    await getCurrentWindow().setPosition(new LogicalPosition(x, y))
-  },
-  async orbGetPosition() {
-    return await invoke<{ x: number; y: number }>("still_orb_get_position")
-  },
-  async orbGetMonitorBounds() {
-    try {
-      const { currentMonitor } = await import("@tauri-apps/api/window")
-      const mon = await currentMonitor()
-      if (mon) {
-        // workArea = monitor minus taskbar/docks, physical pixels.
-        const { position } = mon
-        const area = mon.workArea ?? mon.position
-        return {
-          x: area.position.x,
-          y: area.position.y,
-          width: area.size.width,
-          height: area.size.height,
-        }
-      }
-    } catch {
-      /* fall through to a conservative default */
-    }
-    return { x: 0, y: 0, width: 1280, height: 720 }
-  },
-  async hooksInstall(sessionId, agent) {
-    return await invoke<{ status: string; detail: string }>("still_hooks_install", {
-      args: { sessionId, agent },
-    })
-  },
-  async smartStatus(): Promise<SmartConfig> {
-    return await invoke<SmartConfig>("still_orb_smart_status")
-  },
-  async smartSet(
-    patch: Partial<SmartConfig> & { apiKey?: string },
-  ): Promise<SmartConfig> {
-    const { apiKey, ...rest } = patch
-    return await invoke<SmartConfig>("still_orb_smart_set", {
-      args: { ...rest, apiKey },
-    })
-  },
-  async smartProbe(
-    text,
-    endpoint?,
-    cutoff?,
-    opts?: import("./nativeBridge").SmartProbeOptions,
-  ): Promise<SmartProbeResult> {
-    return await invoke<SmartProbeResult>("still_orb_smart_probe", {
-      args: {
-        text,
-        endpoint: opts?.endpoint ?? endpoint,
-        cutoff: opts?.cutoff ?? cutoff,
-        model: opts?.model,
-        kind: opts?.kind,
-        questionCutoff: opts?.questionCutoff,
-        timeoutSecs: opts?.timeoutSecs,
-        budgetChars: opts?.budgetChars,
-        allowRemote: opts?.allowRemote,
-      },
-    })
-  },
-  async smartHasKey(): Promise<boolean> {
-    return await invoke<boolean>("still_orb_smart_has_key")
-  },
-  async smartForgetKey(): Promise<void> {
-    await invoke("still_orb_smart_forget_key")
-  },
-  async quit() {
-    await invoke("still_app_exit")
   },
 }
