@@ -12,6 +12,8 @@ import {
   isTuiActive,
   needsReattachMarker,
   nativeSessionId,
+  noteSurfaceDims,
+  noteSurfaceFontSize,
   noteTranscriptRendered,
   refreshSession,
   resizeSession,
@@ -255,6 +257,9 @@ export default function SessionTerminal({
         fit.fit()
         const dims = fit.proposeDimensions()
         if (dims && dims.cols > 1 && dims.rows > 1) {
+          // Card previews mirror the surface's real grid (capped), so record
+          // every accepted fit — not just the ones that reach the server.
+          noteSurfaceDims(localRef.current, dims.cols, dims.rows)
           // Skip no-op resizes: each push also repaints server-side, so
           // only notify when dims actually changed. First push always goes
           // through (lastCols/Rows start at 0) so attach gets real dims.
@@ -389,6 +394,7 @@ export default function SessionTerminal({
   // closing + reopening the overlay.
   useEffect(() => {
     const terminal = terminalRef.current
+    noteSurfaceFontSize(prefs.fontSize)
     if (!terminal) return
     try {
       if (terminal.options.fontSize !== prefs.fontSize) {

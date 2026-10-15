@@ -10,6 +10,7 @@ import {
   hostKeyPromptFor,
   isConnectPending,
   reconnectSession,
+  noteSurfaceFontSize,
   useConnections,
   type ConnectRequest,
 } from "../session/connections"
@@ -218,16 +219,19 @@ export default function TerminalOverlay({
       try {
         const host = document.getElementById(`still-term-${s.id}`)
         if (host && host.clientWidth > 0 && host.clientHeight > 0) {
-          // Mirror FitAddon's math on the padding-free host so the first
-          // attach matches the first real fit exactly (no reflow correction):
-          // Geist Mono 14px = 8.4x19 cells, minus the 6px custom-scrollbar
-          // lane it subtracts when scrollback > 0.
-          const cellW = 8.4
-          const cellH = 19
-          dims = {
-            cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 6) / cellW))),
-            rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
-          }
+      // Mirror FitAddon's math on the padding-free host so the first
+      // attach matches the first real fit exactly (no reflow correction):
+      // Geist Mono 14px = 8.4x19 cells, minus the 6px custom-scrollbar
+      // lane it subtracts when scrollback > 0. Cell metrics scale ~linearly
+      // with the configured font size.
+      const fontPx = prefs.fontSize
+      noteSurfaceFontSize(fontPx)
+      const cellW = 0.6 * fontPx
+      const cellH = 1.35 * fontPx
+      dims = {
+        cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 6) / cellW))),
+        rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
+      }
         }
       } catch {
         // Fall back to 80x24.
@@ -291,7 +295,7 @@ export default function TerminalOverlay({
         remember: ans.remember,
       }
     },
-    [askAuth, keyTextFor, prompt],
+    [askAuth, keyTextFor, prompt, prefs],
   )
 
   const doConnect = useCallback(async () => {

@@ -41,18 +41,116 @@ const TRANSCRIPT_CAP = 65536
 // A headless xterm keeps the card preview in the same state as the real
 // terminal. Parsing the raw stream as text cannot represent cursor-addressed
 // redraws, alternate-screen TUIs, carriage returns, or clears.
-const PREVIEW_COLS = 64
-const PREVIEW_ROWS = 8
+//
+// Geometry contract: the preview emulator runs at (a capped copy of) the
+// size the session was last open at, so line wraps, cursor addressing and
+// TUI layouts in the card match the real surface instead of reflowing to a
+// fixed miniature grid. Dimension changes never resize a parsed emulator —
+// they rebuild it and replay the ring, which is the only order that cannot
+// smear a TUI (xterm resize reflows already-drawn content).
+const PREVIEW_MAX_COLS = 120
+const PREVIEW_MAX_ROWS = 32
+const PREVIEW_COLS = 80
+const PREVIEW_ROWS = 24
 const PREVIEW_FROZEN_PREFIX = "still.preview.screen.v1."
+const PREVIEW_FROZEN_SCREEN_PREFIX = "still.preview.screen.v2."
 const PREVIEW_FROZEN_MIN_MS = 2000
+const PREVIEW_DIMS_KEY = "still.preview.dims.v1"
+
+/** Clamp any geometry into the supported preview grid. */
+function clampPreviewDims(cols: number, rows: number): PreviewDims {
+  const c = Number.isFinite(cols) ? cols : PREVIEW_COLS
+  const r = Number.isFinite(rows) ? rows : PREVIEW_ROWS
+  return {
+    cols: Math.max(20, Math.min(PREVIEW_MAX_COLS, Math.round(c))),
+    rows: Math.max(5, Math.min(PREVIEW_MAX_ROWS, Math.round(r))),
+  }
+}
+
+function sameDims(a: PreviewDims, b: PreviewDims): boolean {
+  return a.cols === b.cols && a.rows === b.rows
+}
+
+export interface PreviewDims {
+  cols: number
+  rows: number
+}
+
 interface PreviewTerminalState {
   terminal: Terminal
   /** Total transcript bytes queued into xterm, not just bytes already parsed. */
   queuedTotal: number
   /** Total transcript bytes whose xterm write callback has fired. */
   parsedTotal: number
+  /** Grid the emulator was built at (capped live dims). */
+  dims: PreviewDims
+  /** False while a full replay is in flight: snapshot reads return null so
+   *  the card shows its fallback instead of the previous (stale) frame. */
+  ready: boolean
 }
+
+/** Latest surface geometry per session (capped), persisted for reloads. */
+const surfaceDims = new Map<string, PreviewDims>()
+let previewDimsLoaded = false
+/** Last known main-surface font size; previews render at the same metrics
+ *  so cell aspect (and therefore scale math) matches the real terminal. */
+let previewFontPx = 14
 const previewTerminals = new Map<string, PreviewTerminalState>()
+
+function loadPersistedDims() {
+  if (previewDimsLoaded) return
+  previewDimsLoaded = true
+  try {
+    const raw = localStorage.getItem(PREVIEW_DIMS_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Record<string, { cols?: unknown; rows?: unknown }>
+    for (const [id, dims] of Object.entries(parsed)) {
+      if (typeof dims?.cols === "number" && typeof dims?.rows === "number") {
+        surfaceDims.set(id, clampPreviewDims(dims.cols, dims.rows))
+      }
+    }
+  } catch {
+    // Corrupt/blocked storage: fall back to the classic miniature grid.
+  }
+}
+
+function persistDimsSoon() {
+  try {
+    const out: Record<string, PreviewDims> = {}
+    for (const [id, dims] of surfaceDims) out[id] = dims
+    localStorage.setItem(PREVIEW_DIMS_KEY, JSON.stringify(out))
+  } catch {
+    // Private mode / quota: in-memory geometry still serves this session.
+  }
+}
+
+/**
+ * Record the main surface's real grid so card previews render at the same
+ * layout (capped). Called on attach and on every fit; persisted so previews
+ * survive a reload before the session is ever reopened.
+ */
+export function noteSurfaceDims(localId: string, cols: number, rows: number) {
+  const dims = clampPreviewDims(cols, rows)
+  const prev = surfaceDims.get(localId)
+  if (prev && sameDims(prev, dims)) return
+  surfaceDims.set(localId, dims)
+  persistDimsSoon()
+}
+
+/** Effective preview geometry: last surface dims, else persisted, else 80x24. */
+export function previewDimsFor(localId: string): PreviewDims {
+  loadPersistedDims()
+  return surfaceDims.get(localId) ?? { cols: PREVIEW_COLS, rows: PREVIEW_ROWS }
+}
+
+/** Remember the main surface's font size for preview cell metrics. */
+export function noteSurfaceFontSize(px: number) {
+  if (Number.isFinite(px) && px >= 6 && px <= 40) previewFontPx = px
+}
+
+function previewFontSize(_localId: string): number {
+  return previewFontPx
+}
 
 function emit() {
   snapshotVersion += 1
@@ -182,15 +280,19 @@ function emitTranscript(localId: string) {
   transcriptListeners.get(localId)?.forEach((l) => l())
 }
 
-function newPreviewTerminal(): Terminal {
+function newPreviewTerminal(dims: PreviewDims, fontSize: number): Terminal {
   // Same palette as the main surface so mounted previews match it.
   const terminal = new Terminal({
-    cols: PREVIEW_COLS,
-    rows: PREVIEW_ROWS,
+    cols: dims.cols,
+    rows: dims.rows,
     convertEol: false,
     cursorBlink: false,
     scrollback: 0,
-    fontSize: 5,
+    fontFamily: "'Geist Mono', ui-monospace, Consolas, 'Segoe UI Emoji', 'Noto Color Emoji', 'Apple Color Emoji', monospace",
+    // Native surface font size: the card shrinks the whole grid with a CSS
+    // transform, so cell metrics (and therefore wrap math) are identical to
+    // the real terminal at every card width.
+    fontSize,
     lineHeight: 1.1,
     allowProposedApi: true,
     theme: {
@@ -231,19 +333,36 @@ function disposePreviewTerminal(localId: string) {
 }
 
 /**
- * Bring the headless preview emulator up to the current transcript. A full
- * replay is used whenever the ring changed since the emulator was built; it
- * is cheap at 64x8 and, unlike incremental bookkeeping, remains correct when
- * the byte ring evicts its oldest bytes or a session is reloaded.
+ * Bring the headless preview emulator up to the current transcript.
+ *
+ * Geometry: when the target grid changes (surface resized/reconnected, or
+ * first open after a reload with a different window size) the emulator is
+ * REBUILT and the ring replayed at the new size — never resized in place,
+ * because xterm resize reflows already-drawn content and smears TUIs.
+ * A rebuild also runs whenever the ring changed under the emulator (see
+ * below), so replay correctness never depends on incremental bookkeeping.
  */
-function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
+function syncPreviewTerminal(
+  localId: string,
+  fontSize = 14,
+): PreviewTerminalState | null {
   try {
+    const dims = previewDimsFor(localId)
     const bytes = transcriptSnapshot(localId)
     const total = transcripts.get(localId)?.totalBytes ?? 0
     let state = previewTerminals.get(localId)
     if (bytes.length === 0 && total === 0) {
       if (state) disposePreviewTerminal(localId)
       return null
+    }
+    if (state) {
+      if (state.terminal.options.fontSize !== fontSize) {
+        state.terminal.options.fontSize = fontSize
+      }
+      if (!sameDims(state.dims, dims)) {
+        disposePreviewTerminal(localId)
+        state = undefined
+      }
     }
 
     // The ring's first byte has this absolute transcript offset. If the
@@ -256,7 +375,13 @@ function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
       state.queuedTotal > total
     ) {
       if (state) state.terminal.dispose()
-      state = { terminal: newPreviewTerminal(), queuedTotal: 0, parsedTotal: 0 }
+      state = {
+        terminal: newPreviewTerminal(dims, fontSize),
+        queuedTotal: 0,
+        parsedTotal: 0,
+        dims,
+        ready: bytes.length === 0,
+      }
       previewTerminals.set(localId, state)
       if (bytes.length > 0) {
         const writeState = state
@@ -266,6 +391,8 @@ function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
         state.terminal.write(bytes, () => {
           if (previewTerminals.get(localId) !== writeState) return
           writeState.parsedTotal = total
+          writeState.ready = true
+          emitTranscript(localId)
           flushPreviewUpdate(localId)
         })
       }
@@ -281,6 +408,7 @@ function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
       state.terminal.write(delta, () => {
         if (previewTerminals.get(localId) !== writeState) return
         writeState.parsedTotal = total
+        writeState.ready = true
         flushPreviewUpdate(localId)
       })
     }
@@ -299,25 +427,34 @@ function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
  * the card scales it down with CSS. Open is idempotent: xterm moves its
  * renderer into the newest host without losing buffer state.
  */
-export function openPreview(localId: string, host: HTMLElement): boolean {
+export function openPreview(
+  localId: string,
+  host: HTMLElement,
+  fontSize = 14,
+): boolean {
   try {
-    const state = syncPreviewTerminal(localId)
+    const state = syncPreviewTerminal(localId, fontSize)
     if (!state) return false
     state.terminal.open(host)
+    // xterm.open() is a documented no-op on an already-opened terminal, so a
+    // card remount (filter/sort/move) would otherwise leave the live DOM on
+    // the detached host and render an empty box. Re-home the element instead.
+    const el = state.terminal.element
+    if (el && el.parentElement !== host) host.appendChild(el)
     return true
   } catch {
     return false
   }
 }
 
-function previewRows(state: PreviewTerminalState, maxRows = PREVIEW_ROWS, maxCols = PREVIEW_COLS): string[] {
+function previewRows(state: PreviewTerminalState): string[] {
   // While a new write is queued, return the last parsed frame. This avoids
   // flashing back to raw text and keeps the preview stable between frames.
   const buffer = state.terminal.buffer.active
-  const rows = Math.min(maxRows, state.terminal.rows, buffer.length)
+  const rows = Math.min(state.terminal.rows, buffer.length)
   const lines: string[] = []
   for (let y = 0; y < rows; y += 1) {
-    const line = buffer.getLine(y)?.translateToString(true, 0, maxCols) ?? ""
+    const line = buffer.getLine(y)?.translateToString(true, 0, state.dims.cols) ?? ""
     lines.push(line)
   }
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
@@ -326,14 +463,28 @@ function previewRows(state: PreviewTerminalState, maxRows = PREVIEW_ROWS, maxCol
 
 function persistRenderedFrozenPreview(localId: string) {
   const state = previewTerminals.get(localId)
-  if (!state || state.parsedTotal !== state.queuedTotal) return
-  const lines = previewRows(state)
-  if (lines.length === 0) return
+  if (!state || !state.ready || state.parsedTotal !== state.queuedTotal) return
   const now = Date.now()
   if (now - (previewFrozenLastPersist.get(localId) ?? 0) < PREVIEW_FROZEN_MIN_MS) return
   previewFrozenLastPersist.set(localId, now)
   try {
-    localStorage.setItem(PREVIEW_FROZEN_PREFIX + localId, lines.join("\n"))
+    if (sameDims(state.dims, previewDimsFor(localId))) {
+      // v2: the emulator runs at exactly the interesting grid (nothing was
+      // capped), so its buffer IS the round-trippable screen — persist it
+      // with the grid header so a reload rebuilds the same layout.
+      const lines = previewRows(state)
+      if (lines.length > 0) {
+        localStorage.setItem(
+          PREVIEW_FROZEN_SCREEN_PREFIX + localId,
+          `still-frozen:1 ${state.dims.cols}x${state.dims.rows}\n${lines.join("\n")}`,
+        )
+      }
+    } else {
+      // Capped geometry (enormous live window): the emulator saw the tail of
+      // an even larger line set, so a grid-anchored snapshot would claim a
+      // layout the buffer never held. Keep the plain-text tail instead.
+      persistFrozenPreview(localId, snapshotPreviewLines(localId, 4))
+    }
   } catch {
     // Private mode / quota: the in-memory emulator still serves the card.
   }
@@ -398,7 +549,7 @@ function pushTranscript(localId: string, data: number[]) {
   // Keep the headless emulator in lockstep with the raw stream. Its callback
   // is the point at which the active buffer is safe to read; card listeners
   // are notified there rather than displaying a half-parsed frame.
-  syncPreviewTerminal(localId)
+  syncPreviewTerminal(localId, previewFontSize(localId))
   requestPreviewUpdate(localId)
 }
 
@@ -415,18 +566,24 @@ export function transcriptSnapshot(localId: string): Uint8Array {
  */
 export function snapshotPreviewScreen(
   localId: string,
-  maxRows = PREVIEW_ROWS,
-  maxCols = PREVIEW_COLS,
+  fontSize = 14,
 ): string[] | null {
   try {
-    const state = syncPreviewTerminal(localId)
+    const state = syncPreviewTerminal(localId, fontSize)
     if (!state) return null
+    // A rebuild is still parsing its replay: null lets the card keep the
+    // frozen/plain fallback instead of flashing the stale or blank frame
+    // that the new emulator holds before the write callback lands.
+    if (!state.ready) {
+      requestPreviewUpdate(localId)
+      return null
+    }
     if (state.parsedTotal !== state.queuedTotal) {
       // Keep showing the last parsed screen while a new frame is queued;
       // never fall back to raw stream text during that small window.
       requestPreviewUpdate(localId)
     }
-    return previewRows(state, maxRows, maxCols)
+    return previewRows(state)
   } catch {
     // A preview must never take down the workspace if xterm cannot initialize
     // in an unusual WebView/runtime. The stripped text path remains available.
@@ -527,24 +684,73 @@ function persistFrozenPreview(localId: string, lines: string[]) {
   }
 }
 
-/** Frozen snapshot lines, if any (disconnect + reload safe). */
-export function frozenPreview(localId: string): string[] | null {
-  try {
-    const rendered = localStorage.getItem(PREVIEW_FROZEN_PREFIX + localId)
-    if (rendered) {
-      const screenLines = rendered.split("\n")
-      while (screenLines.length > 0 && screenLines[screenLines.length - 1] === "") {
-        screenLines.pop()
+/** Frozen screen snapshot: lines plus the grid they were laid out in. */
+export interface FrozenScreen {
+  cols: number
+  rows: number
+  lines: string[]
+}
+
+function parseFrozenScreen(rendered: string): FrozenScreen | null {
+  // v2: "still-frozen:1 <cols>x<rows>\n<lines…>". The header keeps the
+  // reloaded preview in the same geometry the session rendered at.
+  const nl = rendered.indexOf("\n")
+  const header = nl === -1 ? "" : rendered.slice(0, nl)
+  const body = nl === -1 ? "" : rendered.slice(nl + 1)
+  if (header.startsWith("still-frozen:1 ")) {
+    const dimsText = header.slice("still-frozen:1 ".length)
+    const m = /^(\d+)x(\d+)$/.exec(dimsText)
+    if (m) {
+      const lines = body.split("\n")
+      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+      if (lines.length > 0) {
+        const dims = clampPreviewDims(Number(m[1]), Number(m[2]))
+        return { cols: dims.cols, rows: dims.rows, lines }
       }
-      if (screenLines.length > 0) return screenLines
+      return null
+    }
+  }
+  // v1 (legacy plain text) and anything unheadered: classic 80x24 fallback.
+  const lines = rendered.split("\n")
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+  if (lines.length === 0) return null
+  return { cols: PREVIEW_COLS, rows: PREVIEW_ROWS, lines }
+}
+
+/** Frozen screen snapshot, if any (disconnect + reload safe). */
+export function frozenPreview(localId: string): FrozenScreen | null {
+  try {
+    const rendered = localStorage.getItem(PREVIEW_FROZEN_SCREEN_PREFIX + localId)
+    if (rendered) {
+      const parsed = parseFrozenScreen(rendered)
+      if (parsed) return parsed
+    }
+    const legacy = localStorage.getItem(PREVIEW_FROZEN_PREFIX + localId)
+    if (legacy) {
+      const parsed = parseFrozenScreen(legacy)
+      if (parsed) return parsed
     }
     const raw = localStorage.getItem(FROZEN_PREFIX + localId)
     if (!raw) return null
     const lines = raw.split("\n").filter((l) => l.length > 0)
-    return lines.length > 0 ? lines : null
+    return lines.length > 0
+      ? { cols: PREVIEW_COLS, rows: PREVIEW_ROWS, lines }
+      : null
   } catch {
     return null
   }
+}
+
+// Test-only persistence hook for the frozen-snapshot assertions. It forces
+// one persist past the production 2s throttle by nudging ONLY the gate
+// timestamp; the write itself still runs the real readiness checks.
+export function __testPersistFrozenNow(localId: string) {
+  const state = previewTerminals.get(localId)
+  if (!state || !state.ready) return
+  state.queuedTotal = transcripts.get(localId)?.totalBytes ?? state.queuedTotal
+  state.parsedTotal = state.queuedTotal
+  previewFrozenLastPersist.delete(localId)
+  persistRenderedFrozenPreview(localId)
 }
 
 export function discardFrozenPreview(localId: string) {
@@ -553,6 +759,7 @@ export function discardFrozenPreview(localId: string) {
   try {
     localStorage.removeItem(FROZEN_PREFIX + localId)
     localStorage.removeItem(PREVIEW_FROZEN_PREFIX + localId)
+    localStorage.removeItem(PREVIEW_FROZEN_SCREEN_PREFIX + localId)
   } catch {
     // Ignore.
   }
@@ -967,6 +1174,10 @@ export async function releaseSession(localId: string): Promise<void> {
   }
   sessionDataListeners.delete(localId)
   clearTranscript(localId)
+  // Explicit removal drops the remembered geometry too. Plain disconnects
+  // keep it: the frozen card must still render at the last real layout.
+  surfaceDims.delete(localId)
+  persistDimsSoon()
   transcriptVersions.delete(localId)
   transcriptListeners.delete(localId)
   // Explicit removal drops the frozen card snapshot too. Disconnects

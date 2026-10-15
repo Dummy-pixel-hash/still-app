@@ -10,6 +10,13 @@ import {
 
 export type CardConn = ConnState | "never"
 
+/** Height of the miniature screen viewport; the terminal grid is scaled
+ *  to fit inside this box (width comes from the card layout). */
+const PREVIEW_VIEWPORT_HEIGHT = 104
+// The fit is measured for a card at its max grid width; a slightly smaller
+// scale keeps the clamped geometry (e.g. 120 cols) inside the viewport.
+const PREVIEW_FIT_MARGIN = 0.98
+
 const statusMeta: Record<CardConn,
   { label: string; dot: string; pulse: boolean }
 > = {
@@ -44,59 +51,107 @@ const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
 /**
  * Card preview state: rows from a headless xterm screen emulator while live,
- * with plain-text snapshots as a safe fallback after disconnect/reload.
+ * with plain-text snapshots as a safe fallback after disconnect/reload. The
+ * screen rows carry the (capped) grid they were laid out in so the card can
+ * reproduce the real terminal's line wrapping instead of reflowing.
  */
 type PreviewState =
   | { kind: "screen"; lines: string[] }
+  | { kind: "frozen"; lines: string[]; cols: number; rows: number }
   | { kind: "lines"; lines: string[] }
   | { kind: "none" }
 
-function usePreviewLines(sessionId: string): PreviewState {
+function usePreview(sessionId: string, fontSize: number): PreviewState {
   // Hook order must stay stable: always subscribe, even when only the
   // persisted snapshot exists.
   const version = useTranscriptVersion(sessionId)
   return useMemo(() => {
     // Read the parsed xterm buffer first. This is the faithful path for both
     // ordinary shell output and fullscreen alternate-screen applications.
-    const screen = snapshotPreviewScreen(sessionId)
+    const screen = snapshotPreviewScreen(sessionId, fontSize)
     // A parsed but blank screen is still a valid terminal screen. Do not
     // fall back to stream fragments for a cleared/TUI screen.
     if (screen !== null) return { kind: "screen", lines: screen }
 
     // If xterm is unavailable, retain a safe plain-text fallback rather than
-    // exposing raw escape sequences.
+    // exposing raw escape sequences. The frozen snapshot wins over the live
+    // tail because it survives reloads with its original geometry.
+    const frozen = frozenPreview(sessionId)
+    if (frozen && frozen.lines.length > 0)
+      return {
+        kind: "frozen",
+        lines: frozen.lines,
+        cols: frozen.cols,
+        rows: frozen.rows,
+      }
     const live = snapshotPreviewLines(sessionId)
     if (live.length > 0) return { kind: "lines", lines: live }
-    const frozen = frozenPreview(sessionId)
-    if (frozen && frozen.length > 0) return { kind: "lines", lines: frozen }
     return { kind: "none" }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, version])
+  }, [sessionId, fontSize, version])
 }
 
 /**
- * Live miniature screen: the real headless xterm DOM, scaled down with
- * CSS. Same bytes as the main terminal, full colors + TUIs, zero PTY
- * traffic. Falls back to null when no screen exists yet (caller shows
- * IdlePreview) — never unmounts the terminal, just detaches the host.
+ * Live miniature screen: the real headless xterm DOM, laid out at the
+ * session's (capped) live grid and shrunk with a CSS transform to fit the
+ * viewport, so wraps, TUIs and cursor addressing match the full overlay.
+ * Falls back to null when no screen exists yet (caller shows the frozen
+ * snapshot or IdlePreview) — never unmounts the terminal, just detaches
+ * the host (openPreview re-homes the element on remount).
  */
-function LiveScreen({ sessionId, frozen }: { sessionId: string; frozen: boolean }) {
+function LiveScreen({
+  sessionId,
+  fontSize,
+}: {
+  sessionId: string
+  fontSize: number
+}) {
   const hostRef = useRef<HTMLDivElement>(null)
-  // Re-run when parsed frames land: terminal rebuilds (ring wrap) create
-  // a NEW instance, and xterm open() is a no-op on an already-opened
-  // instance — so a stale host keeps the dead canvas without this.
+  // Re-run when parsed frames land: terminal rebuilds (geometry change, ring
+  // wrap) create a NEW instance, and xterm open() is a no-op on an
+  // already-opened instance — so a stale host keeps the dead DOM without this.
   const version = useTranscriptVersion(sessionId)
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    openPreview(sessionId, host)
+    // The card grid clips overflow, so measure the fitted width against the
+    // widest column the layout allows (preview never exceeds the real cols,
+    // so the clamp and the fit stay consistent).
+    const grid = host.closest("[data-card-grid]") as HTMLElement | null
+    const measure = () => {
+      const screen = host.querySelector<HTMLElement>(".xterm-screen")
+      if (!screen) return
+      const sw = screen.offsetWidth
+      const sh = screen.offsetHeight
+      if (sw <= 0 || sh <= 0) return
+      const fitW = grid?.clientWidth ?? host.clientWidth
+      const s = Math.max(
+        0.05,
+        Math.min(PREVIEW_VIEWPORT_HEIGHT / sh, fitW / sw) * PREVIEW_FIT_MARGIN,
+      )
+      screen.style.transform = `scale(${s})`
+    }
+    openPreview(sessionId, host, fontSize)
+    measure()
+    const ro =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure)
+    if (ro) {
+      ro.observe(host)
+      if (grid) ro.observe(grid)
+      // Re-fit when the grid itself relayouts (webfont metrics landing, a
+      // replayed frame changing the row set). scale() changes no layout
+      // box, so this cannot feed back into itself.
+      const screen = host.querySelector<HTMLElement>(".xterm-screen")
+      if (screen) ro.observe(screen)
+    }
+    return () => ro?.disconnect()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, version])
+  }, [sessionId, fontSize, version])
   return (
     <div
       ref={hostRef}
       aria-hidden
-      className={`card-term pointer-events-none overflow-hidden select-none ${frozen ? "opacity-70" : ""}`}
+      className="card-term pointer-events-none overflow-hidden select-none"
     />
   )
 }
@@ -109,7 +164,7 @@ function IdlePreview({ session }: { session: Session }) {
   rows.push(`tmux ${session.tmuxSession}`)
   rows.push("$ _")
   return (
-    <div className="space-y-1">
+    <div className="card-mini text-[#b0aab8]">
       {rows.map((line, i) => (
         <div key={i} className="truncate whitespace-pre">
           {line}
@@ -123,6 +178,7 @@ export default function SessionCard({
   session,
   conn,
   index,
+  fontSize,
   dragging,
   dropHighlight,
   menuOpen,
@@ -135,6 +191,7 @@ export default function SessionCard({
   session: Session
   conn: CardConn
   index: number
+  fontSize: number
   dragging: boolean
   dropHighlight: boolean
   menuOpen: boolean
@@ -244,7 +301,7 @@ export default function SessionCard({
           <span className="truncate">{session.host || "—"}</span>
         </div>
 
-        <CardPreview session={session} live={live} />
+        <CardPreview session={session} live={live} fontSize={fontSize} />
 
         <div className="mt-3 flex items-center justify-between text-[11px] text-faint">
           <span className="truncate font-mono text-[10px]">
@@ -304,11 +361,20 @@ export default function SessionCard({
  * when the session never produced output.
  */
 
-function CardPreview({ session, live }: { session: Session; live: boolean }) {
-  // Live DOM screen: the real emulator DOM, always mounted when bytes
-  // exist. Text snapshot only as fallback (xterm unavailable / cleared
-  // terminal disposal); idle placeholder when nothing ever rendered.
-  const preview = usePreviewLines(session.id)
+function CardPreview({
+  session,
+  live,
+  fontSize,
+}: {
+  session: Session
+  live: boolean
+  fontSize: number
+}) {
+  // Live DOM screen: the real emulator DOM at the session's laid-out grid,
+  // always mounted when bytes exist. Frozen/plain snapshots only when the
+  // emulator is unavailable (never ran, cleared, dispose) and the idle
+  // placeholder when nothing ever rendered.
+  const preview = usePreview(session.id, fontSize)
   return (
     <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
@@ -326,11 +392,27 @@ function CardPreview({ session, live }: { session: Session; live: boolean }) {
           </span>
         ) : null}
       </div>
-      <div className="px-3 py-2 text-[10px] leading-[1.65] text-[#b0aab8]">
+      <div
+        className="card-preview-body relative flex items-center justify-center overflow-hidden px-2"
+        style={{ height: PREVIEW_VIEWPORT_HEIGHT }}
+      >
         {preview.kind === "screen" ? (
-          <LiveScreen sessionId={session.id} frozen={!live} />
+          <LiveScreen sessionId={session.id} fontSize={fontSize} />
+        ) : preview.kind === "frozen" ? (
+          <div
+            className="card-mini text-[#b0aab8]"
+            data-cols={preview.cols}
+            data-rows={preview.rows}
+            aria-hidden
+          >
+            {preview.lines.map((line, i) => (
+              <div key={i} className="truncate whitespace-pre">
+                {line}
+              </div>
+            ))}
+          </div>
         ) : preview.kind === "lines" ? (
-          <div className={`space-y-1 ${live ? "" : "opacity-70"}`} aria-hidden>
+          <div className="card-mini text-[#b0aab8]" aria-hidden>
             {preview.lines.map((line, i) => (
               <div key={i} className="truncate whitespace-pre">
                 {line}

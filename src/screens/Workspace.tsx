@@ -744,6 +744,7 @@ export default function Workspace() {
                   </p>
                 ) : (
                   <div
+                    data-card-grid
                     className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
                   >
                     {sessions.map((s, i) => (
@@ -766,6 +767,7 @@ export default function Workspace() {
                               : connectionState(s.id)
                           }
                           index={i}
+                          fontSize={store.settings.terminal.fontSize}
                           dragging={dragId === s.id}
                           dropHighlight={
                             dropProject === project.id &&

@@ -99,16 +99,39 @@ body,
   margin-right: auto;
 }
 
-/* Card preview: real headless xterm DOM scaled to fit. */
+/* Card preview: the real headless xterm DOM, laid out at the session's
+   live grid and scaled to fit the card viewport (LiveScreen measures the
+   screen element and sets the transform). The host fills the fixed-height
+   viewport so the flex parent can center the shrunken screen; absolute
+   positioning keeps the terminal box out of that flow. Text centering
+   rules from the main surface (theme above) also apply here, which is why
+   the left edge is zeroed for the miniature. */
 .card-term {
-  height: 104px;
-  font-size: 5px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  flex: none;
+}
+.card-term .xterm {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.card-term .xterm .xterm-screen,
+.card-term.xterm .xterm-screen {
+  margin: 0;
+  transform-origin: top left;
 }
 .card-term .xterm-viewport {
   overflow: hidden;
 }
-.card-term canvas {
-  width: 100% !important;
+
+/* Plain-text fallback (frozen snapshot / idle placeholder): sized to read
+   as a miniature of the screen path, not as full-size terminal text. */
+.card-mini {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .grain::after {
