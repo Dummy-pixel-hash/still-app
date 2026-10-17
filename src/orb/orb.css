@@ -1,0 +1,82 @@
+/* Scoped companion styles. Never make the workspace or terminal transparent. */
+html.still-orb-window,
+html.still-orb-window body,
+html.still-orb-window #root {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  color-scheme: dark;
+}
+.orb-window-surface { display: grid; place-items: center; width: 100%; height: 100%; background: transparent; }
+.smoked-glass { position: relative; display: inline-block; flex: none; pointer-events: none; }
+.smoked-glass-host { position: absolute; inset: -20%; display: block; }
+.smoked-glass-canvas { display: block; width: 100%; height: 100%; }
+/* Only a last resort when neither WebGL nor Canvas2D can draw. */
+.smoked-glass-host[data-renderer="css"]::before {
+  content: ""; position: absolute; inset: 14.3%; border-radius: 50%;
+  background: radial-gradient(ellipse at 35% 17%, #c2cede 0, transparent 15%), radial-gradient(ellipse at 50% 53%, #b7b4ed 0, #5d7ac3 8%, #101827 27%, #070b14 62%);
+  border: 1px solid #8a96aa;
+}
+.orb-button {
+  --orb-signal: #b4bfd2;
+  position: relative; display: grid; place-items: center; flex: none;
+  border: 0; border-radius: 50%; padding: 0; background: transparent;
+  color: var(--orb-signal); cursor: grab; touch-action: none; user-select: none;
+  outline: 0; -webkit-app-region: no-drag;
+}
+.orb-button:active { cursor: grabbing; }
+.orb-button:focus-visible { outline: 2px solid #d9e2fa; outline-offset: 5px; }
+/* WebKit retains :focus-visible after its native window loses focus. */
+.orb-window-surface[data-window-focused="false"] .orb-button:focus-visible { outline: none; }
+.orb-button:hover .orb-state-mark { background: #252b36; }
+.orb-button[data-state="working"] { --orb-signal: #a9baff; }
+.orb-button[data-state="needs-input"] { --orb-signal: #f0bc78; }
+.orb-button[data-state="error"] { --orb-signal: #f2a0a6; }
+.orb-button[data-state="done"] { --orb-signal: #a1d6b5; }
+.orb-state-mark {
+  position: absolute; right: -2px; bottom: 0; width: 18px; height: 18px;
+  display: grid; place-items: center; border-radius: 50%; background: #131821;
+  color: var(--orb-signal); pointer-events: none;
+}
+.orb-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.orb-preview { position: fixed; z-index: 55; }
+.orb-preview-label {
+  pointer-events: none; position: absolute; left: 50%; top: calc(100% + 10px); transform: translateX(-50%);
+  padding: 3px 6px; border-radius: 4px; background: #131821; color: #c2c9d6;
+  font: 11px/1.4 var(--font-sans); white-space: nowrap;
+}
+.orb-preview-menu {
+  position: fixed; z-index: 75; width: min(288px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px); overflow: auto; padding: 6px;
+  border-radius: 12px; background: #1b1c22; color: #e2dce5;
+  box-shadow: 0 12px 36px #0008; font: 13px/1.4 var(--font-sans);
+}
+.orb-preview-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 6px; text-align: left; color: inherit; background: transparent; cursor: pointer; }
+.orb-preview-menu button:hover, .orb-preview-menu button:focus-visible { background: #33343e; outline: none; }
+.orb-preview-menu button:active { background: #41434f; }
+.orb-menu-session { min-width: 0; display: grid; gap: 2px; }
+.orb-menu-session strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.orb-menu-session > span { font-size: 12px; color: #b8b8c5; }
+.orb-menu-note { margin: 0; padding: 8px 10px; font-size: 12px; color: #b8b8c5; }
+.orb-menu-separator { height: 1px; margin: 5px 6px; background: #393941; }
+.orb-settings { margin-top: 24px; }
+.orb-settings-heading { font: 500 13px/1.4 var(--font-sans); color: #e2dce5; }
+.orb-settings-intro { display: flex; align-items: center; gap: 20px; margin-top: 12px; }
+.orb-settings-material { display: grid; place-items: center; width: 92px; min-width: 92px; height: 104px; gap: 6px; }
+.orb-settings-material figcaption { font-size: 10px; color: #aaa3ad; white-space: nowrap; }
+.orb-settings-copy { font-size: 12px; line-height: 1.6; color: #aaa3ad; max-width: 42ch; }
+.orb-settings-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #e2dce5; }
+.orb-settings input { accent-color: #ff4a4a; }
+.orb-settings-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; margin-top: 16px; }
+.orb-settings-controls > label { display: grid; gap: 6px; color: #aaa3ad; font-size: 12px; }
+.orb-settings-controls select { width: 92px; border: 1px solid #39333b; border-radius: 8px; background-color: #111116; padding: 6px 26px 6px 8px; color: #e2dce5; font-size: 13px; color-scheme: dark; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%23d6d0d9' stroke-width='1.3'%3E%3Cpath d='m3 4.5 3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; }
+.orb-settings-controls .orb-motion-label { display: flex; align-items: center; min-height: 34px; gap: 7px; color: #e2dce5; }
+.orb-settings-button { min-height: 34px; padding: 6px 12px; border: 1px solid #39333b; border-radius: 999px; font-size: 12px; color: #d6d0d9; background: transparent; cursor: pointer; }
+.orb-settings-button:hover:not(:disabled) { background: #27242b; }
+.orb-settings-button:focus-visible, .orb-settings select:focus-visible, .orb-settings input:focus-visible { outline: 2px solid #f0b1b1; outline-offset: 3px; }
+.orb-settings-button:disabled { opacity: .45; cursor: not-allowed; }
+.orb-settings-status { margin-top: 10px; color: #b8b1bc; font-size: 12px; line-height: 1.5; }
+.orb-settings-error { color: #f2a0a6; }

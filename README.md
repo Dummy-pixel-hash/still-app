@@ -53,6 +53,11 @@ the shell, touchpad scrolling that keeps its magnitude, `Ctrl+Shift+C` /
 (paste at a shell prompt, then “Insert into agent” to drop the path into
 Claude Code, Codex, OpenCode or Pi).
 
+**Smoked-glass companion** — an opt-in floating orb with connection activity,
+credential/host-key attention, and one-click return to Still. Enable it in
+**Settings → Orb companion**. Agent-specific approval/completion detection is
+not wired yet; silence never means “done.” See [orb behavior and verification](ORB.md).
+
 **Safe by default** — passwords and keys live in the OS keyring, never in
 app storage. Unknown hosts need an explicit Trust; changed host keys are
 refused, never silently overwritten.

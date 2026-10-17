@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
+import type { OrbAction, OrbSnapshot } from "../orb/types"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -13,6 +14,14 @@ import type {
 
 const textEncoder = new TextEncoder()
 
+// Serialize main-window publications/configuration even across StrictMode remounts.
+let orbMutations: Promise<unknown> = Promise.resolve()
+function serializeOrb<T>(operation: () => Promise<T>): Promise<T> {
+  const next = orbMutations.then(operation, operation)
+  orbMutations = next.catch(() => {})
+  return next
+}
+
 /**
  * Production adapter: forwards calls over Tauri IPC to the Rust SSH/tmux
  * engine, and routes `still://session-event/<id>` events back to subscribers.
@@ -21,6 +30,26 @@ const textEncoder = new TextEncoder()
 export const tauriBridge: NativeBridge = {
   adapterName: "Tauri native bridge",
   isDevelopmentAdapter: false,
+
+  orbConfigure(preferences) {
+    return serializeOrb(() => invoke<OrbSnapshot>("still_orb_configure", { preferences }))
+  },
+  orbPublish(rows) {
+    return serializeOrb(() => invoke<void>("still_orb_publish", { rows }))
+  },
+  orbSnapshot() { return invoke<OrbSnapshot>("still_orb_snapshot") },
+  subscribeOrbSnapshot(callback) {
+    return listen<OrbSnapshot>("still://orb-state", event => callback(event.payload))
+  },
+  subscribeOrbActions(callback) {
+    return listen<OrbAction>("still://orb-action", event => callback(event.payload))
+  },
+  orbCommand(command) {
+    // Pointer-down focus must finish before its click/open or drag action.
+    // Tauri dispatches async commands concurrently otherwise, allowing a late
+    // focus response to pull focus back from the restored main window.
+    return serializeOrb(() => invoke<void>("still_orb_command", { command }))
+  },
 
   async ping() {
     // DIAG-ONLY: startup IPC health check ("can the packaged WebView

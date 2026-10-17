@@ -1,4 +1,5 @@
 import type { ConnectionStatus } from "../types"
+import type { OrbBridge } from "../orb/types"
 
 /**
  * Bitmap-only clipboard fallback: paste events sometimes carry no file item
@@ -142,7 +143,7 @@ export interface StatusResult {
  * Secrets cross this boundary per-call only and are never stored in JS
  * (except transient connect-time form state, cleared after use).
  */
-export interface NativeBridge {
+export interface NativeBridge extends OrbBridge {
   readonly adapterName: string
   readonly isDevelopmentAdapter: boolean
 
@@ -213,6 +214,12 @@ export function registerNativeBridge(bridge: NativeBridge) {
 export const failingBridge: NativeBridge = {
   adapterName: "No native runtime (packaging error)",
   isDevelopmentAdapter: false,
+  async orbConfigure() { throw new Error("No native runtime: orb companion unavailable.") },
+  async orbPublish() { throw new Error("No native runtime: orb companion unavailable.") },
+  async orbSnapshot() { throw new Error("No native runtime: orb companion unavailable.") },
+  async subscribeOrbSnapshot() { throw new Error("No native runtime: orb companion unavailable.") },
+  async subscribeOrbActions() { throw new Error("No native runtime: orb companion unavailable.") },
+  async orbCommand() { throw new Error("No native runtime: orb companion unavailable.") },
   async ping(): Promise<{ status: string; app: string; version: string }> {
     throw new Error(
       "Still production bundle has no Tauri native runtime: " +

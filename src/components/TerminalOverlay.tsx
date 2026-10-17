@@ -24,6 +24,8 @@ export interface OpenState {
   session: Session
   rect: DOMRect
   phase: "enter" | "open" | "exit"
+  /** Companion activation observes an existing session; never reconnects it. */
+  autoConnect?: boolean
 }
 
 interface AuthPrompt {
@@ -333,7 +335,7 @@ export default function TerminalOverlay({
   // means this overlay must NOT start a second attempt. No delays involved.
   const autoTried = useRef<string | null>(null)
   useEffect(() => {
-    if (settled && full && session && connectionState(session.id) === "disconnected" && !isConnectPending(session.id) && !busy && autoTried.current !== session.id) {
+    if (open?.autoConnect !== false && settled && full && session && connectionState(session.id) === "disconnected" && !isConnectPending(session.id) && !busy && autoTried.current !== session.id) {
       autoTried.current = session.id
       void doConnect()
     }

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { nativeBridge } from "../bridge/nativeBridge"
+import OrbSettings from "../orb/OrbSettings"
+import type { OrbPublisherState } from "../orb/publisher"
 import {
   addKey,
   removeKey,
@@ -64,7 +66,9 @@ export default function SettingsSheet({
   onClose,
   keyTextCache,
   onKeyText,
+  orbRuntime,
 }: {
+  orbRuntime: OrbPublisherState & { retry(): void }
   onClose: () => void
   keyTextCache: Map<string, string>
   onKeyText: (keyId: string, text: string | null) => void
@@ -192,6 +196,8 @@ export default function SettingsSheet({
             cursorStyle={store.settings.terminal.cursorStyle}
           />
         </section>
+
+        <OrbSettings preferences={store.settings.orb} runtime={orbRuntime} />
 
         <section className="mt-6">
           <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-faint">

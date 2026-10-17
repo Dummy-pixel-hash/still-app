@@ -1,7 +1,6 @@
 import "./styles/theme.css"
-import React from "react"
+import React, { lazy, Suspense } from "react"
 import ReactDOM from "react-dom/client"
-import App from "./App"
 import { failingBridge, registerNativeBridge } from "./bridge/nativeBridge"
 import { mockBridge } from "./bridge/mockBridge"
 import { tauriBridge } from "./bridge/tauriBridge"
@@ -35,8 +34,15 @@ if (isTauriRuntime()) {
   registerNativeBridge(mockBridge)
 }
 
+// The companion gets its own root: it never mounts a workspace/session owner.
+const orbEntry = new URLSearchParams(window.location.search).get("orb") === "1"
+document.documentElement.classList.toggle("still-orb-window", orbEntry)
+const Root = orbEntry
+  ? lazy(() => import("./screens/OrbScreen"))
+  : lazy(() => import("./App"))
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <Suspense fallback={null}><Root /></Suspense>
   </React.StrictMode>,
 )

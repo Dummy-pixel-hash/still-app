@@ -6,6 +6,7 @@
 // transient connect-time state and the OS keyring (native side).
 
 import { useCallback, useEffect, useState } from "react"
+import { DEFAULT_ORB_PREFERENCES, normalizeOrbPreferences } from "../orb/state"
 import {
   blankDraft,
   newSessionId,
@@ -31,6 +32,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   confirmRemove: true,
   terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 },
   imageInsertStyle: "path",
+  orb: { ...DEFAULT_ORB_PREFERENCES },
 }
 
 function seed(): StoreShape {
@@ -93,7 +95,12 @@ function load(): StoreShape {
         : [],
       order: parsed.order ?? {},
       keys: Array.isArray(parsed.keys) ? parsed.keys : [],
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...(parsed.settings ?? {}),
+        // Deleted legacy orb settings never re-enable the new companion.
+        orb: normalizeOrbPreferences(parsed.settings?.orb),
+      },
     }
   } catch {
     return seed()
@@ -341,7 +348,9 @@ export function removeKey(id: string) {
 
 export function updateSettings(patch: Partial<AppSettings>) {
   const store = getStore()
-  persist({ ...store, settings: { ...store.settings, ...patch } })
+  const settings = { ...store.settings, ...patch }
+  if ("orb" in patch) settings.orb = normalizeOrbPreferences(patch.orb)
+  persist({ ...store, settings })
   notify()
 }
 

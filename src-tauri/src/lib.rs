@@ -4,6 +4,7 @@
 //! one worker task per session id, Tauri events back to the renderer.
 
 mod commands;
+mod orb;
 pub mod core;
 pub mod diag;
 pub mod hostkeys;
@@ -83,9 +84,11 @@ fn tune_windows_frame(window: &tauri::WebviewWindow) {
 pub fn run() {
     // DIAG-ONLY: first native record — proves the diagnostic build runs.
     crate::diag::app_start();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
+        .manage(orb::OrbState::default())
+        .on_window_event(orb::on_window_event)
         .setup(|_app| {
             #[cfg(target_os = "windows")]
             {
@@ -95,9 +98,16 @@ pub fn run() {
                 }
             }
             Ok(())
-        })
+        });
+    #[cfg(desktop)]
+    let builder = builder.on_menu_event(orb::on_menu_event);
+    builder
         .invoke_handler(tauri::generate_handler![
             still_ping,
+            orb::still_orb_configure,
+            orb::still_orb_publish,
+            orb::still_orb_snapshot,
+            orb::still_orb_command,
             commands::still_connect,
             commands::still_write,
             commands::still_resize,

@@ -9,6 +9,8 @@ import RemoveProjectDialog from "../components/RemoveProjectDialog"
 import SettingsSheet from "../components/SettingsSheet"
 import RemoveDialog from "../components/RemoveDialog"
 import AuthDialog from "../components/AuthDialog"
+import BrowserOrbPreview from "../orb/BrowserOrbPreview"
+import { useOrbPublisher } from "../orb/useOrbPublisher"
 import {
   createProject,
   createSession,
@@ -106,12 +108,15 @@ export default function Workspace() {
 
   useEffect(() => () => window.clearTimeout(closeTimer.current), [])
 
-  const openSession = useCallback((s: Session, el: HTMLElement) => {
-    returnTarget.current = el
+  const openSession = useCallback((s: Session, el: HTMLElement | null, autoConnect = true) => {
+    returnTarget.current = el ?? searchRef.current
     window.clearTimeout(closeTimer.current)
     touchSession(s.id)
-    const rect = el.getBoundingClientRect()
-    setOpen({ session: s, rect, phase: "enter" })
+    const rect = el?.getBoundingClientRect() ?? new DOMRect(
+      window.innerWidth / 2 - Math.min(320, window.innerWidth - 32) / 2,
+      Math.max(32, window.innerHeight / 2 - 90), Math.min(320, window.innerWidth - 32), 180,
+    )
+    setOpen({ session: s, rect, phase: "enter", autoConnect })
     requestAnimationFrame(() =>
       requestAnimationFrame(() =>
         setOpen((o) => (o ? { ...o, phase: "open" } : o)),
@@ -148,11 +153,11 @@ export default function Workspace() {
   }, [])
 
   // Center/pill-origin morph for the temp overlay (it has no card).
-  const morphTemp = (s: Session, el: HTMLElement | null) => {
+  const morphTemp = (s: Session, el: HTMLElement | null, autoConnect = true) => {
     const rect =
       el?.getBoundingClientRect() ??
       new DOMRect(window.innerWidth / 2 - 360, window.innerHeight - 200, 720, 120)
-    setTempOpen({ session: s, rect, phase: "enter" })
+    setTempOpen({ session: s, rect, phase: "enter", autoConnect })
     requestAnimationFrame(() =>
       requestAnimationFrame(() =>
         setTempOpen((o) => (o && o.session.id === s.id ? { ...o, phase: "open" } : o)),
@@ -554,6 +559,34 @@ export default function Workspace() {
     [openSession],
   )
 
+  const orbRuntime = useOrbPublisher(
+    temp ? [...store.sessions, temp] : store.sessions,
+    authFor?.session.id ?? null,
+    store.settings.orb,
+    (sessionId) => {
+      // Bringing Still forward must never discard a draft or strand an auth promise.
+      if (authForRef.current || showSettings || showNew || showNewProject || editing || removing || removingProject) {
+        document.querySelector<HTMLElement>('[role="dialog"] input, [role="dialog"] button')?.focus()
+        return
+      }
+      if (!sessionId) return
+      const focusTerminal = () => document.getElementById(`still-term-${sessionId}`)?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
+      if (temp?.id === sessionId) {
+        if (!tempOpen || tempOpen.phase === "exit") morphTemp(temp, document.getElementById("temp-pill"), false)
+        else requestAnimationFrame(focusTerminal)
+        return
+      }
+      const session = store.sessions.find(s => s.id === sessionId)
+      if (!session) return
+      if (open?.session.id === sessionId && open.phase !== "exit") { requestAnimationFrame(focusTerminal); return }
+      setQ("")
+      const card = document.querySelector<HTMLElement>(`[data-card="${CSS.escape(sessionId)}"]`)
+      // No auto-connect here: even a disconnect racing the morph only opens the
+      // existing session view. It cannot create another SSH attempt from the orb.
+      openSession(session, card, false)
+    },
+  )
+
   return (
     <div className="grain relative flex h-full flex-col overflow-hidden rounded-lg bg-ink text-fg ring-1 ring-white/10">
       <div
@@ -585,7 +618,7 @@ export default function Workspace() {
                 Still <span className="italic text-dim">workspace</span>
               </h1>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto">
               <div className="relative">
                 <input
                   ref={searchRef}
@@ -950,8 +983,11 @@ export default function Workspace() {
         />
       ) : null}
 
+      {nativeBridge.isDevelopmentAdapter ? <BrowserOrbPreview /> : null}
+
       {showSettings ? (
         <SettingsSheet
+          orbRuntime={orbRuntime}
           onClose={() => setShowSettings(false)}
           keyTextCache={keyTextCache}
           onKeyText={(id, text) => {

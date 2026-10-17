@@ -1,5 +1,7 @@
 // Still M2 — product session/project model.
 
+import type { OrbPreferences } from "../orb/types"
+
 export type ConnectionStatus =
   | "disconnected"
   | "connecting"
@@ -70,6 +72,7 @@ export interface AppSettings {
   confirmRemove: boolean
   terminal: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
+  orb: OrbPreferences
 }
 
 /** Key-library entry: metadata only. Secret text lives in the OS keyring. */
