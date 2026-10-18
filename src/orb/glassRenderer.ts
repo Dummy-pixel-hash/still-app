@@ -5,10 +5,10 @@ type RGB = [number, number, number]
 interface Palette { primary: RGB; secondary: RGB; pearl: RGB }
 interface Material extends Palette { speed: number; activity: number }
 const materials: Record<OrbVisualState, Material> = {
-  idle: { speed: 0.13, activity: 0.2, primary: [0.45, 0.51, 0.64], secondary: [0.65, 0.66, 0.76], pearl: [0.84, 0.87, 0.93] },
-  unknown: { speed: 0.1, activity: 0.16, primary: [0.38, 0.46, 0.61], secondary: [0.53, 0.57, 0.69], pearl: [0.76, 0.81, 0.89] },
+  idle: { speed: 0.2, activity: 0.2, primary: [0.45, 0.51, 0.64], secondary: [0.65, 0.66, 0.76], pearl: [0.84, 0.87, 0.93] },
+  unknown: { speed: 0.16, activity: 0.16, primary: [0.38, 0.46, 0.61], secondary: [0.53, 0.57, 0.69], pearl: [0.76, 0.81, 0.89] },
   working: { speed: 1, activity: 1, primary: [0.29, 0.62, 1], secondary: [0.71, 0.48, 0.99], pearl: [0.94, 0.91, 0.83] },
-  "needs-input": { speed: 0.35, activity: 0.65, primary: [1, 0.66, 0.24], secondary: [1, 0.39, 0.23], pearl: [1, 0.93, 0.77] },
+  "needs-input": { speed: 0.45, activity: 0.65, primary: [1, 0.66, 0.24], secondary: [1, 0.39, 0.23], pearl: [1, 0.93, 0.77] },
   done: { speed: 0, activity: 0.28, primary: [0.34, 0.77, 0.59], secondary: [0.37, 0.75, 0.8], pearl: [0.85, 0.97, 0.89] },
   error: { speed: 0, activity: 0.35, primary: [0.97, 0.35, 0.4], secondary: [0.81, 0.34, 0.61], pearl: [1, 0.84, 0.83] },
 }
