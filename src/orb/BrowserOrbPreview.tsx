@@ -22,7 +22,20 @@ export default function BrowserOrbPreview() {
   const [actionError, setActionError] = useState<string | null>(null)
   const reset = useRef(() => {})
   reset.current = () => {
-    setPosition(clampOrbPosition(innerWidth - size - 36, innerHeight - size - 76, innerWidth, innerHeight, size))
+    // The temp-terminal dock owns the bottom-right corner; sit above it when
+    // it is on screen instead of landing underneath (its buttons swallow the
+    // orb's clicks). Fall back to the plain margin when there is no dock.
+    const dock = document.getElementById("temp-pill")
+    const dockH = dock ? dock.getBoundingClientRect().height + 12 : 0
+    setPosition(
+      clampOrbPosition(
+        innerWidth - size - 36,
+        innerHeight - size - 76 - dockH,
+        innerWidth,
+        innerHeight,
+        size,
+      ),
+    )
     setMenu(false)
   }
   useEffect(() => {

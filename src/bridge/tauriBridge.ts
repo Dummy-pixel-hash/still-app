@@ -111,10 +111,10 @@ export const tauriBridge: NativeBridge = {
   },
 
   async write(sessionId: string, data: string | Uint8Array): Promise<void> {
-    const bytes =
-      typeof data === "string"
-        ? Array.from(textEncoder.encode(data))
-        : Array.from(data)
+    // Tauri's IPC replacer already expands a nested Uint8Array into a JSON
+    // number array, so passing it through avoids a second boxed copy per
+    // keystroke (the string branch still has to encode first).
+    const bytes = typeof data === "string" ? textEncoder.encode(data) : data
     await invoke("still_write", { args: { sessionId, data: bytes } })
   },
 

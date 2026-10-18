@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react"
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+} from "react"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
@@ -17,6 +23,24 @@ const PREVIEW_VIEWPORT_HEIGHT = 104
 // scale keeps the clamped geometry (e.g. 120 cols) inside the viewport.
 const PREVIEW_FIT_MARGIN = 0.98
 
+/** Scale the emulator's screen DOM to fit the card viewport. Reads layout
+ *  (offsetWidth/Height), so callers batch it into a frame, not a render. */
+function fitPreview(host: HTMLElement) {
+  const screen = host.querySelector<HTMLElement>(".xterm-screen")
+  if (!screen) return
+  const sw = screen.offsetWidth
+  const sh = screen.offsetHeight
+  if (sw <= 0 || sh <= 0) return
+  // The card grid clips overflow, so fit against the widest column the
+  // layout allows (previews never exceed the real cols, so the clamp and
+  // the fit stay consistent).
+  const grid = host.closest("[data-card-grid]") as HTMLElement | null
+  const fitW = grid?.clientWidth ?? host.clientWidth
+  screen.style.transform = `scale(${Math.max(
+    0.05,
+    Math.min(PREVIEW_VIEWPORT_HEIGHT / sh, fitW / sw) * PREVIEW_FIT_MARGIN,
+  )})`
+}
 const statusMeta: Record<CardConn,
   { label: string; dot: string; pulse: boolean }
 > = {
@@ -27,7 +51,7 @@ const statusMeta: Record<CardConn,
   },
   connecting: {
     label: "Connecting",
-    dot: "bg-[#e8c4a0]",
+    dot: "bg-[#c9c4c0]",
     pulse: true,
   },
   error: {
@@ -61,7 +85,11 @@ type PreviewState =
   | { kind: "lines"; lines: string[] }
   | { kind: "none" }
 
-function usePreview(sessionId: string, fontSize: number): PreviewState {
+function usePreview(
+  sessionId: string,
+  fontSize: number,
+  live: boolean,
+): PreviewState {
   // Hook order must stay stable: always subscribe, even when only the
   // persisted snapshot exists.
   const version = useTranscriptVersion(sessionId)
@@ -74,8 +102,10 @@ function usePreview(sessionId: string, fontSize: number): PreviewState {
     if (screen !== null) return { kind: "screen", lines: screen }
 
     // If xterm is unavailable, retain a safe plain-text fallback rather than
-    // exposing raw escape sequences. The frozen snapshot wins over the live
-    // tail because it survives reloads with its original geometry.
+    // exposing raw escape sequences. Snapshot() returns null mid-rebuild, so
+    // the frozen copy would be the PREVIOUS session's last screen — only
+    // prefer it once the session is actually detached. While connected, the
+    // live tail is the honest thing to show.
     const frozen = frozenPreview(sessionId)
     if (frozen && frozen.lines.length > 0)
       return {
@@ -84,11 +114,11 @@ function usePreview(sessionId: string, fontSize: number): PreviewState {
         cols: frozen.cols,
         rows: frozen.rows,
       }
-    const live = snapshotPreviewLines(sessionId)
-    if (live.length > 0) return { kind: "lines", lines: live }
+    const tail = snapshotPreviewLines(sessionId)
+    if (tail.length > 0) return { kind: "lines", lines: tail }
     return { kind: "none" }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, fontSize, version])
+  }, [sessionId, fontSize, live, version])
 }
 
 /**
@@ -111,30 +141,20 @@ function LiveScreen({
   // wrap) create a NEW instance, and xterm open() is a no-op on an
   // already-opened instance — so a stale host keeps the dead DOM without this.
   const version = useTranscriptVersion(sessionId)
+
+  // Mount-level: open/re-home the emulator DOM and observe the hosts that
+  // decide the fit. Rebuilding this per output frame would disconnect and
+  // re-observe three elements, then force a layout read, on every parsed
+  // burst — once per card.
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
-    // The card grid clips overflow, so measure the fitted width against the
-    // widest column the layout allows (preview never exceeds the real cols,
-    // so the clamp and the fit stay consistent).
     const grid = host.closest("[data-card-grid]") as HTMLElement | null
-    const measure = () => {
-      const screen = host.querySelector<HTMLElement>(".xterm-screen")
-      if (!screen) return
-      const sw = screen.offsetWidth
-      const sh = screen.offsetHeight
-      if (sw <= 0 || sh <= 0) return
-      const fitW = grid?.clientWidth ?? host.clientWidth
-      const s = Math.max(
-        0.05,
-        Math.min(PREVIEW_VIEWPORT_HEIGHT / sh, fitW / sw) * PREVIEW_FIT_MARGIN,
-      )
-      screen.style.transform = `scale(${s})`
-    }
     openPreview(sessionId, host, fontSize)
-    measure()
     const ro =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure)
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => fitPreview(host))
     if (ro) {
       ro.observe(host)
       if (grid) ro.observe(grid)
@@ -144,8 +164,20 @@ function LiveScreen({
       const screen = host.querySelector<HTMLElement>(".xterm-screen")
       if (screen) ro.observe(screen)
     }
+    fitPreview(host)
     return () => ro?.disconnect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, fontSize])
+
+  // Per-frame: a rebuild (geometry change, ring wrap) creates a NEW terminal
+  // instance, and xterm open() is a no-op on an already-opened one — so the
+  // host must be re-homed and the fit recomputed. The observer is NOT rebuilt
+  // here: it already watches the host and grid, so this is one layout read
+  // per parsed frame instead of tearing down and re-observing three elements.
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    openPreview(sessionId, host, fontSize)
+    fitPreview(host)
   }, [sessionId, fontSize, version])
   return (
     <div
@@ -174,7 +206,7 @@ function IdlePreview({ session }: { session: Session }) {
   )
 }
 
-export default function SessionCard({
+function SessionCard({
   session,
   conn,
   index,
@@ -228,7 +260,6 @@ export default function SessionCard({
           onCardPointerDown(e, session, e.currentTarget)
         }}
         onMouseMove={(e) => {
-          if (dragging) return
           const el = e.currentTarget
           const r = el.getBoundingClientRect()
           const x = (e.clientX - r.left) / r.width
@@ -248,8 +279,12 @@ export default function SessionCard({
           onOpen(session, e.currentTarget)
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && e.target === e.currentTarget)
+          // This div advertises role="button": honour both keys a button
+          // responds to. (Space used to scroll the grid instead of opening.)
+          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+            e.preventDefault()
             onOpen(session, e.currentTarget)
+          }
         }}
         aria-label={`Open ${session.name} on ${session.host || "no host"}`}
         style={{
@@ -374,7 +409,7 @@ function CardPreview({
   // always mounted when bytes exist. Frozen/plain snapshots only when the
   // emulator is unavailable (never ran, cleared, dispose) and the idle
   // placeholder when nothing ever rendered.
-  const preview = usePreview(session.id, fontSize)
+  const preview = usePreview(session.id, fontSize, live)
   return (
     <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
@@ -426,7 +461,9 @@ function CardPreview({
           <IdlePreview session={session} />
         )}
       </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 top-7 bg-gradient-to-t from-[#08080a] via-transparent to-transparent" />
+      {/* Fade only the last few pixels: the newest lines are the reason to
+          read the card, and the old top-7 gradient washed them out. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-[#08080a] to-transparent" />
       {/* Scanline sheen so the miniature reads as a screen, not text. */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.5]"
@@ -438,3 +475,8 @@ function CardPreview({
     </div>
   )
 }
+
+// The grid re-renders on every store bump; without this, one keystroke in a
+// form field reconciles every card and every mounted preview. Props are
+// primitives plus stable callbacks, so a shallow compare is enough.
+export default memo(SessionCard)

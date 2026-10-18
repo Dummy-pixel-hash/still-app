@@ -36,7 +36,11 @@ ok("surface records its real grid for previews",
   (surface.match(/noteSurfaceDims\(/g) || []).length >= 1);
 ok("attach-time dims estimate scales with the font size",
   readFileSync("src/components/TerminalOverlay.tsx", "utf8").includes("noteSurfaceFontSize(fontPx)") &&
-  /const cellW = 0\.6 \* fontPx/.test(readFileSync("src/components/TerminalOverlay.tsx", "utf8")));
+  /const cellW = TERMINAL_CELL_W_RATIO \* fontPx/.test(readFileSync("src/components/TerminalOverlay.tsx", "utf8")) &&
+  // The ratio must come from the shared constant so the live surface, the
+  // preview emulator and this estimate cannot drift apart.
+  /export const TERMINAL_CELL_W_RATIO = 0\.6/.test(conns) &&
+  /const cellH = TERMINAL_LINE_HEIGHT \* fontPx/.test(readFileSync("src/components/TerminalOverlay.tsx", "utf8")));
 
 // GEOMETRY 3: dim changes rebuild the emulator; nothing calls resize on the
 // preview terminal (that is the smear bug).

@@ -1,4 +1,6 @@
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
+/* Self-hosted: a desktop app must not block first paint on a CDN fetch, and
+   must render correctly offline and behind a proxy. Files live in public/fonts. */
+@import "./fonts.css";
 @import "tailwindcss";
 @import "./tokens.css";
 

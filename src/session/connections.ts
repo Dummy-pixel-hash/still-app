@@ -57,6 +57,15 @@ const PREVIEW_FROZEN_SCREEN_PREFIX = "still.preview.screen.v2."
 const PREVIEW_FROZEN_MIN_MS = 2000
 const PREVIEW_DIMS_KEY = "still.preview.dims.v1"
 
+/**
+ * One row height for the whole app. The preview contract is "same cell
+ * metrics as the real surface, scaled by CSS transform", so the live xterm,
+ * the headless preview emulator and the first-attach dimension guess must all
+ * agree — three different numbers silently disagree by ~8% in row count.
+ */
+export const TERMINAL_LINE_HEIGHT = 1.2
+/** Geist Mono advance width as a fraction of font size. */
+export const TERMINAL_CELL_W_RATIO = 0.6
 /** Clamp any geometry into the supported preview grid. */
 function clampPreviewDims(cols: number, rows: number): PreviewDims {
   const c = Number.isFinite(cols) ? cols : PREVIEW_COLS
@@ -114,11 +123,18 @@ function loadPersistedDims() {
   }
 }
 
+let persistedDimsJson = ""
+
 function persistDimsSoon() {
   try {
     const out: Record<string, PreviewDims> = {}
     for (const [id, dims] of surfaceDims) out[id] = dims
-    localStorage.setItem(PREVIEW_DIMS_KEY, JSON.stringify(out))
+    // A fit can repeat the same geometry; skip the synchronous write when
+    // nothing changed (this sits in the resize path).
+    const json = JSON.stringify(out)
+    if (json === persistedDimsJson) return
+    persistedDimsJson = json
+    localStorage.setItem(PREVIEW_DIMS_KEY, json)
   } catch {
     // Private mode / quota: in-memory geometry still serves this session.
   }
@@ -293,7 +309,7 @@ function newPreviewTerminal(dims: PreviewDims, fontSize: number): Terminal {
     // transform, so cell metrics (and therefore wrap math) are identical to
     // the real terminal at every card width.
     fontSize,
-    lineHeight: 1.1,
+    lineHeight: TERMINAL_LINE_HEIGHT,
     allowProposedApi: true,
     theme: {
       background: "#08080a",
@@ -657,18 +673,26 @@ export function isTuiActive(localId: string): boolean {
 export function snapshotPreviewLines(localId: string, max = 4): string[] {
   const bytes = transcriptSnapshot(localId)
   if (bytes.length === 0) return []
-  // Strip BEFORE slicing: the old slice-then-strip cut escape sequences
-  // in half at the window edge, orphaning tails ("86m", "(B") that
-  // rendered as garble. Stripping the full decode first keeps sequences
-  // whole; the plain-text tail slice then can't split an escape.
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes)
-  return stripPreviewAnsi(text)
+  // Only the tail is ever used, so decode a bounded window instead of the
+  // whole 64KB ring on every frame. Start at a UTF-8 boundary and drop the
+  // first (possibly truncated) line so nothing decodes mid-sequence.
+  const TAIL = 8192
+  let start = Math.max(0, bytes.length - TAIL)
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(
+    bytes.subarray(start),
+  )
+  // Strip before slicing: a slice-then-strip cuts escape sequences in half
+  // at the window edge and leaves orphaned tails ("86m", "(B") as garble.
+  const lines = stripPreviewAnsi(text)
     .split("\n")
     .map((l) => l.replace(/\s+$/g, ""))
     .filter((l) => l.length > 0)
-    .slice(-max)
+  // The cut may land mid-line or mid-escape; that first line is not a whole
+  // row, so it must never be shown as one.
+  if (start > 0 && lines.length > 0) lines.shift()
+  return lines.slice(-max)
 }
-
 function persistFrozenPreview(localId: string, lines: string[]) {
   if (lines.length === 0) return
   const now = Date.now()

@@ -32,6 +32,9 @@ export function bindApplicationWheel(
   host: HTMLElement,
   batchInput: (dispatch: () => void) => void,
 ): () => void {
+  // Cell height only changes on fit/font change; getBoundingClientRect forces
+  // layout, and trackpad momentum fires this 60-120×/s.
+  let cachedRowHeight = 0
   const steps = new WheelSteps()
   const forwarded = new WeakSet<Event>()
   const element = terminal.element!
@@ -50,8 +53,12 @@ export function bindApplicationWheel(
       steps.reset()
       return
     }
-    const rowHeight = screen.getBoundingClientRect().height / terminal.rows
-    if (rowHeight <= 0) return
+    let rowHeight = cachedRowHeight
+    if (rowHeight <= 0) {
+      rowHeight = screen.getBoundingClientRect().height / terminal.rows
+      if (rowHeight <= 0) return
+      cachedRowHeight = rowHeight
+    }
     const count = steps.consume(event.deltaY, event.deltaMode, rowHeight, terminal.rows)
     event.preventDefault()
     event.stopImmediatePropagation()
@@ -71,5 +78,16 @@ export function bindApplicationWheel(
     })
   }
   host.addEventListener("wheel", onWheel, { capture: true, passive: false })
-  return () => host.removeEventListener("wheel", onWheel, { capture: true })
+  // Invalidate the cached cell height when the surface re-fits (font zoom,
+  // window resize, split toggle).
+  const invalidate = () => {
+    cachedRowHeight = 0
+    steps.reset()
+  }
+  const resizeSub = terminal.onResize(() => invalidate())
+  return () => {
+    host.removeEventListener("wheel", onWheel, { capture: true })
+    resizeSub.dispose()
+    invalidate()
+  }
 }

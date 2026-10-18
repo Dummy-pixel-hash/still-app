@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import SessionTerminal from "../terminal/SessionTerminal"
 import {
+  TERMINAL_CELL_W_RATIO,
+  TERMINAL_LINE_HEIGHT,
   clearHostKeyPrompt,
   connectionError,
   connectionState,
@@ -19,7 +21,9 @@ import { updateTerminalPrefs } from "../session/store"
 import type { ImageInsertStyle, Session, TerminalPrefs } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
-
+/** Card→fullscreen morph duration. Kept in one place: the CSS transition,
+ *  the `settled` gate below, and Workspace's close timer must agree. */
+export const MORPH_MS = 650
 export interface OpenState {
   session: Session
   rect: DOMRect
@@ -48,14 +52,19 @@ export default function TerminalOverlay({
   onClose,
   onNeedAuth,
   slot,
+  dockStyle,
 }: {
   open: OpenState | null
   prefs: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
   keyTextFor: (keyId: string) => string | null
-  // slot docks two overlays side-by-side (main left, temp right) instead
-  // of stacking fullscreen.
+  // slot docks an overlay beside main ("left"); temp tiles keep "right" for
+  // the overlay-root gate but are positioned by dockStyle instead.
   slot?: "left" | "right"
+  // dockStyle positions an overlay when manually docked (temp tiles). Takes
+  // priority over slot once the overlay is mounted; slot stays for the data
+  // gate and the main overlay's "left" half.
+  dockStyle?: React.CSSProperties
   onClose: () => void
   onNeedAuth: (
     session: Session,
@@ -75,7 +84,10 @@ export default function TerminalOverlay({
       setSettled(false)
       return
     }
-    const t = window.setTimeout(() => setSettled(true), 680)
+    // Reduced motion zeroes the CSS transition; waiting the morph out would
+    // hand those users a blank overlay for ~0.7s on every open.
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    const t = window.setTimeout(() => setSettled(true), reduced ? 0 : MORPH_MS + 30)
     return () => window.clearTimeout(t)
   }, [full])
   const [chrome, setChrome] = useState(true)
@@ -155,6 +167,15 @@ export default function TerminalOverlay({
       const t = e.target as HTMLElement | null
       const other = t?.closest?.("[data-overlay-root]")
       if (other && !rootRef.current?.contains(t as Node)) return
+      // Plain Escape (no modifiers) closes the overlay. The terminal only
+      // sees this when it is not the focused surface: xterm exits its own
+      // mouse/focus modes with Escape and needs to keep receiving it.
+      if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (t?.closest?.(".xterm")) return
+        e.preventDefault()
+        onClose()
+        return
+      }
       if (!e.ctrlKey || e.metaKey || e.altKey) return
       const k = e.key.toLowerCase()
       const isClose = e.code === "Period" || k === "." || k === ">"
@@ -228,8 +249,8 @@ export default function TerminalOverlay({
       // with the configured font size.
       const fontPx = prefs.fontSize
       noteSurfaceFontSize(fontPx)
-      const cellW = 0.6 * fontPx
-      const cellH = 1.35 * fontPx
+      const cellW = TERMINAL_CELL_W_RATIO * fontPx
+      const cellH = TERMINAL_LINE_HEIGHT * fontPx
       dims = {
         cols: Math.max(20, Math.min(500, Math.floor((host.clientWidth - 6) / cellW))),
         rows: Math.max(5, Math.min(200, Math.floor(host.clientHeight / cellH))),
@@ -346,27 +367,33 @@ export default function TerminalOverlay({
   const r = open?.rect
   // Docked slot: half-width split. Main left, temp right with a 1px gap.
   const docked = slot && full
-  const style: React.CSSProperties = docked
-    ? slot === "left"
-      ? { top: 0, left: 0, width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
-      : { top: 0, left: "calc(50vw + 1px)", width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
-    : full
-      ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 8 }
-      : {
-          top: r?.top ?? 0,
-          left: r?.left ?? 0,
-          width: r?.width ?? 0,
-          height: r?.height ?? 0,
-          borderRadius: 8,
-        }
+  const style: React.CSSProperties =
+    dockStyle && full
+      ? { borderRadius: 8, ...dockStyle }
+      : docked
+        ? slot === "left"
+          ? { top: 0, left: 0, width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
+          : { top: 0, left: "calc(50vw + 1px)", width: "calc(50vw - 1px)", height: "100vh", borderRadius: 8 }
+        : full
+          ? { top: 0, left: 0, width: "100vw", height: "100vh", borderRadius: 8 }
+          : {
+              top: r?.top ?? 0,
+              left: r?.left ?? 0,
+              width: r?.width ?? 0,
+              height: r?.height ?? 0,
+              borderRadius: 8,
+            }
 
   return (
     <div
       ref={rootRef}
       data-overlay-root={slot ?? "solo"}
-      className={`fixed z-50 overflow-hidden bg-[#08080a] transition-all duration-[650ms] ${
+      className={`fixed z-50 overflow-hidden bg-[#08080a] transition-[top,left,width,height,border-radius,opacity] duration-[650ms] ${
         !open ? "hidden" : ""
       }`}
+      role={open ? "dialog" : undefined}
+      aria-modal={open ? true : undefined}
+      aria-label={open ? `${open.session.name} terminal` : undefined}
       aria-hidden={!open}
       style={{
         ...style,

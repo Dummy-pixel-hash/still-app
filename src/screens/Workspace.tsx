@@ -1,14 +1,26 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
+import {
+  Fragment,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react"
 import WindowNav from "../components/WindowNav"
 import SessionCard from "../components/SessionCard"
-import TerminalOverlay, { type OpenState } from "../components/TerminalOverlay"
+import TerminalOverlay, { MORPH_MS, type OpenState } from "../components/TerminalOverlay"
 import SessionForm from "../components/SessionForm"
 import NewSessionWizard from "../components/NewSessionWizard"
 import NewProjectDialog from "../components/NewProjectDialog"
 import RemoveProjectDialog from "../components/RemoveProjectDialog"
-import SettingsSheet from "../components/SettingsSheet"
 import RemoveDialog from "../components/RemoveDialog"
 import AuthDialog from "../components/AuthDialog"
+// Behind a click, and it pulls in the orb renderer + shader source: keep the
+// initial bundle to the workspace itself.
+const SettingsSheet = lazy(() => import("../components/SettingsSheet"))
 import BrowserOrbPreview from "../orb/BrowserOrbPreview"
 import { useOrbPublisher } from "../orb/useOrbPublisher"
 import {
@@ -31,6 +43,11 @@ import { nativeBridge } from "../bridge/nativeBridge"
 import type { ConnState, Project, Session, SessionDraft } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
+
+/** Read once per call: the preference does not change mid-transition. */
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+}
 type Sort = "manual" | "recent" | "name"
 
 // Transient key text cache: memory only, cleared on reload. Lets the
@@ -53,10 +70,15 @@ export default function Workspace() {
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<OpenState | null>(null)
   // Temp terminal: memory-only scratch session in its own overlay docked
-  // beside main. Minimize hides the view (worker + transcript survive).
-  const [temp, setTemp] = useState<Session | null>(null)
-  const [tempOpen, setTempOpen] = useState<OpenState | null>(null)
-
+  // Temp terminals: arrays of memory-only scratch sessions, each docked in
+  // its own overlay beside main. Minimize hides the view (worker +
+  // transcript survive). The dock is always visible this session (memory only).
+  const [temps, setTemps] = useState<Session[]>([])
+  const [openTemps, setOpenTemps] = useState<Record<string, OpenState>>({})
+  const [tempDockCollapsed, setTempDockCollapsed] = useState(false)
+  // Monotonic per-app-session counter: temp names stay unique even after
+  // earlier temps are killed.
+  const tempSeq = useRef(0)
   // Pointer-based card drag (works in the packaged WebView, where native
   // HTML5 DnD never starts, plus mouse + touch in the browser).
   const [dragId, setDragId] = useState<string | null>(null)
@@ -149,67 +171,74 @@ export default function Workspace() {
       requestAnimationFrame(() =>
         returnTarget.current?.focus({ preventScroll: true }),
       )
-    }, 700)
+    }, prefersReducedMotion() ? 0 : MORPH_MS + 50)
   }, [])
 
-  // Center/pill-origin morph for the temp overlay (it has no card).
+  // Center/pill-origin morph for a temp overlay (it has no card). Docked next
+  // to main. Sets the entry for this temp id only so others stay open.
   const morphTemp = (s: Session, el: HTMLElement | null, autoConnect = true) => {
+    const id = s.id
     const rect =
       el?.getBoundingClientRect() ??
       new DOMRect(window.innerWidth / 2 - 360, window.innerHeight - 200, 720, 120)
-    setTempOpen({ session: s, rect, phase: "enter", autoConnect })
+    setOpenTemps((o) => ({ ...o, [id]: { session: s, rect, phase: "enter", autoConnect } }))
     requestAnimationFrame(() =>
       requestAnimationFrame(() =>
-        setTempOpen((o) => (o && o.session.id === s.id ? { ...o, phase: "open" } : o)),
+        setOpenTemps((o) =>
+          o[id]?.session.id === id
+            ? { ...o, [id]: { ...o[id], phase: "open" } }
+            : o,
+        ),
       ),
     )
   }
 
-  const minimizeTemp = useCallback(() => {
+  const minimizeTemp = useCallback((id: string) => {
     const pending = authForRef.current
-    if (pending && pending.session.id.startsWith("temp-")) {
+    // Only THIS temp's dialog may be cancelled: minimizing one temp must
+    // never discard another temp's pending auth promise.
+    if (pending && pending.session.id === id) {
       authForRef.current = null
       setAuthFor(null)
       pending.resolve(null)
     }
-    setTempOpen(null) // instant hide; worker + transcript survive
+    // Instant hide; worker + transcript survive. Only this temp's overlay is
+    // removed, so the rest of the dock keeps running.
+    setOpenTemps((o) => {
+      const next = { ...o }
+      delete next[id]
+      return next
+    })
   }, [])
 
-  const killTemp = useCallback(() => {
-    if (!temp) return
-    minimizeTemp() // cancels temp-scoped auth, hides view
-    const id = temp.id
-    setTemp(null)
+  const killTemp = useCallback((id: string) => {
+    minimizeTemp(id) // cancels temp-scoped auth, hides view
+    setTemps((ts) => ts.filter((t) => t.id !== id))
     void releaseSession(id)
-  }, [temp, minimizeTemp])
+  }, [minimizeTemp])
 
   const toggleTemp = useCallback(() => {
-    if (tempOpen) {
-      minimizeTemp()
-      return
-    }
-    if (temp) {
-      morphTemp(temp, document.getElementById("temp-pill"))
-      return
-    }
     if (authForRef.current) return // main dialog up; retry after it resolves
+    // Ctrl/Cmd+Shift+T always opens a new temp terminal. Names use a
+    // monotonic counter so they never collide after kills; ids stay
+    // temp-* guarded so main-close never kills them.
     const src =
       open?.session ??
       [...store.sessions].sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))[0]
     if (!src) return
     const stamp = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    tempSeq.current += 1
     const s: Session = {
       ...src,
       id: `temp-${stamp}`,
-      name: `Temp ${src.name}`,
+      name: `Temp ${tempSeq.current} ${src.name}`,
       projectId: "",
       tmuxSession: `still-tmp-${stamp.replace(/[^A-Za-z0-9_-]/g, "")}`,
       remember: false,
     }
-    setTemp(s)
+    setTemps((ts) => [...ts, s])
     morphTemp(s, null)
-  }, [open, temp, tempOpen, store.sessions, minimizeTemp])
-
+  }, [open, store.sessions])
   // Temp toggle on capture: runs before xterm sees the key so the combo
   // never leaks bytes into the PTY (same pattern as the overlay gate).
   const toggleRef = useRef(toggleTemp)
@@ -559,8 +588,31 @@ export default function Workspace() {
     [openSession],
   )
 
+  // Stable handlers: the card grid is memo()'d, so re-creating these inline
+  // would re-render every card on every keystroke in any form field.
+  const handleEditCard = useCallback((sess: Session) => {
+    setMenuId(null)
+    setEditing(sess)
+  }, [])
+
+  const handleRemoveCard = useCallback(
+    (sess: Session) => {
+      setMenuId(null)
+      if (storeRef.current.settings.confirmRemove) setRemoving(sess)
+      else void releaseSession(sess.id).finally(() => removeSession(sess.id))
+    },
+    [],
+  )
+
+  // Stable identity: a spread here creates a new array every render and
+  // defeats the publisher's own change detection (and any memo downstream).
+  const orbSessions = useMemo(
+    () => [...store.sessions, ...temps],
+    [store.sessions, temps],
+  )
+
   const orbRuntime = useOrbPublisher(
-    temp ? [...store.sessions, temp] : store.sessions,
+    orbSessions,
     authFor?.session.id ?? null,
     store.settings.orb,
     (sessionId) => {
@@ -571,8 +623,9 @@ export default function Workspace() {
       }
       if (!sessionId) return
       const focusTerminal = () => document.getElementById(`still-term-${sessionId}`)?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
-      if (temp?.id === sessionId) {
-        if (!tempOpen || tempOpen.phase === "exit") morphTemp(temp, document.getElementById("temp-pill"), false)
+      const temp = temps.find((t) => t.id === sessionId)
+      if (temp) {
+        if (!openTemps[sessionId] || openTemps[sessionId]?.phase === "exit") morphTemp(temp, document.getElementById("temp-pill"), false)
         else requestAnimationFrame(focusTerminal)
         return
       }
@@ -587,6 +640,69 @@ export default function Workspace() {
     },
   )
 
+  // Temp dock helpers: aggregate status dot and per-temp label/state.
+  const tempAggregateDot = () => {
+    if (!temps.length) return "bg-white/30"
+    const states = temps.map((t) => connectionState(t.id))
+    if (states.includes("error")) return "bg-red-400"
+    // Neutral while connecting: amber is "needs you" in the orb's own
+    // vocabulary, and a starting session is not an alarm.
+    if (states.some((s) => s === "connecting")) return "bg-white/40"
+    if (states.every((s) => s === "connected")) return "bg-emerald-400"
+    return "bg-white/30"
+  }
+
+  const tempDotClass = (id: string) =>
+    connectionState(id) === "connected"
+      ? "bg-emerald-400"
+      : connectionState(id) === "connecting"
+        ? "bg-white/40"
+        : connectionState(id) === "error"
+          ? "bg-red-400"
+          : "bg-white/30"
+
+  // Plain render helpers (not components): rows keep their React identity
+  // across parent re-renders instead of remounting on every keystroke.
+  const tempRow = (temp: Session) => {
+    const isOpen = Boolean(openTemps[temp.id])
+    return (
+      <li
+        key={temp.id}
+        className={`flex items-center gap-2 rounded-md border px-2 py-1 font-mono text-[11px] uppercase tracking-[0.15em] ${isOpen ? "border-amber-300/70 text-still-fg" : "border-white/10 text-still-dim"}`}
+      >
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tempDotClass(temp.id)}`} aria-hidden />
+        <span className="truncate">{temp.name} · {connectionState(temp.id)}</span>
+        <button
+          type="button"
+          disabled={isOpen}
+          onClick={() => morphTemp(temp, document.getElementById("temp-pill"))}
+          className="ml-auto rounded border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide hover:border-amber-300/50 disabled:opacity-40 disabled:hover:border-white/10"
+        >
+          Restore
+        </button>
+        <button
+          type="button"
+          onClick={() => void killTemp(temp.id)}
+          className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide hover:border-[#ff4a4a]/50 hover:text-still-fg"
+        >
+          Kill
+        </button>
+      </li>
+    )
+  }
+
+  const dockCollapseIcon = (
+    <svg width="12" height="12" viewBox="0 0 12 12" className="h-3.5 w-3.5" aria-hidden>
+      <path d={tempDockCollapsed ? "M3 5l3-3 3 3" : "M3 7l3 3 3-3"} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+
+  // Layout list: only currently OPEN temps, in creation order. Indexes are
+  // positions within THIS list (not all temps), otherwise a minimized first
+  // temp would push the next tile off-screen.
+  const openTempList = temps.filter((t) => openTemps[t.id])
+
+
   return (
     <div className="grain relative flex h-full flex-col overflow-hidden rounded-lg bg-ink text-fg ring-1 ring-white/10">
       <div
@@ -600,13 +716,19 @@ export default function Workspace() {
 
       <div
         ref={scrollRef}
-        className="relative z-10 min-h-0 flex-1 overflow-y-auto scroll-quiet transition-all duration-[650ms]"
+        className="relative z-10 min-h-0 flex-1 overflow-y-auto scroll-quiet transition-[transform,opacity] duration-[650ms]"
         style={{
           transitionTimingFunction: EASE,
           transform: open ? "scale(0.965)" : "none",
-          filter: open ? "blur(6px) brightness(0.55)" : "none",
+          // A scrim, not a blur: blurring a layer full of live xterm canvases
+          // re-rasterizes every frame and destroys the crisp grid the morph
+          // is coming from.
+          opacity: open ? 0.35 : 1,
           pointerEvents: open ? "none" : "auto",
         }}
+        // Out of the tab order and the a11y tree while the overlay owns the
+        // screen. pointerEvents:none alone still lets Tab reach the grid.
+        inert={open ? true : undefined}
       >
         <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-16 sm:px-6">
           <section className="rise flex flex-wrap items-end justify-between gap-4">
@@ -624,8 +746,16 @@ export default function Workspace() {
                   ref={searchRef}
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.stopPropagation()
+                      setQ("")
+                      e.currentTarget.blur()
+                    }
+                  }}
                   placeholder="Search sessions…"
                   aria-label="Search sessions"
+                  enterKeyHint="search"
                   className="w-44 rounded-full border border-white/10 bg-black/40 py-1.5 pl-3 pr-12 text-[12px] text-fg outline-none transition focus:w-56 focus:border-[#ff4a4a]/50 sm:w-52"
                 />
                 <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10px] text-faint">
@@ -773,7 +903,11 @@ export default function Workspace() {
                         : "border-white/10 text-faint"
                     }`}
                   >
-                    Drag a card here, or press + to create one.
+                    {/* Distinguish an empty project from a filtered one: a
+                        no-match search used to invite creating a duplicate. */}
+                    {q.trim() && !empty
+                      ? `No sessions match “${q.trim()}”.`
+                      : "Drag a card here, or press + to create one."}
                   </p>
                 ) : (
                   <div
@@ -808,20 +942,8 @@ export default function Workspace() {
                           }
                           menuOpen={menuId === s.id}
                           onOpen={handleCardOpen}
-                          onEdit={(sess) => {
-                            setMenuId(null)
-                            setEditing(sess)
-                          }}
-                          onRemove={(sess) => {
-                            setMenuId(null)
-                            if (store.settings.confirmRemove)
-                              setRemoving(sess)
-                            else {
-                              void releaseSession(sess.id).finally(() =>
-                                removeSession(sess.id),
-                              )
-                            }
-                          }}
+                          onEdit={handleEditCard}
+                          onRemove={handleRemoveCard}
                           onToggleMenu={setMenuId}
                           onCardPointerDown={handleCardPointerDown}
                         />
@@ -852,49 +974,83 @@ export default function Workspace() {
         keyTextFor={keyTextFor}
         onClose={close}
         onNeedAuth={onNeedAuth}
-        slot={tempOpen ? "left" : undefined}
+        slot={Object.keys(openTemps).length > 0 ? "left" : undefined}
       />
 
-      {tempOpen ? (
-        <TerminalOverlay
-          open={tempOpen}
-          prefs={store.settings.terminal}
-          imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
-          keyTextFor={keyTextFor}
-          onClose={minimizeTemp}
-          onNeedAuth={onNeedAuth}
-          slot="right"
-        />
-      ) : null}
-
-      {temp && !tempOpen ? (
-        <div
-          id="temp-pill"
-          className="fixed bottom-5 right-5 z-[70] flex items-center gap-2.5 rounded-full border border-amber-300/30 bg-black/70 py-2 pl-3 pr-2 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur"
-        >
-          <span
-            aria-hidden
-            className={`h-2 w-2 rounded-full ${connectionState(temp.id) === "connected" ? "bg-emerald-400" : connectionState(temp.id) === "connecting" ? "bg-amber-300" : connectionState(temp.id) === "error" ? "bg-red-400" : "bg-white/30"}`}
+      {openTempList.map((s, i) => {
+        const os = openTemps[s.id]
+        const n = openTempList.length
+        // Even vertical split of the right half; last tile clears the shared
+        // divider so tiles never overlap the screen edge.
+        const dockStyle = {
+          top: `${(i * 100) / n}%`,
+          height: "calc(" + (100 / n) + "% - " + (i === n - 1 ? 2 : 1) + "px)",
+          left: "calc(50vw + 1px)",
+          width: "calc(50vw - 1px)",
+        }
+        return (
+          <TerminalOverlay
+            key={s.id}
+            open={os}
+            prefs={store.settings.terminal}
+            imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
+            keyTextFor={keyTextFor}
+            onClose={() => minimizeTemp(s.id)}
+            onNeedAuth={onNeedAuth}
+            dockStyle={dockStyle}
+            slot="right"
           />
-          <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">
-            Temp · {connectionState(temp.id)}
+        )
+      })}
+
+      <div
+        id="temp-pill"
+        className="fixed bottom-5 right-5 z-[70] flex flex-col items-start gap-1.5 rounded-lg border border-amber-300/20 bg-black/70 p-1.5 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur"
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-1">
+            <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot()}`} aria-hidden />
+            <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">TERMINAL DOCK</span>
+            <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">{temps.length}</span>
           </span>
           <button
             type="button"
-            onClick={toggleTemp}
-            className="rounded-full border border-white/10 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-fg transition-colors hover:border-amber-300/50"
+            onClick={() => setTempDockCollapsed((v) => !v)}
+            aria-expanded={!tempDockCollapsed}
+            aria-label={tempDockCollapsed ? "Expand temp terminals" : "Collapse temp terminals"}
+            className="rounded-md border border-white/10 p-1 text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
           >
-            Restore
+            {dockCollapseIcon}
           </button>
           <button
             type="button"
-            onClick={() => void killTemp()}
-            className="rounded-full border border-white/10 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-[#ff4a4a]/50 hover:text-still-fg"
+            onClick={toggleTemp}
+            className="rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
           >
-            Kill
+            + New
           </button>
         </div>
-      ) : null}
+        {!tempDockCollapsed && (
+          <ul className="flex w-72 flex-col gap-1">
+            {temps.length === 0 ? (
+              <li className="rounded-md border border-dashed border-white/10 px-2 py-2 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">No temp terminals yet</li>
+            ) : (
+              temps.map((t) => tempRow(t))
+            )}
+          </ul>
+        )}
+        {tempDockCollapsed && (
+          <button
+            type="button"
+            aria-label="Expand temp terminals"
+            onClick={() => setTempDockCollapsed(false)}
+            className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot()}`} aria-hidden />
+            <span className="ml-auto">{temps.length} temps</span>
+          </button>
+        )}
+      </div>
 
       {showNew ? (
         <div
@@ -986,15 +1142,17 @@ export default function Workspace() {
       {nativeBridge.isDevelopmentAdapter ? <BrowserOrbPreview /> : null}
 
       {showSettings ? (
-        <SettingsSheet
-          orbRuntime={orbRuntime}
-          onClose={() => setShowSettings(false)}
-          keyTextCache={keyTextCache}
-          onKeyText={(id, text) => {
-            if (text) keyTextCache.set(id, text)
-            else keyTextCache.delete(id)
-          }}
-        />
+        <Suspense fallback={null}>
+          <SettingsSheet
+            orbRuntime={orbRuntime}
+            onClose={() => setShowSettings(false)}
+            keyTextCache={keyTextCache}
+            onKeyText={(id, text) => {
+              if (text) keyTextCache.set(id, text)
+              else keyTextCache.delete(id)
+            }}
+          />
+        </Suspense>
       ) : null}
 
       {authFor ? (

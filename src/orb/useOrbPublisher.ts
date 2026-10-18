@@ -30,9 +30,18 @@ export function useOrbPublisher(
     return () => { instance.dispose(); publisher.current = null }
   }, [attempt])
 
-  // This intentionally runs after each Workspace render: useConnections returns
-  // the same Map reference while its version changes. The publisher fingerprints
-  // inputs, so unrelated UI renders are cheap and do not cause IPC traffic.
+  // Runs when the session list or preferences change — not on every Workspace
+  // render. The publisher fingerprints inputs before any IPC, but mapping and
+  // serializing N sessions on every keystroke is still real CPU.
+  // Connection state is not a session field, so it cannot be read off
+  // `sessions` identity: derive the signal string first and depend on it.
+  const signalKey = sessions
+    .map(session => {
+      const key = hostKeyPromptFor(session.id)
+      return `${session.id}:${connectionState(session.id)}:${nativeSessionId(session.id) ?? ""}:${key ? (key.changed ? "changed" : "new") : "-"}`
+    })
+    .join("|")
+
   useEffect(() => {
     const inputs: OrbSessionInput[] = sessions.map(session => {
       const key = hostKeyPromptFor(session.id)
@@ -44,7 +53,8 @@ export function useOrbPublisher(
       }
     })
     publisher.current?.update(inputs, preferences)
-  })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- signalKey covers connection state
+  }, [sessions, preferences, authSessionId, signalKey])
   const retry = useCallback(() => { setState({ pending: true, error: null }); setAttempt(value => value + 1) }, [])
   return { ...state, retry }
 }

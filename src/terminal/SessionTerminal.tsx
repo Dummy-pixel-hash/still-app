@@ -9,6 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11"
 import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
 import {
+  TERMINAL_LINE_HEIGHT,
   isTuiActive,
   needsReattachMarker,
   nativeSessionId,
@@ -127,7 +128,7 @@ export default function SessionTerminal({
       fontFamily:
         "'Geist Mono', ui-monospace, Consolas, 'Segoe UI Emoji', 'Noto Color Emoji', 'Apple Color Emoji', monospace",
       fontSize: prefs.fontSize,
-      lineHeight: 1.2,
+      lineHeight: TERMINAL_LINE_HEIGHT,
       scrollback: prefs.scrollback,
       // Smooth viewport animation for local scrollback (normal buffer,
       // zero IPC). 160ms is quick enough to stay responsive on a mouse

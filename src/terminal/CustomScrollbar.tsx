@@ -28,6 +28,10 @@ export default function CustomScrollbar({ terminal }: { terminal: Terminal | nul
   const lastTop = useRef(-1)
   const lastThumbH = useRef(-1)
   const dragging = useRef(false)
+  // The rAF loop parks itself once the lane has faded and nothing moved; a
+  // compositor tick per mounted terminal forever is pure idle cost.
+  const loopOn = useRef(false)
+  const armLoop = useRef<() => void>(() => {})
 
   // Component scope so BOTH the rAF tick and the pointer-drag handlers can
   // wake it (a local definition inside the mount effect is unreachable from
@@ -39,10 +43,13 @@ export default function CustomScrollbar({ terminal }: { terminal: Terminal | nul
     if (lane.style.opacity !== "1" || dragging.current) {
       lane.style.opacity = "1"
     }
+    // Keep the loop awake while the lane is visible, then let it park.
+    armLoop.current()
     window.clearTimeout(fadeTimer.current)
     fadeTimer.current = window.setTimeout(() => {
       if (!dragging.current && laneRef.current) {
         laneRef.current.style.opacity = "0"
+        loopOn.current = false
       }
     }, FADE_MS)
   }, [])
@@ -52,56 +59,87 @@ export default function CustomScrollbar({ terminal }: { terminal: Terminal | nul
 
     let alive = true
 
-    const tick = () => {
-      if (!alive) return
+    // Paint the thumb from the current buffer. Returns true when anything
+    // actually moved, so an idle terminal does no style writes and no work.
+    const paint = (): boolean => {
       const lane = laneRef.current
       const thumb = thumbRef.current
-      if (lane && thumb) {
-        try {
-          const buffer = terminal.buffer.active
-          const lines = buffer.length
-          const rows = terminal.rows
-          const ydisp = buffer.viewportY
-          const maxScroll = lines - rows
-          // Alternate buffer (vim/less/tmux copy-mode) has no local
-          // scrollback — tmux owns that scrolling, so the lane hides.
-          if (buffer.type !== "normal" || maxScroll <= 0) {
-            if (lastTop.current !== -1) {
-              lastTop.current = -1
-              lastThumbH.current = -1
-              lane.style.opacity = "0"
-              lane.style.pointerEvents = "none"
-            }
-          } else {
-            lane.style.pointerEvents = "auto"
-            const track = lane.clientHeight
-            const thumbH = Math.min(track, Math.max(MIN_THUMB, Math.round((track * rows) / lines)))
-            const top =
-              ydisp <= 0
-                ? 0
-                : ydisp >= maxScroll
-                  ? track - thumbH
-                  : Math.round((ydisp / maxScroll) * (track - thumbH))
-            if (top !== lastTop.current || thumbH !== lastThumbH.current) {
-              lastTop.current = top
-              lastThumbH.current = thumbH
-              thumb.style.height = `${thumbH}px`
-              thumb.style.transform = `translateY(${top}px)`
-            }
-            poke()
+      if (!lane || !thumb) return false
+      try {
+        const buffer = terminal.buffer.active
+        const lines = buffer.length
+        const rows = terminal.rows
+        const ydisp = buffer.viewportY
+        const maxScroll = lines - rows
+        // Alternate buffer (vim/less/tmux copy-mode) has no local
+        // scrollback — tmux owns that scrolling, so the lane hides.
+        if (buffer.type !== "normal" || maxScroll <= 0) {
+          if (lastTop.current !== -1) {
+            lastTop.current = -1
+            lastThumbH.current = -1
+            lane.style.opacity = "0"
+            lane.style.pointerEvents = "none"
+            return true
           }
-        } catch {
-          // Terminal disposed mid-frame; unmount ends the loop.
+          return false
         }
+        lane.style.pointerEvents = "auto"
+        const track = lane.clientHeight
+        const thumbH = Math.min(track, Math.max(MIN_THUMB, Math.round((track * rows) / lines)))
+        const top =
+          ydisp <= 0
+            ? 0
+            : ydisp >= maxScroll
+              ? track - thumbH
+              : Math.round((ydisp / maxScroll) * (track - thumbH))
+        if (top === lastTop.current && thumbH === lastThumbH.current) return false
+        lastTop.current = top
+        lastThumbH.current = thumbH
+        thumb.style.height = `${thumbH}px`
+        thumb.style.transform = `translateY(${top}px)`
+        return true
+      } catch {
+        // Terminal disposed mid-frame; unmount ends the loop.
+        return false
       }
-      rafRef.current = requestAnimationFrame(tick)
     }
-    rafRef.current = requestAnimationFrame(tick)
+
+    const tick = () => {
+      if (!alive) return
+      if (paint()) poke()
+      if (loopOn.current) rafRef.current = requestAnimationFrame(tick)
+      else rafRef.current = 0
+    }
+
+    // Wake on demand: dragging, scrolling and parsed output all need the
+    // loop; a quiet terminal does not.
+    armLoop.current = () => {
+      if (!alive || loopOn.current) return
+      loopOn.current = true
+      if (!rafRef.current) rafRef.current = requestAnimationFrame(tick)
+    }
+
+    // Any scroll (wheel, scrollback, mouse report) — the thumb must follow.
+    const wake = () => {
+      armLoop.current()
+      poke()
+    }
+    const subs = [
+      terminal.onScroll(wake),
+      terminal.onWriteParsed(wake),
+      terminal.onResize(wake),
+    ]
+
+    wake()
 
     return () => {
       alive = false
+      armLoop.current = () => {}
+      loopOn.current = false
+      subs.forEach((sub) => sub.dispose())
       window.clearTimeout(fadeTimer.current)
       if (rafRef.current) window.cancelAnimationFrame(rafRef.current)
+      rafRef.current = 0
     }
   }, [terminal])
 
