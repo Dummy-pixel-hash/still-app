@@ -167,6 +167,9 @@ export default function TerminalOverlay({
       const t = e.target as HTMLElement | null
       const other = t?.closest?.("[data-overlay-root]")
       if (other && !rootRef.current?.contains(t as Node)) return
+      // Temp dock controls are siblings, not part of any overlay. Escape
+      // there must not close every overlay in the dock at once.
+      if (t?.closest?.("[data-temp-dock]")) return
       // Plain Escape (no modifiers) closes the overlay. The terminal only
       // sees this when it is not the focused surface: xterm exits its own
       // mouse/focus modes with Escape and needs to keep receiving it.

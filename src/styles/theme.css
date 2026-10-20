@@ -42,6 +42,14 @@ body,
   overflow: hidden;
 }
 
+/* Temp dock drag: keep one resize cursor across the whole window and stop
+   terminal text selection from starting under the moving pointer. */
+body.still-resizing-temp,
+body.still-resizing-temp * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+
 ::selection {
   background: rgba(255, 74, 74, 0.35);
 }

@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import WindowNav from "../components/WindowNav"
@@ -50,6 +51,46 @@ function prefersReducedMotion(): boolean {
 }
 type Sort = "manual" | "recent" | "name"
 
+/** Keep the last tile's rounded edge off the viewport edge. */
+const TEMP_DOCK_GUTTER = 2
+/** A tile cannot be dragged below this height (or half the dock, if smaller). */
+const TEMP_MIN_TILE_H = 120
+
+interface TempTile {
+  id: string
+  top: number
+  height: number
+}
+
+/**
+ * Temp dock geometry from proportional weights, not stored pixels: adding,
+ * minimizing, or resizing the window redistributes every tile while keeping
+ * the user's ratios. An empty/missing weight is one fair share.
+ */
+function layoutTempTiles(
+  list: Session[],
+  sizes: Record<string, number>,
+  viewportHeight: number,
+): TempTile[] {
+  const usable = Math.max(0, viewportHeight - TEMP_DOCK_GUTTER)
+  const weights = list.map((s) => {
+    const w = sizes[s.id]
+    return Number.isFinite(w) && w > 0 ? w : 1
+  })
+  const total = weights.reduce((sum, w) => sum + w, 0)
+  let top = 0
+  return list.map((s, i) => {
+    const height = total > 0 ? (weights[i] / total) * usable : usable / Math.max(1, list.length)
+    const tile = { id: s.id, top, height }
+    top += height
+    return tile
+  })
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
 // Transient key text cache: memory only, cleared on reload. Lets the
 // key-library flow connect without re-pasting within a session.
 const keyTextCache = new Map<string, string>()
@@ -76,6 +117,25 @@ export default function Workspace() {
   const [temps, setTemps] = useState<Session[]>([])
   const [openTemps, setOpenTemps] = useState<Record<string, OpenState>>({})
   const [tempDockCollapsed, setTempDockCollapsed] = useState(false)
+
+  // Per-temp dock weights (arbitrary proportional units). A missing entry is
+  // one fair share, so new/minimized/restored tiles self-heal their layout.
+  const [tempSizes, setTempSizes] = useState<Record<string, number>>({})
+  const [dockViewportH, setDockViewportH] = useState(() => window.innerHeight)
+  const [isResizing, setIsResizing] = useState(false)
+  // Latest pointer Y per drag; a single rAF applies it so fast mice cannot
+  // queue more React renders than the display can paint.
+  const resizeDrag = useRef<{
+    topId: string
+    bottomId: string
+    pointerId: number
+    startY: number
+    topStart: number
+    bottomStart: number
+    pendingY: number
+    frame: number
+  } | null>(null)
+  const resizeReleaseFrame = useRef(0)
   // Monotonic per-app-session counter: temp names stay unique even after
   // earlier temps are killed.
   const tempSeq = useRef(0)
@@ -128,7 +188,32 @@ export default function Workspace() {
   })
   const suppressClickUntil = useRef(0)
 
-  useEffect(() => () => window.clearTimeout(closeTimer.current), [])
+  useEffect(
+    () => () => {
+      window.clearTimeout(closeTimer.current)
+      window.cancelAnimationFrame(resizeReleaseFrame.current)
+      const drag = resizeDrag.current
+      if (drag?.frame) window.cancelAnimationFrame(drag.frame)
+      document.body.classList.remove("still-resizing-temp")
+    },
+    [],
+  )
+
+  // Inline dock geometry is in px, so track the real viewport while the
+  // window is being resized. One update per frame keeps it in step with the
+  // compositor without turning a window drag into a render storm.
+  useEffect(() => {
+    let frame = 0
+    const sync = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => setDockViewportH(window.innerHeight))
+    }
+    window.addEventListener("resize", sync)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener("resize", sync)
+    }
+  }, [])
 
   const openSession = useCallback((s: Session, el: HTMLElement | null, autoConnect = true) => {
     returnTarget.current = el ?? searchRef.current
@@ -214,8 +299,161 @@ export default function Workspace() {
   const killTemp = useCallback((id: string) => {
     minimizeTemp(id) // cancels temp-scoped auth, hides view
     setTemps((ts) => ts.filter((t) => t.id !== id))
+    setTempSizes((z) => {
+      const next = { ...z }
+      delete next[id]
+      return next
+    })
     void releaseSession(id)
   }, [minimizeTemp])
+
+  // Only currently OPEN temps take part in the dock geometry. Minimized temps
+  // keep their weight, so restoring one returns to the same relative size.
+  const openTempList = temps.filter((t) => openTemps[t.id])
+  const tempLayout = layoutTempTiles(openTempList, tempSizes, dockViewportH)
+
+  // Apply the latest pointer position at most once per painted frame. The
+  // boundary is moved in pixels from the snapshot, and the pair's total height
+  // is held constant, so the dock never jumps or leaves a gap mid-drag.
+  const applyResize = useCallback((clientY: number) => {
+    const drag = resizeDrag.current
+    if (!drag) return
+    const span = drag.topStart + drag.bottomStart
+    if (span <= 0) return
+    // Never force an already-small tile (e.g. after a window shrink) to grow
+    // just because its divider was grabbed; only prevent it shrinking further.
+    const minTop = Math.min(TEMP_MIN_TILE_H, drag.topStart)
+    const minBottom = Math.min(TEMP_MIN_TILE_H, drag.bottomStart)
+    const nextTop = clamp(drag.topStart + (clientY - drag.startY), minTop, span - minBottom)
+    const nextBottom = span - nextTop
+    setTempSizes((sizes) =>
+      sizes[drag.topId] === nextTop && sizes[drag.bottomId] === nextBottom
+        ? sizes
+        : { ...sizes, [drag.topId]: nextTop, [drag.bottomId]: nextBottom },
+    )
+  }, [])
+
+  const startResize =
+    (topId: string, bottomId: string) =>
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      const top = tempLayout.find((tile) => tile.id === topId)
+      const bottom = tempLayout.find((tile) => tile.id === bottomId)
+      if (!top || !bottom) return
+      window.cancelAnimationFrame(resizeReleaseFrame.current)
+      // Convert every open tile to its current pixel height once, so this
+      // drag and any later tile additions share one comparable weight scale.
+      setTempSizes((sizes) => {
+        const next = { ...sizes }
+        for (const tile of tempLayout) next[tile.id] = Math.max(1, tile.height)
+        return next
+      })
+      resizeDrag.current = {
+        topId,
+        bottomId,
+        pointerId: e.pointerId,
+        startY: e.clientY,
+        topStart: top.height,
+        bottomStart: bottom.height,
+        pendingY: e.clientY,
+        frame: 0,
+      }
+      setIsResizing(true)
+      document.body.classList.add("still-resizing-temp")
+      try {
+        // Capture keeps the drag alive once the pointer leaves the 8px band.
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {
+        // Already released by the compositor; the next move ends the drag.
+      }
+    }
+
+  const moveResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeDrag.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    drag.pendingY = e.clientY
+    if (drag.frame) return
+    drag.frame = window.requestAnimationFrame(() => {
+      const active = resizeDrag.current
+      if (!active) return
+      active.frame = 0
+      applyResize(active.pendingY)
+    })
+  }
+
+  const endResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeDrag.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    if (drag.frame) {
+      window.cancelAnimationFrame(drag.frame)
+      drag.frame = 0
+    }
+    applyResize(e.clientY)
+    resizeDrag.current = null
+    document.body.classList.remove("still-resizing-temp")
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      // Pointer already released by the compositor.
+    }
+    // Keep transitions off through the final commit; turning them back on in
+    // the same batch would animate the last few pixels after the pointer up.
+    window.cancelAnimationFrame(resizeReleaseFrame.current)
+    resizeReleaseFrame.current = window.requestAnimationFrame(() =>
+      setIsResizing(false),
+    )
+  }
+
+  const nudgeResize = (topId: string, bottomId: string, delta: number) => {
+    const top = tempLayout.find((tile) => tile.id === topId)
+    const bottom = tempLayout.find((tile) => tile.id === bottomId)
+    if (!top || !bottom) return
+    const span = top.height + bottom.height
+    const minTop = Math.min(TEMP_MIN_TILE_H, top.height)
+    const minBottom = Math.min(TEMP_MIN_TILE_H, bottom.height)
+    const nextTop = clamp(top.height + delta, minTop, span - minBottom)
+    // Keyboard steps are direct manipulation too: apply the new height for
+    // this commit with the morph transition off, then restore it next frame.
+    window.cancelAnimationFrame(resizeReleaseFrame.current)
+    setIsResizing(true)
+    resizeReleaseFrame.current = window.requestAnimationFrame(() =>
+      setIsResizing(false),
+    )
+    setTempSizes((sizes) => {
+      const next = { ...sizes }
+      for (const tile of tempLayout) next[tile.id] = Math.max(1, tile.height)
+      next[topId] = nextTop
+      next[bottomId] = span - nextTop
+      return next
+    })
+  }
+
+  const resizeKeyDown =
+    (topId: string, bottomId: string) =>
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      const step = e.shiftKey ? 64 : 16
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        e.stopPropagation()
+        nudgeResize(topId, bottomId, -step)
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault()
+        e.stopPropagation()
+        nudgeResize(topId, bottomId, step)
+      } else if (e.key === "Home") {
+        e.preventDefault()
+        e.stopPropagation()
+        nudgeResize(topId, bottomId, Number.NEGATIVE_INFINITY)
+      } else if (e.key === "End") {
+        e.preventDefault()
+        e.stopPropagation()
+        nudgeResize(topId, bottomId, Number.POSITIVE_INFINITY)
+      }
+    }
 
   const toggleTemp = useCallback(() => {
     if (authForRef.current) return // main dialog up; retry after it resolves
@@ -238,7 +476,19 @@ export default function Workspace() {
     }
     setTemps((ts) => [...ts, s])
     morphTemp(s, null)
-  }, [open, store.sessions])
+
+    // A new tile takes one fair share of the *current* open weights: existing
+    // ratios survive, and nothing can be smaller than a reasonable minimum.
+    setTempSizes((sizes) => {
+      const openWeights = Object.keys(openTemps)
+        .map((id) => sizes[id])
+        .filter((w): w is number => Number.isFinite(w) && w > 0)
+      const weight = openWeights.length
+        ? openWeights.reduce((sum, w) => sum + w, 0) / openWeights.length
+        : 1
+      return { ...sizes, [s.id]: weight }
+    })
+  }, [open, openTemps, store.sessions])
   // Temp toggle on capture: runs before xterm sees the key so the combo
   // never leaks bytes into the PTY (same pattern as the overlay gate).
   const toggleRef = useRef(toggleTemp)
@@ -266,7 +516,7 @@ export default function Workspace() {
       // except the xterm surface itself (raw PTY bytes take precedence).
       // Auth/form dialogs must never trap the user in the overlay.
       if (open && e.ctrlKey && (e.key === "." || e.key === "`")) {
-        if (target?.closest?.(".xterm")) return
+        if (target?.closest?.(".xterm") || target?.closest?.("[data-temp-dock]")) return
         e.preventDefault()
         close()
         return
@@ -697,12 +947,6 @@ export default function Workspace() {
     </svg>
   )
 
-  // Layout list: only currently OPEN temps, in creation order. Indexes are
-  // positions within THIS list (not all temps), otherwise a minimized first
-  // temp would push the next tile off-screen.
-  const openTempList = temps.filter((t) => openTemps[t.id])
-
-
   return (
     <div className="grain relative flex h-full flex-col overflow-hidden rounded-lg bg-ink text-fg ring-1 ring-white/10">
       <div
@@ -977,34 +1221,80 @@ export default function Workspace() {
         slot={Object.keys(openTemps).length > 0 ? "left" : undefined}
       />
 
-      {openTempList.map((s, i) => {
-        const os = openTemps[s.id]
-        const n = openTempList.length
-        // Even vertical split of the right half; last tile clears the shared
-        // divider so tiles never overlap the screen edge.
-        const dockStyle = {
-          top: `${(i * 100) / n}%`,
-          height: "calc(" + (100 / n) + "% - " + (i === n - 1 ? 2 : 1) + "px)",
-          left: "calc(50vw + 1px)",
-          width: "calc(50vw - 1px)",
-        }
+      {tempLayout.map((item) => (
+        <TerminalOverlay
+          key={item.id}
+          open={openTemps[item.id]}
+          prefs={store.settings.terminal}
+          imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
+          keyTextFor={keyTextFor}
+          onClose={() => minimizeTemp(item.id)}
+          onNeedAuth={onNeedAuth}
+          dockStyle={{
+            top: item.top,
+            height: item.height,
+            left: "calc(50vw + 1px)",
+            width: "calc(50vw - 1px)",
+            // Direct manipulation: never let the 650ms open/close morph lag
+            // behind the pointer or re-animate the final commit.
+            transition: isResizing ? "none" : undefined,
+          }}
+          slot="right"
+        />
+      ))}
+
+      {tempLayout.slice(0, -1).map((item, i) => {
+        const bottom = tempLayout[i + 1]
+        const pairHeight = item.height + bottom.height
         return (
-          <TerminalOverlay
-            key={s.id}
-            open={os}
-            prefs={store.settings.terminal}
-            imageInsertStyle={store.settings.imageInsertStyle ?? "path"}
-            keyTextFor={keyTextFor}
-            onClose={() => minimizeTemp(s.id)}
-            onNeedAuth={onNeedAuth}
-            dockStyle={dockStyle}
-            slot="right"
-          />
+          <div
+            key={`resize-${item.id}`}
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize temp terminals"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={
+              pairHeight > 0 ? Math.round((item.height / pairHeight) * 100) : 50
+            }
+            data-temp-dock
+            tabIndex={0}
+            title="Drag to resize · arrow keys fine-tune"
+            onPointerDown={startResize(item.id, bottom.id)}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            onLostPointerCapture={endResize}
+            onKeyDown={resizeKeyDown(item.id, bottom.id)}
+            className="group fixed z-[65] flex touch-none select-none items-center justify-center outline-none"
+            style={{
+              top: bottom.top - 4,
+              left: "calc(50vw + 1px)",
+              width: "calc(50vw - 1px)",
+              height: 8,
+              cursor: "ns-resize",
+              // Follow the same open/close redistribution as the tiles, but
+              // stay glued to the pointer while the user is dragging.
+              transition: isResizing
+                ? "none"
+                : `top ${MORPH_MS}ms ${EASE}`,
+            }}
+          >
+            <span
+              aria-hidden
+              className={`pointer-events-none h-[2px] rounded-full transition-[width,background-color] duration-150 ${
+                isResizing
+                  ? "w-12 bg-amber-300/80"
+                  : "w-7 bg-white/15 group-hover:w-11 group-hover:bg-amber-300/70 group-focus-visible:w-11 group-focus-visible:bg-amber-300/70"
+              }`}
+            />
+          </div>
         )
       })}
 
       <div
         id="temp-pill"
+        data-temp-dock
         className="fixed bottom-5 right-5 z-[70] flex flex-col items-start gap-1.5 rounded-lg border border-amber-300/20 bg-black/70 p-1.5 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur"
       >
         <div className="flex items-center gap-1.5">
