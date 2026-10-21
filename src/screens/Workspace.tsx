@@ -148,6 +148,8 @@ export default function Workspace() {
   const [tempSizes, setTempSizes] = useState<Record<string, number>>({})
   const [dockViewportH, setDockViewportH] = useState(() => window.innerHeight)
   const [isResizing, setIsResizing] = useState(false)
+  // Open-temp count gates the single-temp main↔temp split (see render below).
+  const openTempCount = Object.keys(openTemps).length
   // Latest pointer Y per drag; a single rAF applies it so fast mice cannot
   // queue more React renders than the display can paint.
   const resizeDrag = useRef<{
@@ -451,6 +453,73 @@ export default function Workspace() {
     window.cancelAnimationFrame(resizeReleaseFrame.current)
     resizeReleaseFrame.current = window.requestAnimationFrame(() =>
       setIsResizing(false),
+    )
+  }
+  // Main↔temp split (single temp only): the divider's x as a fraction of
+  // viewport width (0..1). The single temp fills the remainder, so moving the
+  // divider is the one knob between main and temp.
+  const splitDrag = useRef(false)
+  const splitFrame = useRef(0)
+  const [mainRatio, setMainRatio] = useState(0.5)
+  const startSplit = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    splitDrag.current = true
+    window.cancelAnimationFrame(splitFrame.current)
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // Compositor already released; the next move ends the drag.
+    }
+  }
+  const moveSplit = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!splitDrag.current) return
+    const w = window.innerWidth || 1
+    const r = clamp(e.clientX / w, 0.3, 0.8)
+    if (r === mainRatio) return
+    window.cancelAnimationFrame(splitFrame.current)
+    splitFrame.current = window.requestAnimationFrame(() => setMainRatio(r))
+  }
+  const endSplit = (e: ReactPointerEvent<HTMLDivElement>) => {
+    splitDrag.current = false
+    window.cancelAnimationFrame(splitFrame.current)
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      // Pointer already released by the compositor.
+    }
+    // Keep transitions off through the final commit so the width/position
+    // jump to rest instead of morphing over the 650ms easing curve.
+    window.cancelAnimationFrame(resizeReleaseFrame.current)
+    resizeReleaseFrame.current = window.requestAnimationFrame(() =>
+      setIsResizing(false),
+    )
+  }
+  const splitKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 0.08 : 0.02
+    let next = mainRatio
+    if (e.key === "ArrowLeft") {
+      next = clamp(mainRatio - step, 0.3, 0.8)
+      e.preventDefault()
+    } else if (e.key === "ArrowRight") {
+      next = clamp(mainRatio + step, 0.3, 0.8)
+      e.preventDefault()
+    } else if (e.key === "Home") {
+      next = 0.3
+      e.preventDefault()
+    } else if (e.key === "End") {
+      next = 0.8
+      e.preventDefault()
+    } else {
+      return
+    }
+    e.stopPropagation()
+    window.cancelAnimationFrame(resizeReleaseFrame.current)
+    setIsResizing(true)
+    resizeReleaseFrame.current = window.requestAnimationFrame(() =>
+      setMainRatio(next),
     )
   }
 
@@ -1268,6 +1337,11 @@ export default function Workspace() {
         onClose={close}
         onNeedAuth={onNeedAuth}
         slot={Object.keys(openTemps).length > 0 ? "left" : undefined}
+        dockStyle={
+          openTempCount === 1
+            ? { top: 0, left: 0, height: "100vh", width: `calc(${mainRatio * 100}vw)` }
+            : undefined
+        }
       />
 
       {tempLayout.map((item) => (
@@ -1280,13 +1354,12 @@ export default function Workspace() {
           onClose={() => minimizeTemp(item.id)}
           onNeedAuth={onNeedAuth}
           dockStyle={{
-            top: item.top,
-            height: item.height,
-            left: "calc(50vw + 1px)",
-            width: "calc(50vw - 1px)",
+            ...(openTempCount === 1
+              ? { top: 0, height: "100vh", left: `calc(${mainRatio * 100}vw + 1px)`, width: `calc(${(1 - mainRatio) * 100}vw - 1px)` }
+              : { top: item.top, height: item.height, left: "calc(50vw + 1px)", width: "calc(50vw - 1px)" }),
             // Direct manipulation: never let the 650ms open/close morph lag
             // behind the pointer or re-animate the final commit.
-            transition: isResizing ? "none" : undefined,
+            transition: (isResizing || splitDrag.current) ? "none" : undefined,
           }}
           slot="right"
         />
@@ -1340,6 +1413,39 @@ export default function Workspace() {
           </div>
         )
       })}
+      {openTempCount === 1 && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize terminal"
+          aria-valuemin={30}
+          aria-valuemax={80}
+          aria-valuenow={Math.round(mainRatio * 100)}
+          data-temp-dock
+          tabIndex={0}
+          title="Drag to resize · arrow keys fine-tune"
+          onPointerDown={startSplit}
+          onPointerMove={moveSplit}
+          onPointerUp={endSplit}
+          onPointerCancel={endSplit}
+          onKeyDown={splitKeyDown}
+          className="group fixed z-[65] flex touch-none select-none items-center justify-center outline-none"
+          style={{
+            top: 0,
+            left: `calc(${mainRatio * 100}vw - 4px)`,
+            width: 8,
+            height: "100vh",
+            cursor: "ew-resize",
+            transition: (isResizing || splitDrag.current) ? "none" : undefined,
+          }}
+        >
+          <span
+            aria-hidden
+            className="pointer-events-none h-full w-[2px] rounded-full transition-[width,background-color] duration-150 bg-white/10 group-hover:w-3 group-hover:bg-amber-300/70 group-focus-visible:w-3 group-focus-visible:bg-amber-300/70"
+          />
+        </div>
+      )}
+
 
       {tempDockMounted && (
         <div
