@@ -187,6 +187,30 @@ body.still-resizing-temp * {
 .cursor-blink { animation: blink 1.1s steps(1) infinite; }
 .rise { animation: rise 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
+/* Temp dock presence: it belongs to the scratch terminals, so it rises in
+   with the first one and settles away with the last. Transform/opacity only,
+   keeping the blurred panel on its own compositor layer. */
+@keyframes temp-dock-in {
+  from { opacity: 0; transform: translate3d(10px, 14px, 0) scale(0.97); }
+  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+@keyframes temp-dock-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(6px, 10px, 0) scale(0.98); }
+}
+.temp-dock-in,
+.temp-dock-out { transform-origin: bottom right; }
+.temp-dock-in { animation: temp-dock-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.temp-dock-out {
+  animation: temp-dock-out 0.22s cubic-bezier(0.4, 0, 1, 1) both;
+  pointer-events: none;
+}
+@keyframes temp-row-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.temp-row-in { animation: temp-row-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
 @media (prefers-reduced-motion: reduce) {
   .rise, .cursor-blink, .step-next, .step-back { animation: none; }
   *, *::before, *::after {

@@ -55,6 +55,8 @@ type Sort = "manual" | "recent" | "name"
 const TEMP_DOCK_GUTTER = 2
 /** A tile cannot be dragged below this height (or half the dock, if smaller). */
 const TEMP_MIN_TILE_H = 120
+/** The dock's exit animation; the node stays mounted for exactly this long. */
+const TEMP_DOCK_EXIT_MS = 220
 
 interface TempTile {
   id: string
@@ -91,6 +93,22 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
+/**
+ * Where the dock will rest before its first temp mounts. The first temp is
+ * created while the dock is still absent, so the overlay morphs out of the
+ * same bottom-right corner the dock is about to occupy.
+ */
+function tempDockAnchorRect(): DOMRect {
+  const width = Math.min(302, Math.max(0, window.innerWidth - 40))
+  const height = 72
+  return new DOMRect(
+    window.innerWidth - 20 - width,
+    window.innerHeight - 20 - height,
+    width,
+    height,
+  )
+}
+
 // Transient key text cache: memory only, cleared on reload. Lets the
 // key-library flow connect without re-pasting within a session.
 const keyTextCache = new Map<string, string>()
@@ -110,13 +128,20 @@ export default function Workspace() {
   const [sort, setSort] = useState<Sort>("manual")
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<OpenState | null>(null)
-  // Temp terminal: memory-only scratch session in its own overlay docked
   // Temp terminals: arrays of memory-only scratch sessions, each docked in
   // its own overlay beside main. Minimize hides the view (worker +
-  // transcript survive). The dock is always visible this session (memory only).
+  // transcript survive). The dock only exists while at least one temp does.
   const [temps, setTemps] = useState<Session[]>([])
   const [openTemps, setOpenTemps] = useState<Record<string, OpenState>>({})
   const [tempDockCollapsed, setTempDockCollapsed] = useState(false)
+  // Keep the dock mounted through its exit animation, then drop it (and its
+  // focusables) entirely so an empty workspace has no ghost controls.
+  const [tempDockMounted, setTempDockMounted] = useState(false)
+  // Last populated dock, retained for the exit fade: killing the final temp
+  // should dissolve the whole panel, not collapse it to a bare header first.
+  const dockTempsRef = useRef<Session[]>([])
+  const hasTemps = temps.length > 0
+  const dockTemps = hasTemps ? temps : dockTempsRef.current
 
   // Per-temp dock weights (arbitrary proportional units). A missing entry is
   // one fair share, so new/minimized/restored tiles self-heal their layout.
@@ -215,6 +240,28 @@ export default function Workspace() {
     }
   }, [])
 
+  // Remember the live rows while the dock exists; the exit render reads this
+  // snapshot because `temps` is already empty by then.
+  useEffect(() => {
+    if (hasTemps) dockTempsRef.current = temps
+  }, [hasTemps, temps])
+
+  // Mount on the first temp; after the last one is killed, hold the node for
+  // its exit animation before removing it. Re-entry (a new temp during the
+  // fade) cancels the pending unmount and plays the entrance again.
+  useEffect(() => {
+    if (hasTemps) {
+      setTempDockMounted(true)
+      return
+    }
+    if (!tempDockMounted) return
+    const timer = window.setTimeout(
+      () => setTempDockMounted(false),
+      prefersReducedMotion() ? 0 : TEMP_DOCK_EXIT_MS,
+    )
+    return () => window.clearTimeout(timer)
+  }, [hasTemps, tempDockMounted])
+
   const openSession = useCallback((s: Session, el: HTMLElement | null, autoConnect = true) => {
     returnTarget.current = el ?? searchRef.current
     window.clearTimeout(closeTimer.current)
@@ -264,8 +311,7 @@ export default function Workspace() {
   const morphTemp = (s: Session, el: HTMLElement | null, autoConnect = true) => {
     const id = s.id
     const rect =
-      el?.getBoundingClientRect() ??
-      new DOMRect(window.innerWidth / 2 - 360, window.innerHeight - 200, 720, 120)
+      el?.getBoundingClientRect() ?? tempDockAnchorRect()
     setOpenTemps((o) => ({ ...o, [id]: { session: s, rect, phase: "enter", autoConnect } }))
     requestAnimationFrame(() =>
       requestAnimationFrame(() =>
@@ -457,6 +503,9 @@ export default function Workspace() {
 
   const toggleTemp = useCallback(() => {
     if (authForRef.current) return // main dialog up; retry after it resolves
+    // A fresh dock should reveal its first row rather than inherit a collapse
+    // choice from a previous batch of temps.
+    if (!temps.length) setTempDockCollapsed(false)
     // Ctrl/Cmd+Shift+T always opens a new temp terminal. Names use a
     // monotonic counter so they never collide after kills; ids stay
     // temp-* guarded so main-close never kills them.
@@ -488,7 +537,7 @@ export default function Workspace() {
         : 1
       return { ...sizes, [s.id]: weight }
     })
-  }, [open, openTemps, store.sessions])
+  }, [open, openTemps, store.sessions, temps.length])
   // Temp toggle on capture: runs before xterm sees the key so the combo
   // never leaks bytes into the PTY (same pattern as the overlay gate).
   const toggleRef = useRef(toggleTemp)
@@ -891,9 +940,9 @@ export default function Workspace() {
   )
 
   // Temp dock helpers: aggregate status dot and per-temp label/state.
-  const tempAggregateDot = () => {
-    if (!temps.length) return "bg-white/30"
-    const states = temps.map((t) => connectionState(t.id))
+  const tempAggregateDot = (list: Session[] = temps) => {
+    if (!list.length) return "bg-white/30"
+    const states = list.map((t) => connectionState(t.id))
     if (states.includes("error")) return "bg-red-400"
     // Neutral while connecting: amber is "needs you" in the orb's own
     // vocabulary, and a starting session is not an alarm.
@@ -918,7 +967,7 @@ export default function Workspace() {
     return (
       <li
         key={temp.id}
-        className={`flex items-center gap-2 rounded-md border px-2 py-1 font-mono text-[11px] uppercase tracking-[0.15em] ${isOpen ? "border-amber-300/70 text-still-fg" : "border-white/10 text-still-dim"}`}
+        className={`temp-row-in flex items-center gap-2 rounded-md border px-2 py-1 font-mono text-[11px] uppercase tracking-[0.15em] ${isOpen ? "border-amber-300/70 text-still-fg" : "border-white/10 text-still-dim"}`}
       >
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tempDotClass(temp.id)}`} aria-hidden />
         <span className="truncate">{temp.name} · {connectionState(temp.id)}</span>
@@ -1292,55 +1341,57 @@ export default function Workspace() {
         )
       })}
 
-      <div
-        id="temp-pill"
-        data-temp-dock
-        className="fixed bottom-5 right-5 z-[70] flex flex-col items-start gap-1.5 rounded-lg border border-amber-300/20 bg-black/70 p-1.5 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur"
-      >
-        <div className="flex items-center gap-1.5">
-          <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-1">
-            <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot()}`} aria-hidden />
-            <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">TERMINAL DOCK</span>
-            <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">{temps.length}</span>
-          </span>
-          <button
-            type="button"
-            onClick={() => setTempDockCollapsed((v) => !v)}
-            aria-expanded={!tempDockCollapsed}
-            aria-label={tempDockCollapsed ? "Expand temp terminals" : "Collapse temp terminals"}
-            className="rounded-md border border-white/10 p-1 text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-          >
-            {dockCollapseIcon}
-          </button>
-          <button
-            type="button"
-            onClick={toggleTemp}
-            className="rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-          >
-            + New
-          </button>
+      {tempDockMounted && (
+        <div
+          id="temp-pill"
+          data-temp-dock
+          aria-hidden={hasTemps ? undefined : true}
+          inert={hasTemps ? undefined : true}
+          className={`fixed bottom-5 right-5 z-[70] flex flex-col items-start gap-1.5 rounded-lg border border-amber-300/20 bg-black/70 p-1.5 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur ${
+            hasTemps ? "temp-dock-in" : "temp-dock-out"
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-1">
+              <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot(dockTemps)}`} aria-hidden />
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">TERMINAL DOCK</span>
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">{dockTemps.length}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setTempDockCollapsed((v) => !v)}
+              aria-expanded={!tempDockCollapsed}
+              aria-label={tempDockCollapsed ? "Expand temp terminals" : "Collapse temp terminals"}
+              className="rounded-md border border-white/10 p-1 text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
+            >
+              {dockCollapseIcon}
+            </button>
+            <button
+              type="button"
+              onClick={toggleTemp}
+              className="rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
+            >
+              + New
+            </button>
+          </div>
+          {!tempDockCollapsed && dockTemps.length > 0 && (
+            <ul className="flex w-72 flex-col gap-1">
+              {dockTemps.map((t) => tempRow(t))}
+            </ul>
+          )}
+          {tempDockCollapsed && dockTemps.length > 0 && (
+            <button
+              type="button"
+              aria-label="Expand temp terminals"
+              onClick={() => setTempDockCollapsed(false)}
+              className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot(dockTemps)}`} aria-hidden />
+              <span className="ml-auto">{dockTemps.length} temps</span>
+            </button>
+          )}
         </div>
-        {!tempDockCollapsed && (
-          <ul className="flex w-72 flex-col gap-1">
-            {temps.length === 0 ? (
-              <li className="rounded-md border border-dashed border-white/10 px-2 py-2 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">No temp terminals yet</li>
-            ) : (
-              temps.map((t) => tempRow(t))
-            )}
-          </ul>
-        )}
-        {tempDockCollapsed && (
-          <button
-            type="button"
-            aria-label="Expand temp terminals"
-            onClick={() => setTempDockCollapsed(false)}
-            className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-          >
-            <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot()}`} aria-hidden />
-            <span className="ml-auto">{temps.length} temps</span>
-          </button>
-        )}
-      </div>
+      )}
 
       {showNew ? (
         <div
