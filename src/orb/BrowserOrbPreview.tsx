@@ -88,7 +88,7 @@ export default function BrowserOrbPreview() {
   return createPortal(<>
     <aside className="orb-preview" style={{ left: position.x, top: position.y }} aria-label="Browser-only orb preview">
       <OrbButton
-        buttonRef={button} size={size} state={error ? "unknown" : summary.visual} paused={snapshot.preferences.paused}
+        buttonRef={button} size={size} state={error ? "unknown" : summary.visual} paused={snapshot.preferences.paused} speed={snapshot.preferences.speed}
         label={`Still orb preview — ${label}${summary.row ? ` · ${summary.row.name}` : ""}. Open session.`}
         title={`${label}\n${summary.detail}\nBrowser-only preview · drag to move · right-click for controls`}
         menuOpen={menu}

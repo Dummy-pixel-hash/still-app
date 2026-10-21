@@ -1,14 +1,15 @@
 import { useRef, type CSSProperties, type RefObject } from "react"
 import SmokedGlassOrb, { OrbStateIcon } from "./SmokedGlassOrb"
-import type { OrbVisualState } from "./types"
+import type { OrbSpeed, OrbVisualState } from "./types"
 
 /** Shared mouse/touch/keyboard semantics; OS and browser placement stay separate. */
 export default function OrbButton({
-  size, state, paused, label, title, activate, menu, drag, nudge, style, buttonRef, menuOpen, nativeDrag = false, interact,
+  size, state, paused, speed, label, title, activate, menu, drag, nudge, style, buttonRef, menuOpen, nativeDrag = false, interact,
 }: {
   size: number
   state: OrbVisualState
   paused: boolean
+  speed: OrbSpeed
   label: string
   title: string
   activate(): void
@@ -77,7 +78,7 @@ export default function OrbButton({
       }
     }}
   >
-    <SmokedGlassOrb state={state} size={size} paused={paused} />
+    <SmokedGlassOrb state={state} size={size} paused={paused} speed={speed} />
     <span className="orb-state-mark"><OrbStateIcon state={state} /></span>
   </button>
 }

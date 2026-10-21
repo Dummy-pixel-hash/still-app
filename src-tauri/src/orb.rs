@@ -8,8 +8,21 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 const MAIN: &str = "main";
 const ORB: &str = "orb";
 const MAX_ROWS: usize = 64;
-const OUTPUT_ACTIVE_MS: u64 = 3_000;
+const OUTPUT_ACTIVE_MS: u64 = 8_000;
 const STALE_MS: u64 = 15_000;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OrbSpeed {
+    Slow,
+    Normal,
+    Fast,
+}
+impl Default for OrbSpeed {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -17,6 +30,8 @@ pub struct OrbPreferences {
     enabled: bool,
     size: u32,
     paused: bool,
+    #[serde(default)]
+    speed: OrbSpeed,
 }
 impl Default for OrbPreferences {
     fn default() -> Self {
@@ -24,6 +39,7 @@ impl Default for OrbPreferences {
             enabled: false,
             size: 64,
             paused: false,
+            speed: OrbSpeed::Normal,
         }
     }
 }
@@ -796,6 +812,16 @@ mod tests {
     #[test]
     fn preferences_default_off_and_sizes_are_bounded() {
         assert!(!OrbPreferences::default().enabled);
+        assert_eq!(OrbPreferences::default().speed, OrbSpeed::Normal);
+        // Older payloads without a speed stay valid; unknown speeds do not.
+        assert!(serde_json::from_str::<OrbPreferences>(
+            r#"{"enabled":false,"size":64,"paused":false}"#
+        )
+        .is_ok());
+        assert!(serde_json::from_str::<OrbPreferences>(
+            r#"{"enabled":false,"size":64,"paused":false,"speed":"warp"}"#
+        )
+        .is_err());
         for size in [48, 64, 96] {
             assert!(
                 OrbPreferences {
@@ -836,10 +862,10 @@ mod tests {
         let mut live = row("s-1", Signal::Connected);
         live.last_output_at = Some(100);
         assert!(live.active(200));
-        assert!(!live.active(3100));
+        assert!(!live.active(8100));
         assert!(!live.active(50));
         assert_eq!(live.signal, Signal::Connected);
-        validate_rows(std::slice::from_mut(&mut live), 4000).unwrap();
+        validate_rows(std::slice::from_mut(&mut live), 9000).unwrap();
         assert_eq!(live.last_output_at, None);
         assert_eq!(live.priority(4000), 4);
     }

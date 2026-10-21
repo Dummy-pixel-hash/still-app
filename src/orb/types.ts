@@ -3,10 +3,13 @@ import type { ConnState } from "../types"
 /** Rendering vocabulary, not a claim that an agent detector exists. */
 export type OrbVisualState = "idle" | "working" | "needs-input" | "done" | "error" | "unknown"
 export type OrbSize = 48 | 64 | 96
+/** Multiplies the authored material speed and the attention pulse. */
+export type OrbSpeed = "slow" | "normal" | "fast"
 export interface OrbPreferences {
   enabled: boolean
   size: OrbSize
   paused: boolean
+  speed: OrbSpeed
 }
 
 /** Only facts currently observable by Still. No inferred agent completion. */

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react"
 import { GlassRenderer } from "./glassRenderer"
-import type { OrbVisualState } from "./types"
+import type { OrbSpeed, OrbVisualState } from "./types"
 import "./orb.css"
 
 /**
@@ -11,24 +11,25 @@ import "./orb.css"
  * FIRST VIEWPORT: one 64px object, transparent surroundings, no panel or hero.
  * FORM: user-selected smoked-glass study; existing workspace stays unchanged.
  */
-export default function SmokedGlassOrb({ state, size = 64, paused = false, force2D = false }: {
+export default function SmokedGlassOrb({ state, size = 64, paused = false, speed = "normal", force2D = false }: {
   state: OrbVisualState
   size?: number
   paused?: boolean
+  speed?: OrbSpeed
   /** Test fixture / constrained-client fallback; never drives session facts. */
   force2D?: boolean
 }) {
   const host = useRef<HTMLSpanElement>(null)
   const renderer = useRef<GlassRenderer | null>(null)
-  const current = useRef({ state, paused })
-  current.current = { state, paused }
+  const current = useRef({ state, paused, speed })
+  current.current = { state, paused, speed }
   useEffect(() => {
     if (!host.current) return
-    const instance = new GlassRenderer(host.current, current.current.state, current.current.paused, force2D)
+    const instance = new GlassRenderer(host.current, current.current.state, current.current.paused, current.current.speed, force2D)
     renderer.current = instance
     return () => { instance.dispose(); renderer.current = null }
   }, [force2D])
-  useEffect(() => { renderer.current?.update(state, paused) }, [state, paused])
+  useEffect(() => { renderer.current?.update(state, paused, speed) }, [state, paused, speed])
   return <span className="smoked-glass" data-state={state} style={{ width: size, height: size }} aria-hidden="true">
     <span className="smoked-glass-host" ref={host} />
   </span>

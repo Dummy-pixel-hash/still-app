@@ -34,6 +34,7 @@ export default function OrbScreen() {
       size={snapshot.preferences.size}
       state={error ? "unknown" : summary.visual}
       paused={paused}
+      speed={snapshot.preferences.speed}
       label={`Still orb — ${status}${name}. Open Still. Right-click for sessions and controls.`}
       title={`${status}${name}\n${summary.detail}\nDrag to move · arrow keys to nudge · right-click for controls`}
       activate={() => send({ type: "open" })}

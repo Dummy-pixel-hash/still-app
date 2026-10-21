@@ -1,9 +1,10 @@
 import { glassFragment, glassVertex } from "./glassShader"
-import type { OrbVisualState } from "./types"
+import type { OrbSpeed, OrbVisualState } from "./types"
 
 type RGB = [number, number, number]
 interface Palette { primary: RGB; secondary: RGB; pearl: RGB }
 interface Material extends Palette { speed: number; activity: number }
+const rates: Record<OrbSpeed, number> = { slow: 0.6, normal: 1, fast: 1.6 }
 const materials: Record<OrbVisualState, Material> = {
   idle: { speed: 0.2, activity: 0.2, primary: [0.45, 0.51, 0.64], secondary: [0.65, 0.66, 0.76], pearl: [0.84, 0.87, 0.93] },
   unknown: { speed: 0.16, activity: 0.16, primary: [0.38, 0.46, 0.61], secondary: [0.53, 0.57, 0.69], pearl: [0.76, 0.81, 0.89] },
@@ -29,6 +30,7 @@ export class GlassRenderer {
   private dirty = true
   private state: OrbVisualState
   private paused: boolean
+  private rate = 1
   private from: Palette
   private transitionAt = performance.now() - 1000
   private stateAt = performance.now()
@@ -40,9 +42,10 @@ export class GlassRenderer {
   private resizeObserver: ResizeObserver
   private intersectionObserver: IntersectionObserver
 
-  constructor(private host: HTMLElement, state: OrbVisualState, paused: boolean, force2D = false) {
+  constructor(private host: HTMLElement, state: OrbVisualState, paused: boolean, speed: OrbSpeed = "normal", force2D = false) {
     this.state = state
     this.paused = paused
+    this.rate = rates[speed] ?? 1
     this.from = materials[state]
     this.canvas = this.makeCanvas()
     try {
@@ -155,7 +158,7 @@ export class GlassRenderer {
     return { primary: blend(this.from.primary, target.primary), secondary: blend(this.from.secondary, target.secondary), pearl: blend(this.from.pearl, target.pearl) }
   }
 
-  update(state: OrbVisualState, paused: boolean) {
+  update(state: OrbVisualState, paused: boolean, speed: OrbSpeed = "normal") {
     if (state !== this.state) {
       const now = performance.now()
       this.from = this.palette(now)
@@ -165,6 +168,7 @@ export class GlassRenderer {
       this.state = state
     }
     this.paused = paused
+    this.rate = rates[speed] ?? 1
     this.wake()
   }
 
@@ -194,8 +198,14 @@ export class GlassRenderer {
     const dt = Math.min(0.1, Math.max(0, (now - this.lastTick) / 1000))
     this.lastTick = now
     const material = materials[this.state]
-    if (!this.frozen) { this.time += dt * material.speed; this.pulseTime += dt }
-    if (this.dirty || now - this.lastPaint >= 1000 / (this.state === "idle" || this.state === "unknown" ? 15 : 30)) {
+    if (!this.frozen) {
+      this.time += dt * material.speed * this.rate
+      this.pulseTime += dt * this.rate
+    }
+    // Subtract a millisecond of tolerance: the nominal interval otherwise lands
+    // exactly on a vsync boundary and silently skips an extra frame.
+    const fps = this.state === "idle" || this.state === "unknown" ? 15 : 30
+    if (this.dirty || now - this.lastPaint >= 1000 / fps - 1) {
       const phase = this.pulseTime % 4.6
       const pulse = this.state === "needs-input" && !this.frozen
         ? Math.exp(-Math.pow((phase - 0.48) / 0.18, 2)) + Math.exp(-Math.pow((phase - 0.96) / 0.18, 2)) : 0

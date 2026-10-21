@@ -6,7 +6,7 @@ import { OrbPublisher } from '../src/orb/publisher.ts'
 import { failingBridge } from '../src/bridge/nativeBridge.ts'
 
 const input = (patch = {}) => ({ id: 's-one', name: 'Fixture session', nativeId: 'native-1', connection: 'connected', attention: null, changedAt: 100, ...patch })
-const prefs = (enabled = true) => ({ enabled, size: 64, paused: false })
+const prefs = (enabled = true) => ({ enabled, size: 64, paused: false, speed: 'normal' })
 const turn = () => new Promise(resolve => setImmediate(resolve))
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 
@@ -28,8 +28,14 @@ function harness(overrides = {}) {
 
 test('orb settings default off; nested partial/corrupt/legacy values cannot enable it', () => {
   for (const v of [null, undefined, 3, { enabled: 'true', size: 176 }, { orbEnabled: true }]) assert.deepEqual(normalizeOrbPreferences(v), prefs(false))
-  assert.deepEqual(normalizeOrbPreferences({ enabled: true, size: 48, paused: true, token: 'ignored' }), { enabled: true, size: 48, paused: true })
+  assert.deepEqual(normalizeOrbPreferences({ enabled: true, size: 48, paused: true, token: 'ignored' }), { enabled: true, size: 48, paused: true, speed: 'normal' })
   assert.equal(normalizeOrbPreferences({ size: 96 }).size, 96)
+})
+
+test('animation speed accepts only the authored steps; anything else is normal', () => {
+  assert.equal(normalizeOrbPreferences({ speed: 'slow' }).speed, 'slow')
+  assert.equal(normalizeOrbPreferences({ speed: 'fast' }).speed, 'fast')
+  for (const speed of ['warp', 'FAST', 2, null, undefined]) assert.equal(normalizeOrbPreferences({ speed }).speed, 'normal')
 })
 
 test('a connection is not an agent verdict; activity expires to unknown, never done', () => {
@@ -37,7 +43,8 @@ test('a connection is not an agent verdict; activity expires to unknown, never d
   assert.equal(describeOrbRow(row, 10000).visual, 'unknown')
   const active = buildOrbRows([input()], new Map([['s-one', 9990]]), 10000)[0]
   assert.equal(describeOrbRow(active, 10000).label, 'Output active')
-  assert.equal(describeOrbRow(active, 12990).visual, 'unknown')
+  assert.equal(describeOrbRow(active, 12990).visual, 'working')
+  assert.equal(describeOrbRow(active, 17990).visual, 'unknown')
   assert.equal(describeOrbRow(active, 9000).visual, 'unknown')
   assert.equal(buildOrbRows([input({ connection: 'disconnected' })], new Map([['s-one', 9990]]), 10000).length, 0)
 })
@@ -124,7 +131,7 @@ test('publisher is opt-in, coalesces bursts, clears activity on expiry/removal/d
     await turn()
     assert.equal(h.calls.length, before + 1)
     assert.equal(h.rows()[0].lastOutputAt, 10000)
-    h.setTime(13001); h.publisher.tick(); await turn()
+    h.setTime(18001); h.publisher.tick(); await turn()
     assert.equal(h.rows()[0].lastOutputAt, null)
     h.publisher.update([], prefs()); await turn()
     assert.deepEqual(h.rows(), [])

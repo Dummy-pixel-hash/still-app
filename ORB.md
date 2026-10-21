@@ -11,6 +11,7 @@ Open **Settings → Orb companion → Float above other apps** in the desktop ap
 - **Right-click / context-menu key / Shift+F10:** session list, Open Still, pause/resume, reset position, and hide.
 - **Arrow keys while focused:** move 8 logical pixels; Shift+arrow moves 20.
 - **Reset position:** return to the main window's display corner, inside the display's work area.
+- **Animation speed:** Slow, Normal, or Fast (0.6×, 1×, 1.6×) scales the material drift and the attention pulse without changing status timings.
 - **Pause:** stop animation while keeping the material visible. System reduced motion also stops animation.
 
 The companion remains visible while Still is minimized. Showing it and updating its status do not request focus; focus is acquired only for a user interaction. Closing Still closes the companion and exits normally. Hiding the orb does not disconnect sessions. Position is remembered on hide/close in the native app configuration directory (`orb-position.v1.json`); unavailable displays and invalid positions are clamped to an available work area.
@@ -23,7 +24,7 @@ Session activation resolves stable local IDs against the current workspace. It h
 | --- | --- | --- |
 | No active connections | No active connections | Neutral; slow ambient drift |
 | Connection being established | Connecting | Quiet neutral; slow ambient drift |
-| Terminal bytes received within the last 3 seconds | Output active | Blue/violet moving ribbon |
+| Terminal bytes received within the last 8 seconds | Output active | Blue/violet moving ribbon |
 | Connected, without recent output | Connected · agent status unknown | Quiet neutral; slow ambient drift |
 | Actual credential prompt | Sign-in required | Amber attention |
 | Actual untrusted host-key prompt | Review host key | Amber attention |
@@ -46,7 +47,7 @@ The approved original studies remain separate at `../orb-mockups/` (port 4178 wh
 
 ## Boundaries
 
-- `src/orb/glassRenderer.ts` and `glassShader.ts`: original approved shader, a Canvas2D fallback, bounded DPR/frame rate, reduced motion, visibility and resource cleanup.
+- `src/orb/glassRenderer.ts` and `glassShader.ts`: original approved shader, a Canvas2D fallback, bounded DPR/frame rate, user-selected speed, reduced motion, visibility and resource cleanup.
 - `src/orb/state.ts`: pure presentation of observed facts, urgency, activity expiry, settings validation, and browser geometry.
 - `src/orb/publisher.ts` / `useOrbPublisher.ts`: main-window-only observer. Data callbacks record a timestamp, not terminal content. Bursts are coalesced; a small heartbeat continues independently of animation frames.
 - `src/screens/OrbScreen.tsx`: isolated native route (`?orb=1`). It never mounts Workspace, xterm, a connection owner, or the settings store.

@@ -1,7 +1,8 @@
 import type { OrbPreferences, OrbRow, OrbSessionInput, OrbSnapshot, OrbVisualState } from "./types"
 
-export const DEFAULT_ORB_PREFERENCES: Readonly<OrbPreferences> = Object.freeze({ enabled: false, size: 64, paused: false })
-export const OUTPUT_ACTIVE_MS = 3000
+export const DEFAULT_ORB_PREFERENCES: Readonly<OrbPreferences> = Object.freeze({ enabled: false, size: 64, paused: false, speed: "normal" })
+/** Hysteresis: a burst of output stays "active" through short agent pauses. */
+export const OUTPUT_ACTIVE_MS = 8000
 export const PUBLISH_HEARTBEAT_MS = 4000
 export const PUBLISH_STALE_MS = 15000
 export const MAX_ORB_ROWS = 64
@@ -12,6 +13,7 @@ export function normalizeOrbPreferences(value: unknown): OrbPreferences {
     enabled: v.enabled === true,
     size: v.size === 48 || v.size === 96 ? v.size : 64,
     paused: v.paused === true,
+    speed: v.speed === "slow" || v.speed === "fast" ? v.speed : "normal",
   }
 }
 

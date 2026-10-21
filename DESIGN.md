@@ -51,7 +51,7 @@ Keep existing workspace/window and field radii. The orb silhouette stays circula
 
 ## Components
 
-- **SmokedGlassOrb:** reusable, status-driven rendering; bounded resolution and frame rate; static visible frames when paused or reduced motion is requested. Canvas2D is the graceful fallback, not the default design.
+- **SmokedGlassOrb:** reusable, status-driven rendering; bounded resolution and frame rate; pause plus a Slow/Normal/Fast speed preference; static visible frames when paused or reduced motion is requested. Canvas2D is the graceful fallback, not the default design.
 - **Orb companion controls:** opt-in enable, size, motion, and reset; actual pending/error feedback. The small settings material preview is explicitly not live status.
 - **Orb action:** click/Enter/Space returns to Still; dragging must not trigger activation. A small status symbol supplements colour, and the menu exposes readable status labels.
 - **Session menu:** metadata only, with session activation, motion, reset, and hide. No synthetic session data in the live interface.

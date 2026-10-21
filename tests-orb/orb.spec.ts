@@ -11,7 +11,7 @@ async function seed(page: Page, enabled = false) {
       projects: [{ id: "fixture", name: "Orb test project", note: "Local UI simulation only", order: 0 }],
       sessions: [{ id: "s-orb-fixture", name: "Fixture session", host: "fixture.invalid", port: 22, username: "fixture", projectId: "fixture", workingDirectory: "~", authMethod: "ask", remember: false, tmuxSession: "fixture", createdAt: 1, updatedAt: 1 }],
       order: { fixture: ["s-orb-fixture"] }, keys: [],
-      settings: { confirmRemove: true, terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 }, imageInsertStyle: "path", orb: { enabled, size: 64, paused: true } },
+      settings: { confirmRemove: true, terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 }, imageInsertStyle: "path", orb: { enabled, size: 64, paused: true, speed: "normal" } },
     }))
   }, { enabled })
 }
@@ -125,6 +125,8 @@ test("settings enable a browser-only preview; menu preferences, drag, nudge and 
   await expect(orb(page)).toBeVisible()
   await dialog.getByLabel("Orb size").selectOption("96")
   await expect(orb(page)).toHaveCSS("width", "96px")
+  await dialog.getByLabel("Animation speed").selectOption("fast")
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("still.m2.store.v1")!).settings.orb.speed)).toBe("fast")
   await dialog.getByRole("button", { name: "Reset position", exact: true }).click()
   await expect(dialog).toContainText("Position reset.")
   await page.screenshot({ path: `${screenshots}/settings-desktop.png` })
@@ -172,7 +174,7 @@ test("observed output is not an agent verdict; actual host-key events change att
     await writeSession("s-orb-fixture", "Done! Waiting for approval? This is arbitrary terminal output.")
   })
   await expect(orb(page)).toHaveAccessibleName(/Output active/)
-  await expect(orb(page)).toHaveAccessibleName(/agent status unknown/, { timeout: 6000 })
+  await expect(orb(page)).toHaveAccessibleName(/agent status unknown/, { timeout: 12000 })
   await page.evaluate(() => (window as any).orbTest.event({ type: "hostKeyPrompt", prompt: { host: "fixture.invalid", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:fixture", opensshKey: "fixture", changed: false } }))
   await expect(orb(page)).toHaveAccessibleName(/Review host key/)
   await page.evaluate(() => (window as any).orbTest.event({ type: "hostKeyPrompt", prompt: { host: "fixture.invalid", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:fixture", opensshKey: "fixture", changed: true } }))
