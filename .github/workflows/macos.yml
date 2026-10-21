@@ -1,0 +1,253 @@
+# Still — macOS CI / real build validation gate.
+#
+# Purpose: build the actual Still desktop application (React + Vite + Tauri 2)
+# on REAL hosted macOS runners for both Apple Silicon and Intel, produce the
+# real .app/.dmg bundles, and PROVE each app executable is a thin Mach-O binary
+# for the requested architecture by inspecting it (not by trusting Rust's
+# target name).
+#
+# Runners:
+#   arm64 -> macos-15       (real hosted Apple Silicon)
+#   x64   -> macos-15-intel (real hosted Intel)
+#
+# Do NOT replace either job with a cross-compile from the other architecture:
+# that would not validate the native runner/platform combination.
+#
+# Build success here proves compile+package for macOS only. It does NOT prove
+# Gatekeeper/notarized distribution or SSH/keyring runtime behaviour. Bundles
+# are unsigned unless Apple signing secrets are added later.
+
+name: still-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Architecture to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - arm64
+          - x64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: resolve macOS build matrix
+    # The matrix resolver is platform-independent; keep it on the cheap Linux
+    # runner instead of spending macOS minutes.
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - name: Build matrix
+        id: matrix
+        env:
+          REQUESTED_ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_ARCH" in
+            all)
+              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin"},{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin"}]'
+              ;;
+            arm64)
+              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin"}]'
+              ;;
+            x64)
+              include='[{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin"}]'
+              ;;
+            *)
+              echo "Unknown architecture: $REQUESTED_ARCH" >&2
+              exit 1
+              ;;
+          esac
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    name: build + verify (macOS ${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.include) }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build metadata (pre)
+        run: |
+          echo "commit=$GITHUB_SHA"
+          echo "ref=$GITHUB_REF"
+          echo "runner_os=$RUNNER_OS"
+          echo "runner_arch=$RUNNER_ARCH"
+          uname -a
+          sw_vers || true
+          xcode-select -p || true
+          xcodebuild -version || true
+          clang --version | head -n1 || true
+          node --version || true
+          npm --version || true
+          rustc --version || true
+          cargo --version || true
+          rustup target list --installed || true
+          tauri_lock="$(awk '/^name = "tauri"$/{getline; print; exit}' src-tauri/Cargo.lock)"
+          echo "tauri_crate_lock=$tauri_lock"
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Rust (stable + macOS target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install npm dependencies (locked)
+        run: npm ci
+
+      - name: Toolchain versions (post-install)
+        run: |
+          node -p "console.log('tauri_cli_npm=' + require('./node_modules/@tauri-apps/cli/package.json').version)"
+          npx tauri --version
+          rustc --version
+          cargo --version
+          rustup target list --installed
+
+      - name: Frontend typecheck
+        run: npm run typecheck
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Rust check (locked)
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      # Unit tests = full gate (fail the workflow on failure).
+      # The live SSH/tmux suites need a provisioned localhost fixture and are
+      # therefore opt-in, matching the Windows gates.
+      - name: Rust unit tests (locked, full gate)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins
+
+      - name: Rust integration tests (locked, sshd+tmux fixture required)
+        run: |
+          if [[ -n "${STILL_RUN_LIVE_SSH:-}" ]]; then
+            cargo test --locked --manifest-path src-tauri/Cargo.toml \
+              --test headless_ssh --test headless_ssh_hostkey --test hostkey_m5
+          else
+            echo 'SKIP: live SSH/tmux fixture not provisioned on this runner (STILL_RUN_LIVE_SSH unset). Unit tests above remain the full gate.'
+          fi
+
+      - name: Build Tauri app (macOS ${{ matrix.arch }})
+        run: npx tauri build --target ${{ matrix.target }}
+
+      - name: Verify Mach-O architecture + collect metadata
+        env:
+          TARGET: ${{ matrix.target }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          bundle="src-tauri/target/${TARGET}/release/bundle"
+          app_path="$(find "$bundle/macos" -maxdepth 1 -type d -name '*.app' -print 2>/dev/null | head -n1 || true)"
+          if [[ -z "${app_path:-}" ]]; then
+            echo "ERROR: no .app bundle found under $bundle/macos" >&2
+            find "src-tauri/target/${TARGET}/release" -maxdepth 3 -type d 2>/dev/null | head -50 >&2 || true
+            exit 1
+          fi
+
+          bin_path="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -name 'still-app' -print 2>/dev/null | head -n1 || true)"
+          if [[ -z "${bin_path:-}" ]]; then
+            bin_path="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -print 2>/dev/null | head -n1 || true)"
+          fi
+          if [[ -z "${bin_path:-}" || ! -x "$bin_path" ]]; then
+            echo "ERROR: no executable found inside $app_path/Contents/MacOS" >&2
+            exit 1
+          fi
+
+          echo "app=$app_path"
+          echo "binary=$bin_path"
+          echo "binary_size_bytes=$(stat -f%z "$bin_path")"
+          file "$bin_path"
+
+          archs="$(lipo -archs "$bin_path" | tr -d '[:space:]')"
+          echo "mach_archs=$archs"
+          if [[ "$archs" != "$EXPECTED_ARCH" ]]; then
+            echo "ARCH MISMATCH: expected ${EXPECTED_ARCH}, got ${archs}" >&2
+            exit 1
+          fi
+          if ! file "$bin_path" | grep -q 'Mach-O 64-bit executable'; then
+            echo 'FORMAT MISMATCH: expected a 64-bit Mach-O executable' >&2
+            exit 1
+          fi
+          echo "MACH-O ARCHITECTURE VERIFIED: ${EXPECTED_ARCH}"
+
+          dmg_count="$(find "$bundle/dmg" -type f -name '*.dmg' 2>/dev/null | wc -l | tr -d ' ' || true)"
+          if [[ "$dmg_count" == "0" ]]; then
+            echo 'ERROR: no .dmg was produced' >&2
+            exit 1
+          fi
+
+          app_zip="still-macos-${EXPECTED_ARCH}.app.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$app_zip"
+          if [[ ! -s "$app_zip" ]]; then
+            echo 'ERROR: failed to archive the .app bundle' >&2
+            exit 1
+          fi
+
+          find "$bundle/dmg" -type f -name '*.dmg' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            echo "dmg=$f size=$(stat -f%z "$f")"
+          done
+
+          manifest="still-macos-${EXPECTED_ARCH}-manifest.txt"
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "target=${TARGET}"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "node=$(node --version)"
+            echo "app=$app_path"
+            echo "app_size_bytes=$(du -sk "$app_path" | awk '{print $1 * 1024}')"
+            echo "app_zip=$app_zip"
+            echo "app_zip_size_bytes=$(stat -f%z "$app_zip")"
+            echo "app_zip_sha256=$(shasum -a 256 "$app_zip" | awk '{print $1}')"
+            echo "binary=$bin_path"
+            echo "binary_size_bytes=$(stat -f%z "$bin_path")"
+            echo "binary_sha256=$(shasum -a 256 "$bin_path" | awk '{print $1}')"
+            echo "mach_archs=$archs"
+          } > "$manifest"
+
+          while IFS= read -r f; do
+            echo "dmg=$f size=$(stat -f%z "$f") sha256=$(shasum -a 256 "$f" | awk '{print $1}')"
+          done < <(find "$bundle/dmg" -type f -name '*.dmg' 2>/dev/null | sort) >> "$manifest"
+
+          cat "$manifest"
+
+      - name: Upload macOS ${{ matrix.arch }} artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: still-macos-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            still-macos-${{ matrix.arch }}.app.zip
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            still-macos-${{ matrix.arch }}-manifest.txt
