@@ -211,6 +211,119 @@ body.still-resizing-temp * {
 }
 .temp-row-in { animation: temp-row-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both; }
 
+/* Temp dock: one status point at rest. Hover or keyboard focus opens the row;
+   touch devices keep it open, since hover never arrives there. */
+.temp-dock-peek {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 26px;
+  color: rgba(153, 146, 159, 0.85);
+  font-family: Geist, ui-sans-serif, system-ui, sans-serif;
+}
+.temp-dock__dot { filter: saturate(0.55); }
+.temp-dock-peek__rest {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  transition: opacity 140ms ease;
+}
+.temp-dock-peek__reveal {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  width: 17rem;
+  padding: 4px;
+  border-radius: 8px;
+  background: #0a0a0c;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.045);
+  opacity: 0;
+  transform: translateY(2px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.temp-dock-peek:hover .temp-dock-peek__reveal,
+.temp-dock-peek:focus-within .temp-dock-peek__reveal {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.temp-dock-peek:hover .temp-dock-peek__rest,
+.temp-dock-peek:focus-within .temp-dock-peek__rest { opacity: 0; }
+.temp-dock-peek__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.temp-dock-peek__list li {
+  border: 0;
+  background: transparent;
+  padding: 5px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  color: inherit;
+}
+.temp-dock-peek__list li:hover { background: rgba(255, 255, 255, 0.025); }
+.temp-dock-peek__list li button {
+  border: 0;
+  background: transparent;
+  padding: 3px 4px;
+  border-radius: 4px;
+  color: rgba(153, 146, 159, 0.8);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+.temp-dock-peek__list li button:hover {
+  color: #e2dce5;
+  background: rgba(255, 255, 255, 0.045);
+}
+.temp-dock-peek__list li button:last-child:hover { color: #ff7a7a; }
+.temp-dock-peek__list li button:disabled { opacity: 0.35; }
+.temp-dock-peek__add {
+  align-self: flex-end;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(153, 146, 159, 0.8);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 6px 7px;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+.temp-dock-peek__add:hover {
+  color: #e2dce5;
+  background: rgba(255, 255, 255, 0.045);
+}
+.temp-dock-peek__list li button:focus-visible,
+.temp-dock-peek__add:focus-visible {
+  outline: 1px solid rgba(255, 74, 74, 0.5);
+  outline-offset: 1px;
+}
+@media (hover: none) {
+  .temp-dock-peek__rest { display: none; }
+  .temp-dock-peek__reveal {
+    position: static;
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rise, .cursor-blink, .step-next, .step-back { animation: none; }
   *, *::before, *::after {

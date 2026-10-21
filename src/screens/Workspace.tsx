@@ -1451,51 +1451,23 @@ export default function Workspace() {
         <div
           id="temp-pill"
           data-temp-dock
+          role="group"
+          aria-label="Temp terminals"
           aria-hidden={hasTemps ? undefined : true}
           inert={hasTemps ? undefined : true}
-          className={`fixed bottom-5 right-5 z-[70] flex flex-col items-start gap-1.5 rounded-lg border border-amber-300/20 bg-black/70 p-1.5 shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur ${
-            hasTemps ? "temp-dock-in" : "temp-dock-out"
-          }`}
+          className={`temp-dock-peek ${hasTemps ? "temp-dock-in" : "temp-dock-out"}`}
         >
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2 py-1">
-              <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot(dockTemps)}`} aria-hidden />
-              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">TERMINAL DOCK</span>
-              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim">{dockTemps.length}</span>
-            </span>
-            <button
-              type="button"
-              onClick={() => setTempDockCollapsed((v) => !v)}
-              aria-expanded={!tempDockCollapsed}
-              aria-label={tempDockCollapsed ? "Expand temp terminals" : "Collapse temp terminals"}
-              className="rounded-md border border-white/10 p-1 text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-            >
-              {dockCollapseIcon}
-            </button>
-            <button
-              type="button"
-              onClick={toggleTemp}
-              className="rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-            >
+          <span className="temp-dock-peek__rest" aria-hidden>
+            <span className={`h-1.5 w-1.5 rounded-full temp-dock__dot ${tempAggregateDot(dockTemps)}`} />
+          </span>
+          <div className="temp-dock-peek__reveal">
+            {dockTemps.length > 0 && (
+              <ul className="temp-dock-peek__list">{dockTemps.map((t) => tempRow(t))}</ul>
+            )}
+            <button type="button" className="temp-dock-peek__add" onClick={toggleTemp}>
               + New
             </button>
           </div>
-          {!tempDockCollapsed && dockTemps.length > 0 && (
-            <ul className="flex w-72 flex-col gap-1">
-              {dockTemps.map((t) => tempRow(t))}
-            </ul>
-          )}
-          {tempDockCollapsed && dockTemps.length > 0 && (
-            <button
-              type="button"
-              aria-label="Expand temp terminals"
-              onClick={() => setTempDockCollapsed(false)}
-              className="flex w-full items-center gap-2 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.2em] text-still-dim transition-colors hover:border-amber-300/50 hover:text-still-fg"
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${tempAggregateDot(dockTemps)}`} aria-hidden />
-              <span className="ml-auto">{dockTemps.length} temps</span>
-            </button>
-          )}
         </div>
       )}
 
