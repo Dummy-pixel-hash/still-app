@@ -311,6 +311,9 @@ export default function SessionTerminal({
     })
 
     let resizeTimer = 0
+    // Last reveal rAF handle: cancelled on unmount so a pending fit never runs
+    // against a detached terminal surface.
+    let visibleFrame = 0
     const debounced = () => {
       window.clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(pushResize, 150)
@@ -318,6 +321,20 @@ export default function SessionTerminal({
     const observer = new ResizeObserver(debounced)
     observer.observe(host)
     window.addEventListener("resize", debounced)
+    // Re-fit + re-focus after the webview is un-hidden (minimize/restore).
+    // ResizeObserver and window 'resize' don't fire when a WebView is hidden
+    // and restored — the layout freezes and the browser reports no size
+    // change — so the grid stays at the stale pre-hide fit and the surface
+    // loses focus, which makes the alt-buffer wheel scroll (the only scroll
+    // path that needs focus) appear dead. visibilitychange is the reliable
+    // cross-webview signal; re-fit on the next frame so the layout has
+    // actually restored, then return focus to the terminal.
+    const onReveal = () => {
+      if (document.visibilityState !== 'visible') return
+      visibleFrame = window.requestAnimationFrame(pushResize)
+      terminal.focus()
+    }
+    document.addEventListener('visibilitychange', onReveal)
 
     // Initial fit on the next layout frame; nativeId changes trigger another
     // push below so a pre-connect fit cannot swallow the first real resize.
@@ -371,6 +388,9 @@ export default function SessionTerminal({
       window.clearTimeout(feedbackTimer.current)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
+      window.removeEventListener("resize", debounced)
+      document.removeEventListener('visibilitychange', onReveal)
+      if (visibleFrame) window.cancelAnimationFrame(visibleFrame)
       document.fonts?.removeEventListener?.("loadingdone", refitOnFonts)
       clipboard.dispose()
       unbindWheel()
