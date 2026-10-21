@@ -2,9 +2,9 @@
 #
 # Purpose: build the actual Still desktop application (React + Vite + Tauri 2)
 # on REAL hosted macOS runners for both Apple Silicon and Intel, produce the
-# real .app/.dmg bundles, and PROVE each app executable is a thin Mach-O binary
-# for the requested architecture by inspecting it (not by trusting Rust's
-# target name).
+# real .app bundle and a separate per-architecture .dmg, and PROVE each app
+# executable is a thin Mach-O binary for the requested architecture by
+# inspecting it (not by trusting Rust's target name).
 #
 # Runners:
 #   arm64 -> macos-15       (real hosted Apple Silicon)
@@ -56,13 +56,13 @@ jobs:
           set -euo pipefail
           case "$REQUESTED_ARCH" in
             all)
-              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin"},{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin"}]'
+              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin","mach_arch":"arm64"},{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin","mach_arch":"x86_64"}]'
               ;;
             arm64)
-              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin"}]'
+              include='[{"arch":"arm64","runner":"macos-15","target":"aarch64-apple-darwin","mach_arch":"arm64"}]'
               ;;
             x64)
-              include='[{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin"}]'
+              include='[{"arch":"x64","runner":"macos-15-intel","target":"x86_64-apple-darwin","mach_arch":"x86_64"}]'
               ;;
             *)
               echo "Unknown architecture: $REQUESTED_ARCH" >&2
@@ -155,12 +155,13 @@ jobs:
           fi
 
       - name: Build Tauri app (macOS ${{ matrix.arch }})
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles app
 
-      - name: Verify Mach-O architecture + collect metadata
+      - name: Verify Mach-O architecture + create DMG + collect metadata
         env:
           TARGET: ${{ matrix.target }}
           EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_MACH_ARCH: ${{ matrix.mach_arch }}
         run: |
           set -euo pipefail
 
@@ -188,21 +189,34 @@ jobs:
 
           archs="$(lipo -archs "$bin_path" | tr -d '[:space:]')"
           echo "mach_archs=$archs"
-          if [[ "$archs" != "$EXPECTED_ARCH" ]]; then
-            echo "ARCH MISMATCH: expected ${EXPECTED_ARCH}, got ${archs}" >&2
+          if [[ "$archs" != "$EXPECTED_MACH_ARCH" ]]; then
+            echo "ARCH MISMATCH: expected ${EXPECTED_MACH_ARCH}, got ${archs}" >&2
             exit 1
           fi
           if ! file "$bin_path" | grep -q 'Mach-O 64-bit executable'; then
             echo 'FORMAT MISMATCH: expected a 64-bit Mach-O executable' >&2
             exit 1
           fi
-          echo "MACH-O ARCHITECTURE VERIFIED: ${EXPECTED_ARCH}"
+          echo "MACH-O ARCHITECTURE VERIFIED: ${EXPECTED_MACH_ARCH}"
 
-          dmg_count="$(find "$bundle/dmg" -type f -name '*.dmg' 2>/dev/null | wc -l | tr -d ' ' || true)"
-          if [[ "$dmg_count" == "0" ]]; then
-            echo 'ERROR: no .dmg was produced' >&2
+          # Tauri's own DMG script mounts the image and drives Finder via
+          # AppleScript; that is flaky on hosted runners. Build the .app with
+          # Tauri and wrap it in a plain compressed DMG with hdiutil instead.
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          dmg="still-macos-${EXPECTED_ARCH}.dmg"
+          staging="$(mktemp -d)"
+          cleanup() { rm -rf "$staging"; }
+          trap cleanup EXIT
+          ditto "$app_path" "$staging/$(basename "$app_path")"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Still ${version}" -srcfolder "$staging" -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          if [[ ! -s "$dmg" ]]; then
+            echo 'ERROR: failed to create the .dmg' >&2
             exit 1
           fi
+          echo "dmg=$dmg"
+          echo "dmg_size_bytes=$(stat -f%z "$dmg")"
 
           app_zip="still-macos-${EXPECTED_ARCH}.app.zip"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$app_zip"
@@ -210,10 +224,6 @@ jobs:
             echo 'ERROR: failed to archive the .app bundle' >&2
             exit 1
           fi
-
-          find "$bundle/dmg" -type f -name '*.dmg' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            echo "dmg=$f size=$(stat -f%z "$f")"
-          done
 
           manifest="still-macos-${EXPECTED_ARCH}-manifest.txt"
           {
@@ -230,15 +240,14 @@ jobs:
             echo "app_zip=$app_zip"
             echo "app_zip_size_bytes=$(stat -f%z "$app_zip")"
             echo "app_zip_sha256=$(shasum -a 256 "$app_zip" | awk '{print $1}')"
+            echo "dmg=$dmg"
+            echo "dmg_size_bytes=$(stat -f%z "$dmg")"
+            echo "dmg_sha256=$(shasum -a 256 "$dmg" | awk '{print $1}')"
             echo "binary=$bin_path"
             echo "binary_size_bytes=$(stat -f%z "$bin_path")"
             echo "binary_sha256=$(shasum -a 256 "$bin_path" | awk '{print $1}')"
             echo "mach_archs=$archs"
           } > "$manifest"
-
-          while IFS= read -r f; do
-            echo "dmg=$f size=$(stat -f%z "$f") sha256=$(shasum -a 256 "$f" | awk '{print $1}')"
-          done < <(find "$bundle/dmg" -type f -name '*.dmg' 2>/dev/null | sort) >> "$manifest"
 
           cat "$manifest"
 
@@ -249,5 +258,5 @@ jobs:
           if-no-files-found: error
           path: |
             still-macos-${{ matrix.arch }}.app.zip
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            still-macos-${{ matrix.arch }}.dmg
             still-macos-${{ matrix.arch }}-manifest.txt
