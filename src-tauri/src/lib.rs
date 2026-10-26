@@ -106,6 +106,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             still_ping,
             agent::still_agent_start,
+            agent::still_agent_check,
             agent::still_agent_send,
             agent::still_agent_set_config,
             agent::still_agent_respond,

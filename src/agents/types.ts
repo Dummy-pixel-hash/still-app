@@ -19,6 +19,9 @@ export type AgentEventType =
   | "threadError"
   | "threadStopped"
   | "configOptions"
+  | "reasoningChunk"
+  | "plan"
+  | "commands"
 
 export interface AgentPermissionOption {
   optionId: string
@@ -58,7 +61,18 @@ export interface AgentThreadEvent {
   status?: string
   permission?: AgentPermissionRequest
   configOptions?: AgentConfigOption[]
+  plan?: AgentPlanEntry[]
+  commands?: AgentCommand[]
+  content?: AgentToolContent[]
 }
+
+export interface AgentPlanEntry { content: string; status: string; priority?: string }
+export interface AgentCommand { name: string; description: string; input?: { hint: string } }
+export type AgentToolContent =
+  | { type: "content"; content: { type: string; text?: string } }
+  | { type: "diff"; path: string; oldText?: string | null; newText: string }
+export interface AgentLaunchOptions { cwd?: string; executable?: string }
+export interface AgentAvailability { agentId: string; executable?: string; available: boolean }
 
 export interface AgentThreadSnapshot {
   executionId: string
@@ -74,6 +88,7 @@ export interface AgentThreadSnapshot {
   lastSequence: number
   turnActive: boolean
   configOptions: AgentConfigOption[]
+  commands?: AgentCommand[]
 }
 
 export interface AgentDefinition {
@@ -84,13 +99,15 @@ export interface AgentDefinition {
   args: readonly string[]
   installHint: string
   note: string
+  installCommand: string
+  loginCommand: string
 }
 
 /** First manually installed ACP v1 agent adapters validated by the adapter source documentation. */
 export const AGENTS: readonly AgentDefinition[] = [
-  { id: "opencode", label: "OpenCode", launchKind: "native", executable: "opencode", args: ["acp"], installHint: "OpenCode installed on the remote server", note: "Native ACP. Credentials and project files stay on the server." },
-  { id: "pi", label: "Pi", launchKind: "adapter", executable: "pi-acp", args: [], installHint: "pi-acp installed on the remote server", note: "Community adapter. Pi tools use the remote account's host permissions and may not ask before each operation." },
-  { id: "codex", label: "Codex", launchKind: "adapter", executable: "codex-acp", args: [], installHint: "@agentclientprotocol/codex-acp installed on the remote server", note: "Current ACP-maintained Codex adapter. Its provider login belongs on the server." },
-  { id: "claude", label: "Claude Code", launchKind: "adapter", executable: "claude-agent-acp", args: [], installHint: "@agentclientprotocol/claude-agent-acp installed on the remote server", note: "Claude Agent SDK ACP adapter. Sign into the agent on the server first." },
-  { id: "gemini", label: "Gemini CLI", launchKind: "native", executable: "gemini", args: ["--acp"], installHint: "Gemini CLI with ACP support installed on the remote server", note: "Gemini CLI's documented stdio ACP mode." },
+  { id: "opencode", label: "OpenCode", launchKind: "native", executable: "opencode", args: ["acp"], installHint: "OpenCode installed on the remote server", installCommand: "npm install -g opencode-ai", loginCommand: "opencode auth login", note: "Native ACP. Credentials and project files stay on the server." },
+  { id: "pi", label: "Pi", launchKind: "adapter", executable: "pi-acp", args: [], installHint: "Pi and pi-acp installed on the remote server", installCommand: "npm install -g @mariozechner/pi-coding-agent pi-acp", loginCommand: "pi", note: "Community adapter. Open Pi and use /login. Tools may run without asking for approval." },
+  { id: "codex", label: "Codex", launchKind: "adapter", executable: "codex-acp", args: [], installHint: "@agentclientprotocol/codex-acp installed on the remote server", installCommand: "npm install -g @openai/codex @agentclientprotocol/codex-acp", loginCommand: "codex login --device-auth", note: "ACP-maintained adapter, backed by Codex App Server. Sign in on the server." },
+  { id: "claude", label: "Claude Code", launchKind: "adapter", executable: "claude-agent-acp", args: [], installHint: "@agentclientprotocol/claude-agent-acp installed on the remote server", installCommand: "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp", loginCommand: "claude auth login", note: "Claude Agent SDK adapter. Authentication belongs on the server, not in Still." },
+  { id: "gemini", label: "Gemini CLI", launchKind: "native", executable: "gemini", args: ["--acp"], installHint: "Gemini CLI with ACP support installed on the remote server", installCommand: "npm install -g @google/gemini-cli", loginCommand: "gemini", note: "Native ACP. Open Gemini in the server terminal to complete sign-in first." },
 ]

@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
 import type { OrbAction, OrbSnapshot } from "../orb/types"
-import type { AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -31,7 +31,8 @@ function serializeOrb<T>(operation: () => Promise<T>): Promise<T> {
 export const tauriBridge: NativeBridge = {
   adapterName: "Tauri native bridge",
   isDevelopmentAdapter: false,
-  agentStart(nativeSessionId:string,localSessionId:string,agentId:string):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId}})},
+  agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId,...options}})},
+  agentCheck(nativeSessionId:string,agentId?:string,executable?:string){return invoke<AgentAvailability[]>("still_agent_check",{args:{nativeSessionId,agentId,executable}})},
   agentSend(executionId:string,message:string){return invoke<void>("still_agent_send",{args:{executionId,message}})},
   agentSetConfig(executionId:string,configId:string,value:string|boolean){return invoke<void>("still_agent_set_config",{args:{executionId,configId,value}})},
   agentRespondPermission(executionId:string,requestId:string|number,optionId:string){return invoke<void>("still_agent_respond",{args:{executionId,requestId,optionId}})},

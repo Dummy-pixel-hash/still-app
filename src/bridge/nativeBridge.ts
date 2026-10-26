@@ -1,6 +1,6 @@
 import type { ConnectionStatus } from "../types"
 import type { OrbBridge } from "../orb/types"
-import type { AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 
 import { unavailableAgentBridge } from "./agentMocks"
 
@@ -152,7 +152,8 @@ export interface NativeBridge extends OrbBridge {
   readonly adapterName: string
   readonly isDevelopmentAdapter: boolean
 
-  agentStart(nativeSessionId:string,localSessionId:string,agentId:string):Promise<AgentThreadSnapshot>
+  agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>
+  agentCheck(nativeSessionId:string,agentId?:string,executable?:string):Promise<AgentAvailability[]>
   agentSend(executionId:string,message:string):Promise<void>
   agentSetConfig(executionId:string,configId:string,value:string|boolean):Promise<void>
   agentRespondPermission(executionId:string,requestId:string|number,optionId:string):Promise<void>

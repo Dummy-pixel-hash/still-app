@@ -621,6 +621,7 @@ export default function Workspace() {
   toggleRef.current = toggleTemp
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (agentFor) return
       if (e.repeat) return
       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return
       if (e.key.toLowerCase() !== "t") return
@@ -630,7 +631,7 @@ export default function Workspace() {
     }
     window.addEventListener("keydown", onKey, { capture: true })
     return () => window.removeEventListener("keydown", onKey, { capture: true })
-  }, [])
+  }, [agentFor])
 
   // Global keys: Ctrl/Cmd+K focuses search (workspace only), Ctrl+. or
   // Ctrl+` leaves the terminal. Never intercept while the terminal or any
@@ -1593,7 +1594,7 @@ export default function Workspace() {
         </Suspense>
       ) : null}
 
-      {agentFor ? <AgentWorkspace session={agentFor} onClose={()=>setAgentFor(null)} onStart={(agentId)=>startRemoteAgent(nativeSessionId(agentFor.id)??"",agentFor.id,agentId)} /> : null}
+      {agentFor ? <AgentWorkspace session={agentFor} onClose={()=>setAgentFor(null)} onOpenTerminal={()=>{setAgentFor(null);openSession(agentFor,document.querySelector<HTMLElement>(`[data-card="${CSS.escape(agentFor.id)}"]`),false)}} onStart={(agentId,options)=>startRemoteAgent(nativeSessionId(agentFor.id)??"",agentFor.id,agentId,options)} onCheck={(agentId,executable)=>nativeBridge.agentCheck(nativeSessionId(agentFor.id)??"",agentId,executable)} /> : null}
 
       {authFor ? (
         <AuthDialog

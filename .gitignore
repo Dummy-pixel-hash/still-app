@@ -12,7 +12,9 @@ test-results/
 playwright-report/
 
 # local docs & media scratch (videos, notes) — never committed
-docs/
+!docs/
+docs/*
+!docs/agents-t3-review.md
 
 # OS / editors
 .DS_Store

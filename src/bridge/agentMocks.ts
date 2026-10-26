@@ -3,6 +3,7 @@ import type {Unsubscribe} from "./nativeBridge"
 const unavailable=()=>new Error("Remote ACP execution needs Still's native SSH bridge. Browser mode will never start a local agent.")
 export const unavailableAgentBridge={
  agentStart:async(_nativeId:string,_localId:string,_agentId:string):Promise<AgentThreadSnapshot>=>{throw unavailable()},
+ agentCheck:async():Promise<never>=>{throw unavailable()},
  agentSend:async(_id:string,_message:string):Promise<void>=>{throw unavailable()},
  agentSetConfig:async(_id:string,_configId:string,_value:string|boolean):Promise<void>=>{throw unavailable()},
  agentRespondPermission:async(_id:string,_requestId:string|number,_optionId:string):Promise<void>=>{throw unavailable()},
