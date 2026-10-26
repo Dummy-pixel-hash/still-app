@@ -11,6 +11,17 @@ test.beforeEach(async ({ page }) => {
   await h(page, "harness.clear()")
 })
 
+test("restoring the webview does not steal focus from another surface", async ({ page }) => {
+  await page.locator("#other").focus()
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
+    document.dispatchEvent(new Event("visibilitychange"))
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" })
+    document.dispatchEvent(new Event("visibilitychange"))
+  })
+  await expect(page.locator("#other")).toBeFocused()
+})
+
 test("copy uses OS bridge once in alternate screen; Ctrl+C still interrupts", async ({ page }) => {
   await page.evaluate(async prefix => { const a = (window as any).harness; await a.emit(prefix + "hello λ world"); a.term.select(0, 0, 7); a.clear() }, TUI)
   await page.keyboard.press("Control+Shift+C")

@@ -328,11 +328,18 @@ export default function SessionTerminal({
     // loses focus, which makes the alt-buffer wheel scroll (the only scroll
     // path that needs focus) appear dead. visibilitychange is the reliable
     // cross-webview signal; re-fit on the next frame so the layout has
-    // actually restored, then return focus to the terminal.
+    // actually restored. Restore focus only if the terminal owned it when
+    // the WebView was hidden; otherwise an inactive terminal steals focus
+    // from agents or another terminal when the window returns.
+    let restoreTerminalFocus = false
     const onReveal = () => {
-      if (document.visibilityState !== 'visible') return
+      if (document.visibilityState !== 'visible') {
+        restoreTerminalFocus = Boolean(terminal.element?.contains(document.activeElement))
+        return
+      }
       visibleFrame = window.requestAnimationFrame(pushResize)
-      terminal.focus()
+      if (restoreTerminalFocus && !pausedRef.current) terminal.focus()
+      restoreTerminalFocus = false
     }
     document.addEventListener('visibilitychange', onReveal)
 
