@@ -111,6 +111,8 @@ pub fn run() {
             agent::still_agent_set_config,
             agent::still_agent_respond,
             agent::still_agent_cancel,
+            agent::still_agent_close,
+            agent::still_agent_input,
             agent::still_agent_snapshot,
             orb::still_orb_configure,
             orb::still_orb_publish,

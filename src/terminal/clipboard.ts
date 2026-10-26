@@ -195,10 +195,8 @@ function isAlternateScreen(terminal: Terminal): boolean {
 }
 
 /**
- * Remote-stream verdict: does the transcript tail show a fullscreen TUI that
- * entered alt-screen without a matching exit? Unlike the xterm display flag
- * (which sticks forever when the exit sequence is lost), this reflects what
- * the REMOTE recently sent. Dynamically imported: the connection registry
+ * Remote-stream verdict from the session's persistent parser, even while its
+ * surface is closed. Dynamically imported: the connection registry
  * pulls in React, which this module must not statically load (import cycle
  * + node test env).
  */

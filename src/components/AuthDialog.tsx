@@ -12,10 +12,12 @@ export default function AuthDialog({
   session,
   mode,
   onResolve,
+  purpose,
 }: {
   session: Session
   mode: "password" | "key"
   onResolve: (answer: { secret?: string; remember: boolean } | null) => void
+  purpose?: "agent" | "terminal"
 }) {
   const [secret, setSecret] = useState("")
   const [remember, setRemember] = useState(session.remember)
@@ -49,8 +51,7 @@ export default function AuthDialog({
       >
         <h2 className="font-serif text-2xl text-fg">Connect</h2>
         <p className="mt-1 font-mono text-[11px] text-faint">
-          {session.username}@{session.host}:{session.port} · tmux{" "}
-          {session.tmuxSession}
+          {session.username}@{session.host}:{session.port}{purpose !== "agent" && <> · tmux {session.tmuxSession}</>}
         </p>
         {stored ? (
           <p className="mt-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-[12px] text-dim">

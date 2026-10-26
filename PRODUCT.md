@@ -18,6 +18,8 @@ The workspace groups session cards into projects. Opening a card opens the termi
 
 The user is adding an opt-in floating orb to glance at sessions while working elsewhere. The first integration exposes observed connection activity and connection-related attention. Agent-specific approval and completion detection is not yet established.
 
+The agent workspace is a project-and-conversation surface for existing coding agents on remote servers. The user explicitly selected `pingdotgg/t3code` as the reference for organisation, visual hierarchy, and interaction. Opening Agents must open that surface directly; it must not create or navigate into a terminal as a connection prerequisite. Terminal folders and agent project folders have independent ownership.
+
 ## Capabilities and Constraints
 
 - Preserve session identity, tmux persistence, terminal rendering, authentication, and host-key checks.

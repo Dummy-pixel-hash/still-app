@@ -196,25 +196,117 @@ test("normal buffer scroll stays local and alt no-mouse arrow modes are preserve
   expect(await emittedText(page)).toBe("\x1bOA".repeat(3))
 })
 
-test("remount with transcript requests a server-side repaint (TUI reopen)", async ({ page }) => {
-  // Surface mounts empty on first open: no transcript yet, so no repaint.
+test("remount preserves the terminal and requests a server-side repaint (TUI reopen)", async ({ page }) => {
   expect(await h(page, "harness.refreshes")).toBe(0)
   await h(page, 'harness.emit("\\x1b[?1049h\\x1b[2J\\x1b[Hopencode-tui").then(() => harness.clear())')
   expect(await h(page, "harness.refreshes")).toBe(0)
-  // Leaving the overlay (Ctrl+.) unmounts; reopening replays the transcript
-  // and — instead of relying on lossy fragments plus an unchanged window
-  // size — requests an authoritative tmux resend of the visible screen.
+  // Reopen reuses the parser and asks tmux for a visual refresh after fitting.
   await h(page, "harness.remount()")
   // React StrictMode double-mounts in dev (prod mounts once): at least one
   // repaint, and more are idempotent resends of the same screen.
   await expect.poll(() => h(page, "harness.refreshes")).toBeGreaterThanOrEqual(1)
-  // Remount of the same surface replays the transcript and re-pushes the
-  // current dims once (lastDims resets per mount); the last resize lands at
+  // Remount re-pushes the current dims once; the last resize lands at
   // the already-correct dims, no geometry change, no manual refit needed.
   // No stray input bytes leaked into the PTY.
   const resizes = await h(page, "harness.resizes")
   expect(resizes.length).toBeGreaterThanOrEqual(1)
   expect(resizes.at(-1)).toEqual({ cols: await h(page, "harness.term.cols"), rows: await h(page, "harness.term.rows") })
+  expect(await emittedText(page)).toBe("")
+})
+
+test("reopening a busy agent preserves mouse scrolling after its startup bytes leave the ring", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[?1002h\\x1b[?1006h\\x1b[?2004h\\x1b[2J\\x1b[Hagent")')
+  expect(await h(page, "harness.term.modes.mouseTrackingMode")).toBe("drag")
+  await h(page, "harness.hide()")
+  await expect(page.locator("#still-term-fixture")).toHaveCount(0)
+  await h(page, 'harness.receive(("\\x1b[H" + "agent output".repeat(100) + "\\x1b[K").repeat(100))')
+  expect(await h(page, 'harness.snapshot().includes("\\x1b[?1002h")')).toBe(false)
+  await h(page, "harness.remount()")
+  await expect.poll(() => h(page, "harness.refreshes")).toBeGreaterThan(0)
+  await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
+  expect(await h(page, "harness.term.buffer.active.type")).toBe("alternate")
+  expect(await h(page, "harness.term.modes.mouseTrackingMode")).toBe("drag")
+  await expect(page.locator("#still-term-fixture .xterm")).toHaveCSS("cursor", "default")
+  await h(page, "harness.clear()")
+  const screen = await page.locator("#still-term-fixture .xterm-screen").boundingBox()
+  await page.mouse.move(screen!.x + 100, screen!.y + 100)
+  await page.mouse.wheel(0, -100)
+  await expect.poll(() => emittedText(page)).toMatch(/\x1b\[<64;/)
+  await h(page, "harness.clear()")
+  await page.keyboard.press("Control+Shift+V")
+  await expect.poll(() => emittedText(page)).toBe("\x1b[200~pasted λ\rsecond line\x1b[201~")
+})
+
+test("TUI state survives long output and cursor-save mode is not an alternate screen", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1048h")')
+  expect(await h(page, "harness.tuiActive()")).toBe(false)
+  await h(page, 'harness.emit("\\x1b[?1049h" + "output".repeat(2000))')
+  expect(await h(page, "harness.tuiActive()")).toBe(true)
+  await h(page, 'harness.emit("\\x1b[?1049l")')
+  expect(await h(page, "harness.tuiActive()")).toBe(false)
+})
+
+test("an escape sequence split across minimize and reopen is parsed once in order", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[?1002h\\x1b[?1006h\\x1b[?10")')
+  await h(page, "harness.hide()")
+  await expect(page.locator("#still-term-fixture")).toHaveCount(0)
+  await h(page, 'harness.receive("03h\\x1b[?2004h\\x1b[Hagent")')
+  await h(page, "harness.remount()")
+  await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
+  await expect.poll(() => h(page, "harness.term.modes.mouseTrackingMode")).toBe("any")
+  expect(await h(page, "harness.term.buffer.active.type")).toBe("alternate")
+  expect(await h(page, "harness.term.buffer.active.getLine(0).translateToString(true)")).toBe("agent")
+})
+
+test("reopen retains normal scrollback beyond the byte ring without replaying old clipboard offers", async ({ page }) => {
+  await h(page, 'harness.emit(Array.from({length:1400},(_,i)=>"history " + i + " ".repeat(70) + "\\r\\n").join(""))')
+  const before = await h(page, "harness.term.buffer.active.length")
+  expect(before).toBeGreaterThan(1000)
+  await h(page, "harness.hide()")
+  await expect(page.locator("#still-term-fixture")).toHaveCount(0)
+  await h(page, 'harness.receive("\\x1b]52;c;" + btoa("hidden offer") + "\\x07")')
+  await h(page, "harness.remount()")
+  await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
+  expect(await h(page, "harness.term.buffer.active.length")).toBe(before)
+  expect(await h(page, "harness.term.buffer.active.getLine(0).translateToString(true).trimEnd()")).toBe("history 0")
+  await page.keyboard.press("Control+Shift+C")
+  expect(await h(page, "harness.copies")).toEqual([])
+})
+
+test("releasing a session discards its parser before the local id is reused", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[?1002h\\x1b[?1006h\\x1b[?2004h")')
+  await h(page, "harness.hide()")
+  await expect(page.locator("#still-term-fixture")).toHaveCount(0)
+  await h(page, "harness.release()")
+  await h(page, "harness.reconnect()")
+  await h(page, "harness.remount()")
+  await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
+  expect(await h(page, "harness.term.buffer.active.type")).toBe("normal")
+  expect(await h(page, "harness.term.modes.mouseTrackingMode")).toBe("none")
+  expect(await h(page, "harness.term.modes.bracketedPasteMode")).toBe(false)
+  expect(await h(page, "harness.term.buffer.active.getLine(0).translateToString(true)")).toBe("")
+})
+
+test("hidden sessions answer terminal queries once and visible auth-paused input stays blocked", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[?1049h\\x1b[?1002h\\x1b[?1006h")')
+  await h(page, "harness.hide()")
+  await expect(page.locator("#still-term-fixture")).toHaveCount(0)
+  await h(page, "harness.clear()")
+  await h(page, 'harness.emit("\\x1b[5n")')
+  expect(await emittedText(page)).toBe("\x1b[0n")
+  await h(page, "harness.remount()")
+  await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
+  await h(page, "harness.clear()")
+  await h(page, 'harness.emit("\\x1b[5n")')
+  expect(await emittedText(page)).toBe("\x1b[0n")
+  await h(page, "harness.setPaused(true)")
+  await page.locator("#other").focus()
+  await h(page, "harness.clear()")
+  await h(page, 'harness.emit("\\x1b[5n")')
+  const screen = await page.locator("#still-term-fixture .xterm-screen").boundingBox()
+  await page.mouse.move(screen!.x + 100, screen!.y + 100)
+  await page.mouse.wheel(0, -120)
+  await expect(page.locator("#other")).toBeFocused()
   expect(await emittedText(page)).toBe("")
 })
 

@@ -696,6 +696,25 @@ async fn run_authenticated(
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(handle));
     store_handle(session_id, shared.clone()).await;
 
+    // Agent connections own only the authenticated transport. Opening Agents
+    // must never create a tmux pane or change a terminal's working directory.
+    if cfg.ssh_only {
+        let _ = event_tx.send(SessionEvent::Status { status: SessionStatus::Live });
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = &mut *shutdown_rx => {
+                    let h = shared.lock().await;
+                    let _ = h.disconnect(Disconnect::ByApplication, "", "").await;
+                    return Ok(());
+                }
+                _ = heartbeat.tick() => {
+                    if shared.lock().await.is_closed() { return Err(anyhow!("SSH connection closed")); }
+                }
+            }
+        }
+    }
+
     diag::record("rust", "CHANNEL_OPEN_START", "", &addr, true, "", "", None);
     let t_ch = std::time::Instant::now();
     let mut channel = {

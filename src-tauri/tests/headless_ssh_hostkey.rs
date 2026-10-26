@@ -95,6 +95,7 @@ async fn headless_verified_real_ssh_tmux_roundtrip() {
         port,
         username: user.clone(),
         tmux_session: "still-m5-headless".into(),
+        ssh_only: false,
         working_directory: None,
         cols: 80,
         rows: 24,

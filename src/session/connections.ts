@@ -38,6 +38,30 @@ const unsubscribers = new Map<string, () => void>()
 const transcripts = new Map<string, ByteRing>()
 const TRANSCRIPT_CAP = 65536
 
+// The parser belongs to the SSH session, not its disposable overlay. Replaying
+// a byte-ring tail cannot restore mouse modes, partial escapes or scrollback.
+// Parse from the first received byte, even before the surface is first opened.
+const sessionTerminals = new Map<string, Terminal>()
+
+export function terminalForSession(localId: string): Terminal {
+  let terminal = sessionTerminals.get(localId)
+  if (!terminal) {
+    const sessionTerminal = new Terminal({ allowProposedApi: true, scrollback: 5000 })
+    sessionTerminal.loadAddon(new Unicode11Addon())
+    sessionTerminal.unicode.activeVersion = "11"
+    // Clipboard transfers are handled only by the visible surface's binding.
+    sessionTerminal.parser.registerOscHandler(52, () => true)
+    // Hidden sessions still need replies to terminal queries. The attached
+    // surface owns input while visible (including auth-pausing and batching).
+    sessionTerminal.onData(data => {
+      if (!sessionTerminal.element?.isConnected) void writeSession(localId, data).catch(() => {})
+    })
+    sessionTerminals.set(localId, sessionTerminal)
+    terminal = sessionTerminal
+  }
+  return terminal
+}
+
 // A headless xterm keeps the card preview in the same state as the real
 // terminal. Parsing the raw stream as text cannot represent cursor-addressed
 // redraws, alternate-screen TUIs, carriage returns, or clears.
@@ -558,6 +582,7 @@ export function useTranscriptVersion(localId: string): number {
 }
 
 function pushTranscript(localId: string, data: number[]) {
+  terminalForSession(localId).write(Uint8Array.from(data))
   const buf = transcripts.get(localId) ?? new ByteRing(TRANSCRIPT_CAP)
   buf.append(data)
   transcripts.set(localId, buf)
@@ -609,6 +634,8 @@ export function snapshotPreviewScreen(
 
 export function clearTranscript(localId: string) {
   transcripts.delete(localId)
+  sessionTerminals.get(localId)?.dispose()
+  sessionTerminals.delete(localId)
   disposePreviewTerminal(localId)
   transcriptEmitPending.delete(localId)
   transcriptEmitQueued.delete(localId)
@@ -652,21 +679,9 @@ function stripPreviewAnsi(s: string): string {
   )
 }
 
-/**
- * True when the transcript tail shows a fullscreen TUI owning the screen
- * (alt-screen enter without a matching exit). Its bytes are
- * cursor-addressed redraws, not scrollback — stripping escapes leaves
- * concatenated fragments ("@@e@", "eee"), never readable lines.
- */
+/** The parsed buffer remains authoritative after startup modes leave the ring. */
 export function isTuiActive(localId: string): boolean {
-  const bytes = transcriptSnapshot(localId)
-  if (bytes.length === 0) return false
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(
-    bytes.slice(Math.max(0, bytes.length - 4096)),
-  )
-  const enters = (text.match(/\x1b\[\?(?:1049|1047|1048)h/g) ?? []).length
-  const exits = (text.match(/\x1b\[\?(?:1049|1047|1048)l/g) ?? []).length
-  return enters > exits
+  return sessionTerminals.get(localId)?.buffer.active.type === "alternate"
 }
 
 /** Last non-empty lines of the live transcript tail (plain text). */
@@ -1119,12 +1134,9 @@ export async function resizeSession(localId: string, cols: number, rows: number)
 }
 
 /**
- * Ask tmux to resend the visible screen to this session's attached
- * client(s). Called when the terminal surface just remounted (leaving the
- * overlay via Ctrl+., toggling split view): the SSH channel — and therefore
- * the tmux client — stayed attached the whole time, so a lossy transcript
- * replay plus an unchanged window size would otherwise leave a TUI garbled
- * until the user resizes by hand. Best-effort; failures keep the replay.
+ * Ask tmux to resend the visible screen after reattaching/fitting its surface.
+ * This refreshes pixels only: tmux does not resend unchanged mouse/buffer
+ * modes, which is why the session's parser must survive the overlay.
  */
 export async function refreshSession(localId: string) {
   const nativeId = entries.get(localId)?.nativeId

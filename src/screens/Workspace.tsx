@@ -11,12 +11,12 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import WindowNav from "../components/WindowNav"
-import AgentWorkspace from "../components/AgentWorkspace"
+import { agentConnectionId } from "../agents/workspace"
+const RemoteAgentWorkspace = lazy(() => import("../components/RemoteAgentWorkspace"))
 
 import SessionCard from "../components/SessionCard"
 import TerminalOverlay, { MORPH_MS, type OpenState } from "../components/TerminalOverlay"
 import SessionForm from "../components/SessionForm"
-import { startRemoteAgent } from "../session/agentThreads"
 
 import NewSessionWizard from "../components/NewSessionWizard"
 import NewProjectDialog from "../components/NewProjectDialog"
@@ -680,7 +680,7 @@ export default function Workspace() {
       // so they must check as well — otherwise Remember persists but is
       // never reused and the dialog appears every time.
       if (session.authMethod === "password" || session.authMethod === "ask") {
-        const err = connectionError(session.id) ?? ""
+        const err = `${connectionError(session.id) || ""} ${connectionError(agentConnectionId(session)) || ""}`
         if (!/auth|wrong|password|incorrect|denied/i.test(err)) {
           try {
             if (
@@ -967,9 +967,18 @@ export default function Workspace() {
 
   const handleStartAgentFromCard = useCallback((session: Session) => {
     setMenuId(null)
-    if (connectionState(session.id) === "connected") setAgentFor(session)
-    else openSession(session, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(session.id)}"]`))
-  }, [openSession])
+    setAgentFor(session)
+  }, [])
+
+  const closeAgents = useCallback(() => {
+    const pending = authForRef.current
+    if (pending && pending.session.id === agentFor?.id) {
+      authForRef.current = null
+      setAuthFor(null)
+      pending.resolve(null)
+    }
+    setAgentFor(null)
+  }, [agentFor])
 
 
   // Stable handlers: the card grid is memo()'d, so re-creating these inline
@@ -1594,12 +1603,14 @@ export default function Workspace() {
         </Suspense>
       ) : null}
 
-      {agentFor ? <AgentWorkspace session={agentFor} onClose={()=>setAgentFor(null)} onOpenTerminal={()=>{setAgentFor(null);openSession(agentFor,document.querySelector<HTMLElement>(`[data-card="${CSS.escape(agentFor.id)}"]`),false)}} onStart={(agentId,options)=>startRemoteAgent(nativeSessionId(agentFor.id)??"",agentFor.id,agentId,options)} onCheck={(agentId,executable)=>nativeBridge.agentCheck(nativeSessionId(agentFor.id)??"",agentId,executable)} /> : null}
+      {agentFor ? <Suspense fallback={<div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#151517] text-[13px] text-[#a4a4ae]" role="status">Opening agents…</div>}><RemoteAgentWorkspace key={agentConnectionId(agentFor)} session={agentFor} sessions={store.sessions} onNeedAuth={onNeedAuth} keyTextFor={keyTextFor} onClose={closeAgents}
+        onOpenTerminal={() => { closeAgents(); openSession(agentFor, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(agentFor.id)}"]`)) }} /></Suspense> : null}
 
       {authFor ? (
         <AuthDialog
           session={authFor.session}
           mode={authFor.mode}
+          purpose={agentFor ? "agent" : "terminal"}
           onResolve={authFor.resolve}
         />
       ) : null}

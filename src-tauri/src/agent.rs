@@ -1,5 +1,6 @@
-//! Foreground remote ACP v1 runner. The remote SSH handle, not the client,
-//! launches and owns the CLI. A remote supervisor is a future reliability gate.
+//! Foreground remote agent runner. Native provider drivers use the bundled Node
+//! host; Gemini uses ACP directly. All share the ACP v1 SSH-facing envelope.
+//! Execution depends on the verified SSH connection; detached supervision is not implemented.
 use crate::{
     commands::AppState,
     core::{SessionStatus, StillError},
@@ -55,6 +56,20 @@ pub struct Event {
     pub commands: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_delta: Option<String>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -72,6 +87,13 @@ impl Event {
             plan: None,
             commands: None,
             content: None,
+            message_id: None,
+            tool_kind: None,
+            raw_input: None,
+            raw_output: None,
+            locations: None,
+            input: None,
+            output_delta: None,
         }
     }
 }
@@ -92,6 +114,8 @@ pub struct Snapshot {
     pub turn_active: bool,
     pub config_options: Vec<Value>,
     pub commands: Vec<Value>,
+    pub pending_input: Option<Value>,
+    pub resumable: bool,
 }
 struct PendingPermission {
     id: Value,
@@ -105,6 +129,11 @@ struct Thread {
     permission: Option<PendingPermission>,
     prompt: Option<Value>,
     config_requests: HashMap<u64, PendingConfig>,
+    close: mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>,
+    resume_session_id: Option<String>,
+    pending_input_id: Option<Value>,
+    early_updates: Vec<Value>,
+    cleanup_error: Option<String>,
 }
 struct PendingConfig {
     id: String,
@@ -119,6 +148,7 @@ pub struct StartArgs {
     agent_id: String,
     cwd: Option<String>,
     executable: Option<String>,
+    resume_session_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,21 +184,21 @@ fn definition(id: &str) -> Option<Definition> {
         },
         "pi" => Definition {
             name: "Pi",
-            command: "pi-acp",
+            command: "pi",
             args: &[],
-            install: "pi-acp adapter",
+            install: "Pi CLI",
         },
         "codex" => Definition {
             name: "Codex",
-            command: "codex-acp",
+            command: "codex",
             args: &[],
-            install: "@agentclientprotocol/codex-acp adapter",
+            install: "Codex CLI",
         },
         "claude" => Definition {
             name: "Claude Code",
-            command: "claude-agent-acp",
+            command: "claude",
             args: &[],
-            install: "@agentclientprotocol/claude-agent-acp adapter",
+            install: "Claude Code CLI",
         },
         "gemini" => Definition {
             name: "Gemini CLI",
@@ -200,7 +230,7 @@ fn login_command(script: &str) -> String {
     format!(
         "exec \"${{SHELL:-/bin/sh}}\" -lc {}",
         quote(&format!(
-            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.opencode/bin:$PATH\"; {script}"
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/.opencode/bin:$HOME/.claude/local:$PATH\"; if ! command -v node >/dev/null 2>&1 && [ -s \"$HOME/.nvm/nvm.sh\" ]; then . \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; fi; {script}"
         ))
     )
 }
@@ -236,6 +266,10 @@ pub struct Availability {
     agent_id: String,
     executable: Option<String>,
     available: bool,
+    installed: bool,
+    runtime: String,
+    runtime_available: bool,
+    message: Option<String>,
 }
 #[tauri::command]
 pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, StillError> {
@@ -244,7 +278,9 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         .as_deref()
         .map(|id| vec![id])
         .unwrap_or_else(|| vec!["opencode", "pi", "codex", "claude", "gemini"]);
-    let mut script = String::new();
+    let mut script = String::from(
+        "if command -v node >/dev/null 2>&1; then node -p '\"STILL_NODE:\"+process.versions.node' 2>/dev/null; fi; ",
+    );
     for id in &ids {
         let def = definition(id).ok_or_else(|| {
             StillError::friendly("agent_unknown", "Choose a supported ACP agent.")
@@ -287,6 +323,11 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         })?
         .map_err(|e| StillError::friendly("agent_check_failed", e))?;
     let text = String::from_utf8_lossy(&output);
+    let node_ready = text
+        .lines()
+        .find_map(|line| line.strip_prefix("STILL_NODE:"))
+        .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
+        .is_some_and(|major| major >= 20);
     Ok(ids
         .into_iter()
         .map(|id| {
@@ -297,7 +338,11 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
                 .map(str::to_owned);
             Availability {
                 agent_id: id.to_owned(),
-                available: path.is_some(),
+                available: path.is_some() && (id == "gemini" || node_ready),
+                installed: path.is_some(),
+                runtime: if id == "gemini" { "acp" } else { "native" }.into(),
+                runtime_available: id == "gemini" || node_ready,
+                message: if path.is_some() && id != "gemini" && !node_ready { Some("Installed. Still's native bridge needs Node.js 20 or newer on this server.".into()) } else { None },
                 executable: path,
             }
         })
@@ -305,8 +350,10 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
 }
 fn append_history(history: &mut Vec<Event>, event: Event) {
     if matches!(event.kind.as_str(), "assistantChunk" | "reasoningChunk") {
-        if let Some(last) = history.last_mut().filter(|last| last.kind == event.kind) {
-            last.sequence = event.sequence;
+        if let Some(last) = history
+            .last_mut()
+            .filter(|last| last.kind == event.kind && last.message_id == event.message_id)
+        {
             last.text
                 .get_or_insert_with(String::new)
                 .push_str(event.text.as_deref().unwrap_or(""));
@@ -417,11 +464,20 @@ pub async fn still_agent_start(
     )
     .await?;
     let path = executable(&def, args.executable.as_deref())?;
-    let launch = std::iter::once(path.as_str())
-        .chain(def.args.iter().copied())
-        .map(quote)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let launch = if args.agent_id == "gemini" {
+        std::iter::once(path.as_str())
+            .chain(def.args.iter().copied())
+            .map(quote)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        format!(
+            "env STILL_AGENT_DRIVER={} STILL_AGENT_EXECUTABLE={} node --input-type=module -e {}",
+            quote(&args.agent_id),
+            quote(&path),
+            quote(include_str!("../agent-host/bridge.mjs"))
+        )
+    };
     let remote = login_command(&format!(
         "cd -- {} || exit 73; command -v {} >/dev/null 2>&1 || {{ printf '%s\\n' {} >&2; exit 127; }}; exec {launch}",
         quote(&cwd),
@@ -439,6 +495,7 @@ pub async fn still_agent_start(
     );
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
     let (outbound, outbound_rx) = mpsc::unbounded_channel();
+    let (close, close_rx) = mpsc::unbounded_channel();
     let snapshot = Snapshot {
         execution_id: execution_id.clone(),
         local_session_id: args.local_session_id,
@@ -454,6 +511,8 @@ pub async fn still_agent_start(
         turn_active: false,
         config_options: Vec::new(),
         commands: Vec::new(),
+        pending_input: None,
+        resumable: false,
     };
     let row = Arc::new(Mutex::new(Thread {
         snapshot: snapshot.clone(),
@@ -463,20 +522,41 @@ pub async fn still_agent_start(
         permission: None,
         prompt: None,
         config_requests: HashMap::new(),
+        close,
+        resume_session_id: args.resume_session_id,
+        pending_input_id: None,
+        early_updates: Vec::new(),
+        cleanup_error: None,
     }));
     registry().lock().await.insert(execution_id, row.clone());
-    tokio::spawn(run(channel, row, outbound_rx, cancel_rx, cwd));
+    tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd));
     Ok(snapshot)
 }
 
 async fn run(
     mut channel: Channel<client::Msg>,
     row: Arc<Mutex<Thread>>,
-    mut outbound: mpsc::UnboundedReceiver<Value>,
-    mut cancel: mpsc::UnboundedReceiver<()>,
+    outbound: mpsc::UnboundedReceiver<Value>,
+    cancel: mpsc::UnboundedReceiver<()>,
+    close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cwd: String,
 ) {
-    if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{fail(&row,&format!("ACP initialize failed: {error}")).await;return}
+    run_stream(&mut channel, row, outbound, cancel, close, cwd).await;
+    // Every exit, including malformed frames and initialization timeout, closes
+    // stdin explicitly so the remote host can reap its native child processes.
+    let _ = channel.eof().await;
+    let _ = channel.close().await;
+}
+
+async fn run_stream(
+    channel: &mut Channel<client::Msg>,
+    row: Arc<Mutex<Thread>>,
+    mut outbound: mpsc::UnboundedReceiver<Value>,
+    mut cancel: mpsc::UnboundedReceiver<()>,
+    mut close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
+    cwd: String,
+) {
+    if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{fail(&row,&format!("ACP initialize failed: {error}")).await;return}
     let mut buffer = Vec::new();
     let mut stage = 0_u8;
     let mut session_id = None;
@@ -488,13 +568,47 @@ async fn run(
 
     loop {
         tokio::select! {
+          Some(reply) = close.recv() => {
+            if let Err(error) = channel.eof().await {
+                let _ = reply.send(Err(format!("Could not request agent shutdown: {error}")));
+                return;
+            }
+            let ended = tokio::time::timeout(Duration::from_secs(7), async {
+                while let Some(message) = channel.wait().await {
+                    match message {
+                        ChannelMsg::ExitStatus { exit_status } if exit_status != 0 => return Err(format!("Agent cleanup failed (exit {exit_status}). Inspect the remote process before deleting this conversation.")),
+                        ChannelMsg::Close | ChannelMsg::Eof => return Ok(()),
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }).await;
+            let _ = channel.close().await;
+            let result = ended.unwrap_or_else(|_| Err("Agent shutdown timed out. Inspect the remote process before deleting this conversation.".to_owned()));
+            if let Err(message) = &result {
+                let mut thread = row.lock().await;
+                thread.cleanup_error = Some(message.clone());
+                thread.snapshot.state = "submissionUnknown".into();
+                thread.snapshot.last_error = Some(message.clone());
+                let mut event = Event::new("threadError"); event.text = Some(message.clone()); emit(&mut thread, event);
+            }
+            let _ = reply.send(result);
+            return;
+          },
           _ = tokio::time::sleep_until(deadline), if stage < 3 => { fail(&row, &format!("Remote ACP initialization timed out. Check installation and authentication in the server terminal. {}", stderr.trim())).await; return; },
          _ = cancel.recv(), if !cancel_received => {
             cancel_received=true;
-            if let Some((request_id,_))=permission.take(){
+             if let Some((request_id,_))=permission.take(){
                if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":request_id,"result":{"outcome":{"outcome":"cancelled"}}})).await{fail(&row,&error).await;return;}
                let mut thread=row.lock().await;thread.snapshot.pending_permission=None;thread.permission=None;
-            }
+             }
+             {
+                let mut thread = row.lock().await;
+                if let Some(request_id) = thread.pending_input_id.take() {
+                  let _ = send(&channel, &json!({"jsonrpc":"2.0","id":request_id,"result":{"action":"cancel"}})).await;
+                  thread.snapshot.pending_input = None;
+                }
+             }
             if let Some(session)=session_id.as_ref(){
                if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await{fail(&row,&error).await;return;}
               let mut thread=row.lock().await;
@@ -505,7 +619,7 @@ async fn run(
             }
          },
           Some(value)=outbound.recv()=>{if permission.as_ref().is_some_and(|(id,_)|value.get("id")==Some(id)&&value.get("result").is_some()){permission=None;}if value.get("method").and_then(Value::as_str)==Some("session/prompt"){cancel_received=false;}if let Err(error)=send(&channel,&value).await{fail(&row,&format!("SSH stream closed before request send: {error}")).await;return}},
-          incoming=channel.wait()=>match incoming{Some(ChannelMsg::Data{data})=>{buffer.extend_from_slice(&data);if buffer.len()>FRAME_LIMIT{fail(&row,"ACP frame exceeded 2 MiB.").await;return}while let Some(end)=buffer.iter().position(|byte|*byte==b'\n'){let frame:Vec<u8>=buffer.drain(..=end).collect();if frame.iter().all(u8::is_ascii_whitespace){continue;}let value=match serde_json::from_slice::<Value>(&frame){Ok(value)=>value,Err(_)=>{fail(&row,"Remote stdout was not valid ACP JSON. Check whether the login shell prints a startup banner.").await;return}};if let Err(error)=handle(&mut channel,&row,&cwd,&mut stage,&mut session_id,&mut permission,value).await{fail(&row,&error).await;return}}},Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{fail(&row,&format!("Remote agent process exited. Check installation and authentication in the server terminal. Background survival is not guaranteed. {}",stderr.trim())).await;return},_=>{}}
+           incoming=channel.wait()=>match incoming{Some(ChannelMsg::Data{data})=>{buffer.extend_from_slice(&data);if buffer.len()>FRAME_LIMIT{fail(&row,"ACP frame exceeded 2 MiB.").await;return}while let Some(end)=buffer.iter().position(|byte|*byte==b'\n'){let frame:Vec<u8>=buffer.drain(..=end).collect();if frame.iter().all(u8::is_ascii_whitespace){continue;}let value=match serde_json::from_slice::<Value>(&frame){Ok(value)=>value,Err(_)=>{fail(&row,"Remote stdout was not valid ACP JSON. Check whether the login shell prints a startup banner.").await;return}};if let Err(error)=handle(channel,&row,&cwd,&mut stage,&mut session_id,&mut permission,value).await{fail(&row,&error).await;return}}},Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{fail(&row,&format!("Remote agent process exited. Check installation and authentication in the server terminal. Background survival is not guaranteed. {}",stderr.trim())).await;return},_=>{}}
         }
     }
 }
@@ -525,7 +639,47 @@ async fn handle(
 ) -> Result<(), String> {
     if let Some(method) = value.get("method").and_then(Value::as_str) {
         if method == "session/update" {
-            update(row, value.get("params").cloned().unwrap_or(Value::Null)).await;
+            let params = value.get("params").cloned().unwrap_or(Value::Null);
+            if *stage < 3 {
+                let mut thread = row.lock().await;
+                if thread.early_updates.len() >= 256 {
+                    return Err("Too many updates before session initialization.".into());
+                }
+                thread.early_updates.push(params);
+            } else {
+                update(row, params).await;
+            }
+            return Ok(());
+        }
+        if method == "elicitation/create" {
+            let params = value.get("params").cloned().unwrap_or(Value::Null);
+            let id = value
+                .get("id")
+                .cloned()
+                .ok_or("Question omitted its request id")?;
+            let mut thread = row.lock().await;
+            if params.get("sessionId").and_then(Value::as_str)
+                != thread.snapshot.agent_session_id.as_deref()
+                || params.get("mode").and_then(Value::as_str) != Some("form")
+            {
+                drop(thread);
+                send(
+                    channel,
+                    &json!({"jsonrpc":"2.0","id":id,"result":{"action":"decline"}}),
+                )
+                .await?;
+                return Ok(());
+            }
+            if thread.pending_input_id.is_some() {
+                return Err("A second question arrived before the first was answered.".into());
+            }
+            let input = json!({"requestId":id,"title":params.get("message").and_then(Value::as_str).unwrap_or("Agent needs your input"),"schema":params.get("requestedSchema")});
+            thread.pending_input_id = Some(id);
+            thread.snapshot.pending_input = Some(input.clone());
+            thread.snapshot.state = "inputRequired".into();
+            let mut event = Event::new("input");
+            event.input = Some(input);
+            emit(&mut thread, event);
             return Ok(());
         }
         if method == "session/request_permission" {
@@ -551,7 +705,7 @@ async fn handle(
                 return Err("Permission request has no options.".into());
             }
             let tool = params.get("toolCall").cloned().unwrap_or(Value::Null);
-            let detail = json!({"requestId":id,"sessionId":params.get("sessionId").and_then(Value::as_str).unwrap_or(""),"toolCallId":tool.get("toolCallId").and_then(Value::as_str).unwrap_or(""),"title":tool.get("title").and_then(Value::as_str).or_else(||tool.get("name").and_then(Value::as_str)).unwrap_or("Permission required"),"description":tool.get("description"),"command":tool.get("rawInput").and_then(|v|v.get("command")).or_else(||tool.get("content").and_then(Value::as_array).and_then(|a|a.first()).and_then(|x|x.pointer("/content/text"))),"options":options});
+            let detail = json!({"requestId":id,"sessionId":params.get("sessionId").and_then(Value::as_str).unwrap_or(""),"toolCallId":tool.get("toolCallId").and_then(Value::as_str).unwrap_or(""),"title":tool.get("title").and_then(Value::as_str).or_else(||tool.get("name").and_then(Value::as_str)).unwrap_or("Permission required"),"description":tool.get("description"),"command":tool.get("rawInput").and_then(|v|v.get("command")).or_else(||tool.get("content").and_then(Value::as_array).and_then(|a|a.first()).and_then(|x|x.pointer("/content/text"))),"rawInput":tool.get("rawInput"),"content":tool.get("content"),"options":options});
             *permission = Some((id.clone(), options.clone()));
             {
                 let mut thread = row.lock().await;
@@ -631,14 +785,22 @@ async fn handle(
         // authMethods lists possible sign-in routes, not whether sign-in is needed.
         // Use credentials already configured on the remote account.
         *stage = 2;
-        send_new(channel, cwd).await?;
+        let resume = row.lock().await.resume_session_id.clone();
+        let params = if let Some(resume) = resume {
+            *session_id = Some(resume.clone());
+            json!({"cwd":cwd,"mcpServers":[],"sessionId":resume})
+        } else {
+            json!({"cwd":cwd,"mcpServers":[]})
+        };
+        send(channel,&json!({"jsonrpc":"2.0","id":3,"method":if session_id.is_some(){"session/load"}else{"session/new"},"params":params})).await?;
         return Ok(());
     }
     if *stage == 2 && id.as_ref().and_then(Value::as_u64) == Some(3) {
         let sid = result
             .get("sessionId")
             .and_then(Value::as_str)
-            .ok_or("session/new response omitted sessionId")?
+            .or(session_id.as_deref())
+            .ok_or("Session response omitted sessionId")?
             .to_owned();
         *session_id = Some(sid.clone());
         *stage = 3;
@@ -650,6 +812,10 @@ async fn handle(
         add_legacy_config(&mut configs, result);
         let mut t = row.lock().await;
         t.snapshot.agent_session_id = Some(sid);
+        t.snapshot.resumable = result
+            .pointer("/_meta/resumable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         t.snapshot.config_options = configs.clone();
         t.snapshot.state = "working".into();
         if !configs.is_empty() {
@@ -660,6 +826,11 @@ async fn handle(
         let mut e = Event::new("threadState");
         e.state = Some("working".into());
         emit(&mut t, e);
+        let early = std::mem::take(&mut t.early_updates);
+        drop(t);
+        for params in early {
+            update(row, params).await;
+        }
         return Ok(());
     }
     if let Some(request_id) = id.as_ref().and_then(Value::as_u64) {
@@ -707,6 +878,8 @@ async fn handle(
                 t.prompt = None;
                 t.snapshot.turn_active = false;
                 t.snapshot.pending_permission = None;
+                t.snapshot.pending_input = None;
+                t.pending_input_id = None;
                 t.permission = None;
                 t.snapshot.last_error = None;
                 *permission = None;
@@ -724,9 +897,6 @@ async fn handle(
         }
     }
     Ok(())
-}
-async fn send_new(channel: &Channel<client::Msg>, cwd: &str) -> Result<(), String> {
-    send(channel,&json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}})).await
 }
 fn add_legacy_config(options: &mut Vec<Value>, result: &Value) {
     for (category, key, list, current) in [
@@ -788,6 +958,10 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
         return;
     }
     let mut e = Event::new("toolUpdate");
+    e.message_id = u
+        .pointer("/_meta/messageId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     match kind {
         "agent_thought_chunk" => {
             e.kind = "reasoningChunk".into();
@@ -857,13 +1031,28 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
                 .map(str::to_owned);
             e.status = u.get("status").and_then(Value::as_str).map(str::to_owned);
             e.content = u.get("content").filter(|v| v.is_array()).cloned();
-            e.detail = u.get("rawInput").map(Value::to_string);
+            e.tool_kind = u.get("kind").and_then(Value::as_str).map(str::to_owned);
+            e.raw_input = u.get("rawInput").filter(|v| v.is_object()).cloned();
+            e.raw_output = u.get("rawOutput").cloned();
+            e.locations = u.get("locations").filter(|v| v.is_array()).cloned();
+            e.output_delta = u
+                .pointer("/_meta/outputDelta")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         "session_error" => {
             e.kind = "threadError".into();
-            e.text = u.get("message").and_then(Value::as_str).map(str::to_owned)
+            e.text = u.get("message").and_then(Value::as_str).map(str::to_owned);
+            t.snapshot.last_error = e.text.clone();
+            t.snapshot.state = "error".into();
+            t.snapshot.turn_active = false;
         }
-        _ => e.title = Some(kind.into()),
+        "notice" => {
+            e.kind = "notice".into();
+            e.title = Some("Agent notice".into());
+            e.text = u.get("message").and_then(Value::as_str).map(str::to_owned);
+        }
+        _ => return,
     }
     emit(&mut t, e)
 }
@@ -873,6 +1062,8 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     t.snapshot.last_error = Some(message.into());
     t.permission = None;
     t.snapshot.pending_permission = None;
+    t.snapshot.pending_input = None;
+    t.pending_input_id = None;
     for (_, pending) in t.config_requests.drain() {
         let _ = pending.reply.send(Err(message.into()));
     }
@@ -1034,6 +1225,73 @@ pub async fn still_agent_cancel(args: IdArgs) -> Result<(), StillError> {
     })
 }
 #[tauri::command]
+pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
+    let Some(row) = registry().lock().await.get(&args.execution_id).cloned() else {
+        return Ok(());
+    };
+    let thread = row.lock().await;
+    if let Some(error) = &thread.cleanup_error {
+        return Err(StillError::friendly("agent_close_unknown", error));
+    }
+    if thread.snapshot.turn_active {
+        return Err(StillError::friendly(
+            "agent_busy",
+            "Stop the agent before deleting this conversation.",
+        ));
+    }
+    let (reply, response) = oneshot::channel();
+    let sent = thread.close.send(reply).is_ok();
+    drop(thread);
+    if sent {
+        tokio::time::timeout(Duration::from_secs(8), response).await
+            .map_err(|_| StillError::friendly("agent_close_unknown", "Agent shutdown was not confirmed. Refresh before deleting this conversation."))?
+            .map_err(|_| StillError::friendly("agent_close_unknown", "Agent shutdown acknowledgement was lost. Refresh before deleting this conversation."))?
+            .map_err(|message| StillError::friendly("agent_close_unknown", message))?;
+        // The worker distinguishes confirmed EOF from its bounded shutdown timeout.
+    }
+    registry().lock().await.remove(&args.execution_id);
+    Ok(())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputArgs {
+    execution_id: String,
+    request_id: Value,
+    answers: Option<Value>,
+}
+#[tauri::command]
+pub async fn still_agent_input(args: InputArgs) -> Result<(), StillError> {
+    let row = find_thread(&args.execution_id).await?;
+    let mut thread = row.lock().await;
+    if thread.pending_input_id.as_ref() != Some(&args.request_id) {
+        return Err(StillError::friendly(
+            "agent_input_stale",
+            "This question is no longer pending.",
+        ));
+    }
+    let result = if let Some(answers) = args.answers {
+        json!({"action":"accept","content":answers})
+    } else {
+        json!({"action":"decline"})
+    };
+    thread
+        .outbound
+        .send(json!({"jsonrpc":"2.0","id":args.request_id,"result":result}))
+        .map_err(|_| {
+            StillError::friendly(
+                "agent_disconnected",
+                "Agent disconnected before receiving your answer.",
+            )
+        })?;
+    thread.pending_input_id = None;
+    thread.snapshot.pending_input = None;
+    thread.snapshot.state = "working".into();
+    let mut event = Event::new("threadState");
+    event.state = Some("working".into());
+    emit(&mut thread, event);
+    Ok(())
+}
+#[tauri::command]
 pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError> {
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
@@ -1068,6 +1326,125 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires localhost SSH fixture and installed Pi/Claude/Codex/OpenCode; performs no model prompts"]
+    async fn native_catalogs_initialise_over_verified_ssh_without_tmux() {
+        use crate::{core, hostkeys};
+        let root = std::path::PathBuf::from("/tmp/opencode")
+            .join(format!("still-agent-catalog-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        unsafe {
+            std::env::set_var("STILL_KNOWN_HOSTS", root.join("known-hosts.json"));
+        }
+        let (_, public, _) = ssh_worker::probe_host_key("127.0.0.1", 22).await.unwrap();
+        hostkeys::store_trusted("127.0.0.1", 22, public.trim()).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let secret = std::fs::read_to_string(format!("{home}/.ssh/still_poc_test")).unwrap();
+        let config = core::SshConfig {
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: std::env::var("USER").unwrap(),
+            tmux_session: "still-unused-agent-test".into(),
+            ssh_only: true,
+            working_directory: None,
+            cols: 80,
+            rows: 24,
+        };
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (_input, input_rx) = mpsc::unbounded_channel();
+        let (_resize, resize_rx) = mpsc::unbounded_channel();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let worker = tokio::spawn(ssh_worker::run_session(
+            "native-catalog-fixture".into(),
+            config,
+            None,
+            Some(secret),
+            events,
+            input_rx,
+            resize_rx,
+            shutdown_rx,
+        ));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match receiver.recv().await.unwrap() {
+                    core::SessionEvent::Status {
+                        status: core::SessionStatus::Live,
+                    } => break,
+                    core::SessionEvent::Error { error } => {
+                        panic!("SSH fixture failed: {}", error.message)
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let cwd = remote_cwd("native-catalog-fixture", root.to_str().unwrap())
+            .await
+            .unwrap();
+        for id in ["pi", "claude", "codex", "opencode"] {
+            let command = login_command(&format!(
+                "cd -- {} || exit 73; exec env STILL_AGENT_DRIVER={} STILL_AGENT_EXECUTABLE={} node --input-type=module -e {}",
+                quote(&cwd),
+                quote(id),
+                quote(id),
+                quote(include_str!("../agent-host/bridge.mjs"))
+            ));
+            let mut channel = ssh_worker::open_agent_exec("native-catalog-fixture", &command)
+                .await
+                .unwrap();
+            send(&channel, &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})).await.unwrap();
+            send(&channel, &json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}})).await.unwrap();
+            let mut bytes = Vec::new();
+            let result = tokio::time::timeout(Duration::from_secs(45), async {
+                while let Some(message) = channel.wait().await {
+                    match message {
+                        ChannelMsg::Data { data } => {
+                            bytes.extend_from_slice(&data);
+                            assert!(bytes.len() <= FRAME_LIMIT);
+                            while let Some(end) = bytes.iter().position(|byte| *byte == b'\n') {
+                                let line = bytes.drain(..=end).collect::<Vec<_>>();
+                                let frame: Value = serde_json::from_slice(&line)
+                                    .expect("real native SSH stdout must be JSONL");
+                                if frame.get("id").and_then(Value::as_u64) == Some(3) {
+                                    return frame;
+                                }
+                            }
+                        }
+                        ChannelMsg::Eof | ChannelMsg::Close => {
+                            panic!("{id} exited before returning its catalog")
+                        }
+                        _ => {}
+                    }
+                }
+                panic!("{id} stream closed during initialization")
+            })
+            .await
+            .unwrap();
+            let _ = channel.eof().await;
+            let _ = channel.close().await;
+            assert!(result.get("error").is_none(), "{id}: {}", result);
+            assert!(
+                result
+                    .pointer("/result/sessionId")
+                    .and_then(Value::as_str)
+                    .is_some()
+            );
+            assert!(
+                !result
+                    .pointer("/result/configOptions")
+                    .and_then(Value::as_array)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let _ = shutdown.send(());
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
+    }
     #[test]
     fn streaming_history_keeps_messages_not_thousands_of_token_frames() {
         let mut history = vec![Event::new("userMessage")];
@@ -1078,7 +1455,7 @@ mod tests {
             append_history(&mut history, event);
         }
         assert_eq!(history.len(), 2);
-        assert_eq!(history[1].sequence, 2000);
+        assert_eq!(history[1].sequence, 1);
         assert_eq!(history[1].text.as_ref().unwrap().len(), 2000);
         append_history(&mut history, Event::new("toolStart"));
         append_history(&mut history, Event::new("assistantChunk"));
@@ -1107,7 +1484,7 @@ mod tests {
     #[test]
     fn executable_overrides_are_literal_absolute_paths() {
         let def = definition("pi").unwrap();
-        assert_eq!(executable(&def, None).unwrap(), "pi-acp");
+        assert_eq!(executable(&def, None).unwrap(), "pi");
         assert!(executable(&def, Some("npx pi-acp")).is_err());
         assert!(executable(&def, Some("/path\nwith/control")).is_err());
         assert_eq!(

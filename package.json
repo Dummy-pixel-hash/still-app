@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:regressions": "node tests-m3/regressions.mjs && node tests-m5/regressions.mjs && node tests-m5/preview-regressions.mjs && node tests-m6/regressions.mjs",
     "test:presets": "node tests-presets/regressions.mjs",
-    "test:agents": "playwright test -c tests-agents/playwright.config.ts",
+    "test:agents": "node --test tests-agents/protocol.test.mjs && playwright test -c tests-agents/playwright.config.ts",
     "test:hostkey": "node tests-m5/regressions.mjs",
     "test:orb": "node --test \"tests-orb/**/*.test.mjs\" && playwright test -c tests-orb/playwright.config.ts",
     "test:terminal": "node --test \"tests-terminal/**/*.test.mjs\" && playwright test -c tests-terminal/playwright.config.ts",
@@ -26,7 +26,9 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",

@@ -93,6 +93,8 @@ export interface ConnectArgs {
   tmuxSession?: string
   /** Remote start directory for a newly created tmux session. */
   workingDirectory?: string
+  /** Authenticate SSH without creating a PTY or attaching a tmux session. */
+  sshOnly?: boolean
   cols?: number
   rows?: number
   clientId?: string
@@ -158,6 +160,8 @@ export interface NativeBridge extends OrbBridge {
   agentSetConfig(executionId:string,configId:string,value:string|boolean):Promise<void>
   agentRespondPermission(executionId:string,requestId:string|number,optionId:string):Promise<void>
   agentCancel(executionId:string):Promise<void>
+  agentClose(executionId:string):Promise<void>
+  agentRespondInput(executionId:string,requestId:string|number,answers:Record<string,unknown>|null):Promise<void>
   agentSnapshot(executionId:string):Promise<AgentThreadSnapshot>
   subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>
 

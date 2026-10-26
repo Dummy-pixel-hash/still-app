@@ -41,6 +41,7 @@ pub struct SshConnectArgs {
     /// Desired start directory for a newly created tmux session. Ignored when
     /// attached to an already-running session.
     pub working_directory: Option<String>,
+    pub ssh_only: Option<bool>,
     pub cols: Option<u32>,
     pub rows: Option<u32>,
     pub client_id: Option<String>,
@@ -53,6 +54,7 @@ pub struct SshConfig {
     pub username: String,
     pub tmux_session: String,
     pub working_directory: Option<String>,
+    pub ssh_only: bool,
     pub cols: u32,
     pub rows: u32,
 }
@@ -106,6 +108,7 @@ impl SshConnectArgs {
             port: self.port,
             username: username.to_string(),
             tmux_session: TmuxPlan::sanitize_name(self.tmux_session.as_deref()),
+            ssh_only: self.ssh_only.unwrap_or(false),
             // "~" / blank mean "whatever tmux defaults to" (the login home),
             // so they never reach the command line as a -c argument.
             working_directory: self
@@ -439,6 +442,7 @@ mod tests {   use super::*;
             remember: None,
             tmux_session: None,
             working_directory: Some(dir.into()),
+            ssh_only: None,
             cols: None,
             rows: None,
             client_id: None,
@@ -481,6 +485,7 @@ mod tests {   use super::*;
             tmux_session: None,
             working_directory: None,
             cols: None,
+            ssh_only: None,
             rows: None,
             client_id: None,
         };
@@ -502,6 +507,7 @@ mod tests {   use super::*;
             tmux_session: None,
             working_directory: None,
             cols: None,
+            ssh_only: None,
             rows: None,
             client_id: None,
         };

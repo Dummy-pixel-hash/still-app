@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Terminal } from "@xterm/xterm"
+import type { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
-import { Unicode11Addon } from "@xterm/addon-unicode11"
 // GPU renderer: the DOM renderer (xterm's default without an addon) repaints
 // fullscreen TUIs line-by-line, which is exactly the tearing seen when a
 // coding agent redraws at speed. WebGL is dramatically faster; the DOM
@@ -10,7 +9,6 @@ import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
 import {
   TERMINAL_LINE_HEIGHT,
-  isTuiActive,
   needsReattachMarker,
   nativeSessionId,
   noteSurfaceDims,
@@ -18,8 +16,7 @@ import {
   noteTranscriptRendered,
   refreshSession,
   resizeSession,
-  subscribeSessionData,
-  transcriptSnapshot,
+  terminalForSession,
   useConnections,
   writeSession,
 } from "../session/connections"
@@ -30,17 +27,6 @@ import CustomScrollbar from "./CustomScrollbar"
 import type { ImageInsertStyle, TerminalPrefs } from "../types"
 
 const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
-
-/**
- * True when the byte window still contains a fullscreen enter sequence
- * (`CSI ? 1049/1047/1048 h`). Used to decide whether a ring-truncated
- * replay needs a synthetic alt-screen prefix.
- */
-function snapshotHasAltEnter(bytes: Uint8Array): boolean {
-  const text = textDecoder.decode(bytes)
-  return /(?:\x1b\[\?1049h|\x1b\[\?1047h|\x1b\[\?1048h)/.test(text)
-}
 
 /**
  * Real session terminal surface, bound to a STABLE local session id.
@@ -49,12 +35,12 @@ function snapshotHasAltEnter(bytes: Uint8Array): boolean {
  *   xterm.js onData (keyboard incl. Ctrl/arrows/F-keys)
  *     -> Tauri IPC still_write -> Rust worker input queue -> russh channel
  *   russh channel bytes -> Tauri window event -> connection registry
- *     -> this surface -> term.write()
+ *     -> persistent term.write() -> this surface when attached
  *   FitAddon.proposeDimensions -> still_resize -> russh window_change + tmux
  *
  * Raw bytes only — no interpretation, no shortcut layer above the terminal.
- * Leaving the overlay unmounts this surface but never disconnects: the
- * worker keeps running and the transcript repaints on reopen.
+ * Leaving unmounts the surface; the registry keeps both the worker and
+ * terminal parser alive, including mouse modes and in-flight escape sequences.
  */
 export default function SessionTerminal({
   localId,
@@ -93,7 +79,6 @@ export default function SessionTerminal({
   const terminalRef = useRef<Terminal | null>(null)
   // Rendered into CustomScrollbar once the surface exists; nulled on unmount.
   const [terminal, setTerminal] = useState<Terminal | null>(null)
-  const fitRef = useRef<FitAddon | null>(null)
   const localRef = useRef(localId)
   localRef.current = localId
   const onCloseRef = useRef(onClose)
@@ -120,8 +105,9 @@ export default function SessionTerminal({
     const fitHost = fitHostRef.current
     if (!host || !fitHost) return
 
-    const terminal = new Terminal({
-      allowProposedApi: true,
+    const terminal = terminalForSession(localId)
+    const reattaching = Boolean(terminal.element) || needsReattachMarker(localId)
+    terminal.options = {
       convertEol: false,
       cursorBlink: true,
       cursorStyle: prefs.cursorStyle,
@@ -169,28 +155,26 @@ export default function SessionTerminal({
         white: "#d7d2d6",
         brightWhite: "#f4f0f2",
       },
-    })
+    }
     const fit = new FitAddon()
     terminal.loadAddon(fit)
-    // Unicode 11 width rules: emoji/CJK that are double-width in newer
-    // Unicode render as a full 2-cell glyph instead of being measured as
-    // 1 cell and getting its right half overwritten / clipped.
-    const unicode11 = new Unicode11Addon()
-    terminal.loadAddon(unicode11)
-    terminal.unicode.activeVersion = "11"
-    terminal.open(fitHost)
+    // open() is a no-op after first mount. Move the same live element to its
+    // new host instead of replacing the parser with a lossy transcript replay.
+    if (terminal.element) fitHost.appendChild(terminal.element)
+    else terminal.open(fitHost)
     terminalRef.current = terminal
     setTerminal(terminal)
-    fitRef.current = fit
 
     // GPU rendering for the main surface only (never the small card
     // previews — WebGL context limits). On context loss the addon must be
     // disposed so xterm falls back to its DOM renderer instead of freezing.
+    let webgl: WebglAddon | undefined
     try {
-      const webgl = new WebglAddon()
+      webgl = new WebglAddon()
       webgl.onContextLoss(() => {
         try {
-          webgl.dispose()
+          webgl?.dispose()
+          webgl = undefined
         } catch {
           // Already torn down by the browser.
         }
@@ -214,46 +198,15 @@ export default function SessionTerminal({
         return writeSession(localRef.current, bytes)
       },
     })
-    // Repaint only remote bytes. App notices must not move the TUI cursor,
-    // and replayed OSC 52 sequences must never stage an old clipboard copy.
-    const snapshot = transcriptSnapshot(localRef.current)
-    if (snapshot.length > 0) {
-      // The ring keeps the LAST 64KB: if the transcript is a fullscreen TUI
-      // whose alt-screen enter (`?1049h`) was evicted, a raw replay paints
-      // cursor-addressed redraw fragments into the NORMAL screen — the
-      // "breaks into lines" glitch. In that case prefix a synthetic
-      // enter+clear so the fragments land on a clean alt screen and the
-      // next redraws reassemble correctly. When the enter survived, replay
-      // raw so xterm enters alt screen naturally.
-      let payload: Uint8Array
-      if (isTuiActive(localRef.current) && !snapshotHasAltEnter(snapshot)) {
-        // `ESC[?1049h ESC[2J ESC[H`: enter alt screen, clear it, home.
-        const prefix = textEncoder.encode("\x1b[?1049h\x1b[2J\x1b[H")
-        payload = new Uint8Array(prefix.length + snapshot.length)
-        payload.set(prefix, 0)
-        payload.set(snapshot, prefix.length)
-      } else {
-        payload = snapshot
-      }
-      terminal.write(payload, () => {
-        clipboard.endReplay()
-        // Remount: the ring replay is a lossy approximation of a TUI frame
-        // (cursor-addressed redraws, possibly evicted alt-screen enters),
-        // and tmux — whose client never detached — sees no size change, so
-        // it would never repaint. Ask it to resend the authoritative screen;
-        // its bytes arrive after this write and supersede the fragments.
-        const id = localRef.current
-        void refreshSession(id).catch(() => {
-          // Keep the replay; a missing repaint is the old behavior.
-        })
-      })
-      if (needsReattachMarker(localRef.current)) notify("Session reattached")
-      noteTranscriptRendered(localRef.current)
-    } else {
-      clipboard.endReplay()
-    }
+    // Drain already-received output before allowing new clipboard offers.
+    // No output is replayed and background OSC 52 never stages a stale copy.
+    terminal.write("", () => clipboard.endReplay())
+    if (needsReattachMarker(localRef.current)) notify("Session reattached")
+    noteTranscriptRendered(localRef.current)
+    terminal.refresh(0, terminal.rows - 1)
 
     const pushResize = () => {
+      if (!fitHost.isConnected || fitHost.clientWidth === 0 || fitHost.clientHeight === 0) return
       try {
         fit.fit()
         const dims = fit.proposeDimensions()
@@ -321,16 +274,8 @@ export default function SessionTerminal({
     const observer = new ResizeObserver(debounced)
     observer.observe(host)
     window.addEventListener("resize", debounced)
-    // Re-fit + re-focus after the webview is un-hidden (minimize/restore).
-    // ResizeObserver and window 'resize' don't fire when a WebView is hidden
-    // and restored — the layout freezes and the browser reports no size
-    // change — so the grid stays at the stale pre-hide fit and the surface
-    // loses focus, which makes the alt-buffer wheel scroll (the only scroll
-    // path that needs focus) appear dead. visibilitychange is the reliable
-    // cross-webview signal; re-fit on the next frame so the layout has
-    // actually restored. Restore focus only if the terminal owned it when
-    // the WebView was hidden; otherwise an inactive terminal steals focus
-    // from agents or another terminal when the window returns.
+    // Window visibility is separate from in-app minimize (surface unmount).
+    // Refit after the WebView returns; only restore its previous focus owner.
     let restoreTerminalFocus = false
     const onReveal = () => {
       if (document.visibilityState !== 'visible') {
@@ -345,7 +290,10 @@ export default function SessionTerminal({
 
     // Initial fit on the next layout frame; nativeId changes trigger another
     // push below so a pre-connect fit cannot swallow the first real resize.
-    const t = window.requestAnimationFrame(pushResize)
+    const t = window.requestAnimationFrame(() => {
+      pushResize()
+      if (reattaching) void refreshSession(localId).catch(() => {})
+    })
 
     // Webfonts (Geist Mono) can land after the first fit: cell metrics then
     // change and the already-fitted grid overflows or leaves the screen
@@ -379,12 +327,6 @@ export default function SessionTerminal({
       return true
     })
 
-    // xterm already queues parsing/rendering. An additional per-frame output
-    // queue added latency and grew without bound in a background WebView.
-    const unsub = subscribeSessionData(localRef.current, (data) => {
-      terminal.write(Uint8Array.from(data))
-    })
-
     // Do not grab focus while an auth dialog (or any outer modal) owns it.
     if (!paused) terminal.focus()
 
@@ -395,7 +337,6 @@ export default function SessionTerminal({
       window.clearTimeout(feedbackTimer.current)
       observer.disconnect()
       window.removeEventListener("resize", debounced)
-      window.removeEventListener("resize", debounced)
       document.removeEventListener('visibilitychange', onReveal)
       if (visibleFrame) window.cancelAnimationFrame(visibleFrame)
       document.fonts?.removeEventListener?.("loadingdone", refitOnFonts)
@@ -404,16 +345,19 @@ export default function SessionTerminal({
       dataDispose.dispose()
       binaryDispose.dispose()
       pushResizeRef.current = () => {}
-      unsub()
       // Remember how much transcript this surface rendered, so the next
       // mount can tell growth (marker) from a plain reopen (silent repaint).
       noteTranscriptRendered(localRef.current)
       terminalRef.current = null
       setTerminal(null)
-      fitRef.current = null
-      terminal.dispose()
+      terminal.attachCustomKeyEventHandler(() => true)
+      terminal.blur()
+      terminal.clearSelection()
+      terminal.element?.remove()
+      webgl?.dispose()
+      fit.dispose()
     }
-    // Mount per overlay open: fresh surface, registry keeps the worker alive.
+    // Mount per overlay open: registry owns the terminal's longer lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -476,5 +420,3 @@ export default function SessionTerminal({
     </div>
   )
 }
-
-export { textDecoder }

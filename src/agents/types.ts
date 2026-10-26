@@ -22,6 +22,8 @@ export type AgentEventType =
   | "reasoningChunk"
   | "plan"
   | "commands"
+  | "input"
+  | "notice"
 
 export interface AgentPermissionOption {
   optionId: string
@@ -36,6 +38,8 @@ export interface AgentPermissionRequest {
   title: string
   description?: string
   command?: string
+  rawInput?: Record<string, unknown>
+  content?: AgentToolContent[]
   options: AgentPermissionOption[]
 }
 
@@ -64,15 +68,29 @@ export interface AgentThreadEvent {
   plan?: AgentPlanEntry[]
   commands?: AgentCommand[]
   content?: AgentToolContent[]
+  messageId?: string
+  toolKind?: string
+  rawInput?: Record<string, unknown>
+  rawOutput?: unknown
+  locations?: Array<{ path: string; line?: number }>
+  input?: AgentInputRequest
+  outputDelta?: string
+}
+
+export interface AgentInputRequest {
+  requestId: string | number
+  title: string
+  schema: { properties?: Record<string, { title?: string; description?: string; type?: string; enum?: string[]; oneOf?: Array<{ const: string; title?: string }>; items?: { enum?: string[] } }>; required?: string[] }
 }
 
 export interface AgentPlanEntry { content: string; status: string; priority?: string }
-export interface AgentCommand { name: string; description: string; input?: { hint: string } }
+export interface AgentCommand { name: string; description: string; input?: { hint: string }; source?: string }
 export type AgentToolContent =
   | { type: "content"; content: { type: string; text?: string } }
   | { type: "diff"; path: string; oldText?: string | null; newText: string }
-export interface AgentLaunchOptions { cwd?: string; executable?: string }
-export interface AgentAvailability { agentId: string; executable?: string; available: boolean }
+  | { type: "patch"; path: string; patch: string }
+export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string }
+export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string }
 
 export interface AgentThreadSnapshot {
   executionId: string
@@ -84,11 +102,13 @@ export interface AgentThreadSnapshot {
   state: AgentThreadState
   transcript: AgentThreadEvent[]
   pendingPermission?: AgentPermissionRequest
+  pendingInput?: AgentInputRequest
   lastError?: string
   lastSequence: number
   turnActive: boolean
   configOptions: AgentConfigOption[]
   commands?: AgentCommand[]
+  resumable?: boolean
 }
 
 export interface AgentDefinition {
@@ -103,11 +123,11 @@ export interface AgentDefinition {
   loginCommand: string
 }
 
-/** First manually installed ACP v1 agent adapters validated by the adapter source documentation. */
+/** Installed base CLIs; the native host negotiates actual capabilities at connection time. */
 export const AGENTS: readonly AgentDefinition[] = [
-  { id: "opencode", label: "OpenCode", launchKind: "native", executable: "opencode", args: ["acp"], installHint: "OpenCode installed on the remote server", installCommand: "npm install -g opencode-ai", loginCommand: "opencode auth login", note: "Native ACP. Credentials and project files stay on the server." },
-  { id: "pi", label: "Pi", launchKind: "adapter", executable: "pi-acp", args: [], installHint: "Pi and pi-acp installed on the remote server", installCommand: "npm install -g @mariozechner/pi-coding-agent pi-acp", loginCommand: "pi", note: "Community adapter. Open Pi and use /login. Tools may run without asking for approval." },
-  { id: "codex", label: "Codex", launchKind: "adapter", executable: "codex-acp", args: [], installHint: "@agentclientprotocol/codex-acp installed on the remote server", installCommand: "npm install -g @openai/codex @agentclientprotocol/codex-acp", loginCommand: "codex login --device-auth", note: "ACP-maintained adapter, backed by Codex App Server. Sign in on the server." },
-  { id: "claude", label: "Claude Code", launchKind: "adapter", executable: "claude-agent-acp", args: [], installHint: "@agentclientprotocol/claude-agent-acp installed on the remote server", installCommand: "npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp", loginCommand: "claude auth login", note: "Claude Agent SDK adapter. Authentication belongs on the server, not in Still." },
+  { id: "opencode", label: "OpenCode", launchKind: "native", executable: "opencode", args: ["serve"], installHint: "OpenCode v2 installed on the remote server", installCommand: "npm install -g @opencode/cli", loginCommand: "opencode auth login", note: "Uses your installed OpenCode v2 server and the commands in this project." },
+  { id: "pi", label: "Pi", launchKind: "native", executable: "pi", args: ["--mode", "rpc"], installHint: "Pi installed on the remote server", installCommand: "npm install -g @mariozechner/pi-coding-agent", loginCommand: "pi", note: "Uses your installed Pi through its RPC interface. Sign in with /login in Pi." },
+  { id: "codex", label: "Codex", launchKind: "native", executable: "codex", args: ["app-server"], installHint: "Codex CLI installed on the remote server", installCommand: "npm install -g @openai/codex", loginCommand: "codex login --device-auth", note: "Uses your installed Codex App Server and remote account." },
+  { id: "claude", label: "Claude Code", launchKind: "native", executable: "claude", args: [], installHint: "Claude Code installed on the remote server", installCommand: "npm install -g @anthropic-ai/claude-code", loginCommand: "claude auth login", note: "Uses your installed Claude Code through structured streaming." },
   { id: "gemini", label: "Gemini CLI", launchKind: "native", executable: "gemini", args: ["--acp"], installHint: "Gemini CLI with ACP support installed on the remote server", installCommand: "npm install -g @google/gemini-cli", loginCommand: "gemini", note: "Native ACP. Open Gemini in the server terminal to complete sign-in first." },
 ]

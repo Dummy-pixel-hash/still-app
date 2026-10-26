@@ -8,6 +8,8 @@ export const unavailableAgentBridge={
  agentSetConfig:async(_id:string,_configId:string,_value:string|boolean):Promise<void>=>{throw unavailable()},
  agentRespondPermission:async(_id:string,_requestId:string|number,_optionId:string):Promise<void>=>{throw unavailable()},
  agentCancel:async(_id:string):Promise<void>=>{throw unavailable()},
+ agentClose:async(_id:string):Promise<void>=>{throw unavailable()},
+ agentRespondInput:async():Promise<void>=>{throw unavailable()},
  agentSnapshot:async(_id:string):Promise<AgentThreadSnapshot>=>{throw unavailable()},
  subscribeToAgent:async(_id:string,_callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>=>{throw unavailable()},
 }

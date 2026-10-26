@@ -51,6 +51,12 @@ Keep existing workspace/window and field radii. The orb silhouette stays circula
 
 ## Components
 
+### Agent workspace — T3-informed operating surface
+
+The agent screen follows the user-selected `pingdotgg/t3code` reference. It uses a compact 250px project/conversation sidebar, a quiet 48px toolbar, an approximately 760px reading column, and a single bottom composer. Charcoal surfaces (`#151517`, `#1c1c1f`, `#242428`), muted borders, off-white text, and restrained accent use distinguish it from the spatial terminal workspace. Geist is used throughout; serif hero typography and installation dashboards are inappropriate for this operating surface.
+
+Folders own conversations. Thread actions live in contextual menus; setup and advanced controls are disclosed on demand. Primary controls are project, agent/model, message, send/stop. Tools are compact structured activity; approvals and failures are visible in context. Persist folder collapse/order, conversation metadata, drafts, and selected project without tying their identity to the running process. Loading must not erase known content or silently move the user's selection.
+
 - **SmokedGlassOrb:** reusable, status-driven rendering; bounded resolution and frame rate; pause plus a Slow/Normal/Fast speed preference; static visible frames when paused or reduced motion is requested. Canvas2D is the graceful fallback, not the default design.
 - **Orb companion controls:** opt-in enable, size, motion, and reset; actual pending/error feedback. The small settings material preview is explicitly not live status.
 - **Orb action:** click/Enter/Space returns to Still; dragging must not trigger activation. A small status symbol supplements colour, and the menu exposes readable status labels.
