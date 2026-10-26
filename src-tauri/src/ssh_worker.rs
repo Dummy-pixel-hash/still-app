@@ -226,6 +226,17 @@ impl client::Handler for CaptureClient {
 
 static HANDSHAKE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Open a second exec channel on Still's existing verified/authenticated SSH handle.
+/// It has no PTY, keeping ACP bytes separate from the user's tmux terminal.
+pub(crate) async fn open_agent_exec(session_id:&str,command:&str)->anyhow::Result<russh::Channel<client::Msg>> {
+    let shared={session_handles().lock().await.get(session_id).cloned().ok_or_else(||anyhow!("no authenticated SSH session for the selected server"))?};
+    let handle=shared.lock().await;
+    if handle.is_closed(){return Err(anyhow!("the selected SSH session has closed"));}
+    let channel=bounded(CHANNEL_SECS,"remote ACP channel open",handle.channel_open_session()).await?;
+    bounded(CHANNEL_SECS,"remote ACP process exec",channel.exec(true,command.as_bytes().to_vec())).await?;
+    Ok(channel)
+}
+
 /// Live authenticated handles for out-of-band SFTP uploads.
 /// Keyed by native session id. The PTY worker owns the connection;
 /// uploads open a second channel on the same connection, so shell

@@ -215,6 +215,8 @@ function SessionCard({
   dropHighlight,
   menuOpen,
   onOpen,
+  onOpenAgent,
+
   onEdit,
   onRemove,
   onToggleMenu,
@@ -228,6 +230,8 @@ function SessionCard({
   dropHighlight: boolean
   menuOpen: boolean
   onOpen: (session: Session, el: HTMLElement) => void
+  onOpenAgent?: (session: Session) => void
+
   onEdit: (session: Session) => void
   onRemove: (session: Session) => void
   onToggleMenu: (id: string | null) => void
@@ -360,6 +364,8 @@ function SessionCard({
               <span className="absolute bottom-7 right-0 z-20 flex w-36 flex-col overflow-hidden rounded-xl border border-white/10 bg-[#121214]/95 py-1 text-[12px] shadow-[0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl">
                 {(
                   [
+                    ...(onOpenAgent ? [["Start agent", () => onOpenAgent(session)] as const] : []),
+
                     ["Open", () => onOpen(session, document.querySelector(`[data-card="${session.id}"]`) as HTMLElement)],
                     ["Edit", () => onEdit(session)],
                     ["Remove", () => onRemove(session)],

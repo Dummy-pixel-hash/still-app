@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
 import type { OrbAction, OrbSnapshot } from "../orb/types"
+import type { AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -30,6 +31,14 @@ function serializeOrb<T>(operation: () => Promise<T>): Promise<T> {
 export const tauriBridge: NativeBridge = {
   adapterName: "Tauri native bridge",
   isDevelopmentAdapter: false,
+  agentStart(nativeSessionId:string,localSessionId:string,agentId:string):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId}})},
+  agentSend(executionId:string,message:string){return invoke<void>("still_agent_send",{args:{executionId,message}})},
+  agentSetConfig(executionId:string,configId:string,value:string|boolean){return invoke<void>("still_agent_set_config",{args:{executionId,configId,value}})},
+  agentRespondPermission(executionId:string,requestId:string|number,optionId:string){return invoke<void>("still_agent_respond",{args:{executionId,requestId,optionId}})},
+  agentCancel(executionId:string){return invoke<void>("still_agent_cancel",{args:{executionId}})},
+  agentSnapshot(executionId:string){return invoke<AgentThreadSnapshot>("still_agent_snapshot",{args:{executionId}})},
+  subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void){return listen<AgentThreadEvent>(`still://agent-event/${executionId}`,event=>callback(event.payload))},
+
 
   orbConfigure(preferences) {
     return serializeOrb(() => invoke<OrbSnapshot>("still_orb_configure", { preferences }))

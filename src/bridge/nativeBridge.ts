@@ -1,5 +1,10 @@
 import type { ConnectionStatus } from "../types"
 import type { OrbBridge } from "../orb/types"
+import type { AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+
+import { unavailableAgentBridge } from "./agentMocks"
+
+
 
 /**
  * Bitmap-only clipboard fallback: paste events sometimes carry no file item
@@ -147,6 +152,14 @@ export interface NativeBridge extends OrbBridge {
   readonly adapterName: string
   readonly isDevelopmentAdapter: boolean
 
+  agentStart(nativeSessionId:string,localSessionId:string,agentId:string):Promise<AgentThreadSnapshot>
+  agentSend(executionId:string,message:string):Promise<void>
+  agentSetConfig(executionId:string,configId:string,value:string|boolean):Promise<void>
+  agentRespondPermission(executionId:string,requestId:string|number,optionId:string):Promise<void>
+  agentCancel(executionId:string):Promise<void>
+  agentSnapshot(executionId:string):Promise<AgentThreadSnapshot>
+  subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>
+
   /** IPC round-trip probe: React -> Tauri IPC -> Rust -> response -> React. */
   ping(): Promise<{ status: string; app: string; version: string }>
 
@@ -212,6 +225,8 @@ export function registerNativeBridge(bridge: NativeBridge) {
  * production path can NEVER silently simulate SSH via the mock adapter.
  */
 export const failingBridge: NativeBridge = {
+  ...unavailableAgentBridge,
+
   adapterName: "No native runtime (packaging error)",
   isDevelopmentAdapter: false,
   async orbConfigure() { throw new Error("No native runtime: orb companion unavailable.") },

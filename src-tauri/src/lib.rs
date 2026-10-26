@@ -3,6 +3,7 @@
 //! Real session engine: SSH (russh) + tmux attach-or-create per session,
 //! one worker task per session id, Tauri events back to the renderer.
 
+mod agent;
 mod commands;
 mod orb;
 pub mod core;
@@ -104,6 +105,12 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             still_ping,
+            agent::still_agent_start,
+            agent::still_agent_send,
+            agent::still_agent_set_config,
+            agent::still_agent_respond,
+            agent::still_agent_cancel,
+            agent::still_agent_snapshot,
             orb::still_orb_configure,
             orb::still_orb_publish,
             orb::still_orb_snapshot,

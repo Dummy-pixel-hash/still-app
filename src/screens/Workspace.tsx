@@ -11,9 +11,13 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import WindowNav from "../components/WindowNav"
+import AgentWorkspace from "../components/AgentWorkspace"
+
 import SessionCard from "../components/SessionCard"
 import TerminalOverlay, { MORPH_MS, type OpenState } from "../components/TerminalOverlay"
 import SessionForm from "../components/SessionForm"
+import { startRemoteAgent } from "../session/agentThreads"
+
 import NewSessionWizard from "../components/NewSessionWizard"
 import NewProjectDialog from "../components/NewProjectDialog"
 import RemoveProjectDialog from "../components/RemoveProjectDialog"
@@ -36,6 +40,8 @@ import {
 } from "../session/store"
 import {
   connectionError,
+  nativeSessionId,
+
   connectionState,
   releaseSession,
   useConnections,
@@ -185,6 +191,8 @@ export default function Workspace() {
   const [editing, setEditing] = useState<Session | null>(null)
   const [removing, setRemoving] = useState<Session | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [agentFor, setAgentFor] = useState<Session | null>(null)
+
   const [authFor, setAuthFor] = useState<{
     session: Session
     mode: "password" | "key"
@@ -956,6 +964,13 @@ export default function Workspace() {
     [openSession],
   )
 
+  const handleStartAgentFromCard = useCallback((session: Session) => {
+    setMenuId(null)
+    if (connectionState(session.id) === "connected") setAgentFor(session)
+    else openSession(session, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(session.id)}"]`))
+  }, [openSession])
+
+
   // Stable handlers: the card grid is memo()'d, so re-creating these inline
   // would re-render every card on every keystroke in any form field.
   const handleEditCard = useCallback((sess: Session) => {
@@ -1151,6 +1166,8 @@ export default function Workspace() {
               >
                 New Session
               </button>
+              <button type="button" disabled={store.sessions.length===0} title="Choose a saved server to run the agent remotely" onClick={()=>{const target=store.sessions.find(item=>connectionState(item.id)==="connected")??store.sessions[0];if(target)handleStartAgentFromCard(target)}} className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg disabled:opacity-40">Agents</button>
+
               <button
                 type="button"
                 onClick={() => setShowSettings(true)}
@@ -1304,6 +1321,8 @@ export default function Workspace() {
                           }
                           menuOpen={menuId === s.id}
                           onOpen={handleCardOpen}
+                          onOpenAgent={handleStartAgentFromCard}
+
                           onEdit={handleEditCard}
                           onRemove={handleRemoveCard}
                           onToggleMenu={setMenuId}
@@ -1573,6 +1592,8 @@ export default function Workspace() {
           />
         </Suspense>
       ) : null}
+
+      {agentFor ? <AgentWorkspace session={agentFor} onClose={()=>setAgentFor(null)} onStart={(agentId)=>startRemoteAgent(nativeSessionId(agentFor.id)??"",agentFor.id,agentId)} /> : null}
 
       {authFor ? (
         <AuthDialog

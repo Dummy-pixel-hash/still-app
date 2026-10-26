@@ -1,5 +1,8 @@
 import { readBrowserClipboard, writeBrowserClipboard } from "./browserClipboard"
 import type { NativeBridge, NativeSessionEvent } from "./nativeBridge"
+import { unavailableAgentBridge } from "./agentMocks"
+
+
 import type { ConnectionStatus } from "../types"
 import { createMockOrbBridge } from "./mockOrbBridge"
 
@@ -37,6 +40,9 @@ function mapRemoteStatus(status: string): ConnectionStatus {
  */
 export const mockBridge: NativeBridge = {
   ...createMockOrbBridge(),
+  ...unavailableAgentBridge,
+
+
   adapterName: "Local UI simulation (development-only)",
   isDevelopmentAdapter: true,
 
