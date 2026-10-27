@@ -238,7 +238,7 @@ export default function SessionTerminal({
     // keystroke (typed, pasted, or wheel-generated) may reach the PTY.
     let inputBatch: Uint8Array[] | null = null
     const sendInput = (bytes: Uint8Array) => {
-      if (pausedRef.current) return
+      if (pausedRef.current || !fitHost.isConnected) return
       if (inputBatch) inputBatch.push(bytes)
       else void writeSession(localRef.current, bytes).catch(() => {})
     }

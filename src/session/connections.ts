@@ -46,18 +46,12 @@ const sessionTerminals = new Map<string, Terminal>()
 export function terminalForSession(localId: string): Terminal {
   let terminal = sessionTerminals.get(localId)
   if (!terminal) {
-    const sessionTerminal = new Terminal({ allowProposedApi: true, scrollback: 5000 })
-    sessionTerminal.loadAddon(new Unicode11Addon())
-    sessionTerminal.unicode.activeVersion = "11"
+    terminal = new Terminal({ allowProposedApi: true, scrollback: 5000 })
+    terminal.loadAddon(new Unicode11Addon())
+    terminal.unicode.activeVersion = "11"
     // Clipboard transfers are handled only by the visible surface's binding.
-    sessionTerminal.parser.registerOscHandler(52, () => true)
-    // Hidden sessions still need replies to terminal queries. The attached
-    // surface owns input while visible (including auth-pausing and batching).
-    sessionTerminal.onData(data => {
-      if (!sessionTerminal.element?.isConnected) void writeSession(localId, data).catch(() => {})
-    })
-    sessionTerminals.set(localId, sessionTerminal)
-    terminal = sessionTerminal
+    terminal.parser.registerOscHandler(52, () => true)
+    sessionTerminals.set(localId, terminal)
   }
   return terminal
 }

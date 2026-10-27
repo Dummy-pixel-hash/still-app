@@ -287,13 +287,17 @@ test("releasing a session discards its parser before the local id is reused", as
   expect(await h(page, "harness.term.buffer.active.getLine(0).translateToString(true)")).toBe("")
 })
 
-test("hidden sessions answer terminal queries once and visible auth-paused input stays blocked", async ({ page }) => {
+test("minimizing mid-drag cannot leak mouse input and visible auth-paused input stays blocked", async ({ page }) => {
   await h(page, 'harness.emit("\\x1b[?1049h\\x1b[?1002h\\x1b[?1006h")')
+  const before = await page.locator("#still-term-fixture .xterm-screen").boundingBox()
+  await page.mouse.move(before!.x + 100, before!.y + 100)
+  await page.mouse.down()
   await h(page, "harness.hide()")
   await expect(page.locator("#still-term-fixture")).toHaveCount(0)
   await h(page, "harness.clear()")
-  await h(page, 'harness.emit("\\x1b[5n")')
-  expect(await emittedText(page)).toBe("\x1b[0n")
+  await page.mouse.move(200, 150, { steps: 3 })
+  await page.mouse.up()
+  expect(await emittedText(page)).toBe("")
   await h(page, "harness.remount()")
   await expect(page.locator("#still-term-fixture .xterm-helper-textarea")).toBeFocused()
   await h(page, "harness.clear()")
