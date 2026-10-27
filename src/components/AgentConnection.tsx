@@ -5,32 +5,34 @@ import { buildConnectRequest, type AskSessionAuth } from "../session/connectRequ
 import { clearHostKeyPrompt, connectionError, connectionState, disconnectSession, forgetStoredHostKey, hostKeyPromptFor, isConnectPending, nativeSessionId, reconnectSession, useConnections } from "../session/connections"
 import type { Session } from "../types"
 
-export function useAgentConnection(session: Session, askAuth: AskSessionAuth, keyTextFor: (id: string) => string | null) {
+export function useAgentConnection(session: Session | null, askAuth: AskSessionAuth, keyTextFor: (id: string) => string | null) {
   useConnections()
-  const localId = agentConnectionId(session)
+  const localId = session ? agentConnectionId(session) : "agents:offline"
   const state = connectionState(localId)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(true), attempted = useRef("")
-  const connecting = useRef(false)
+  const connecting = useRef("")
   const callbacks = useRef({ askAuth, keyTextFor, session })
   callbacks.current = { askAuth, keyTextFor, session }
   const connect = useCallback(async () => {
-    if (connecting.current || isConnectPending(localId) || connectionState(localId) === "connected") return
-    connecting.current = true
+    if (!callbacks.current.session) return
+    if (connecting.current === localId || isConnectPending(localId) || connectionState(localId) === "connected") return
+    connecting.current = localId
     setBusy(true); setError(null)
     try {
       const { session: target, askAuth: ask, keyTextFor: key } = callbacks.current
+      if (!target) return
       const req = await buildConnectRequest(target, ask, key, { localId, sshOnly: true })
-      if (req && mounted.current) await reconnectSession(req)
-    } catch (e) { if (mounted.current) setError(e instanceof Error ? e.message : "Could not connect to the server.") }
-    finally { connecting.current = false; if (mounted.current) setBusy(false) }
+      if (req && mounted.current && callbacks.current.session && agentConnectionId(callbacks.current.session) === localId) await reconnectSession(req)
+    } catch (e) { if (mounted.current && connecting.current === localId) setError(e instanceof Error ? e.message : "Could not connect to the server.") }
+    finally { if (connecting.current === localId) { connecting.current = ""; if (mounted.current) setBusy(false) } }
   }, [localId])
   useEffect(() => {
     mounted.current = true
-    if (attempted.current !== localId) { attempted.current = localId; void connect() }
+    if (session && attempted.current !== localId) { attempted.current = localId; setError(null); void connect() }
     return () => { mounted.current = false }
-  }, [localId, connect])
+  }, [localId, connect, !!session])
   return { localId, state, busy, error: error || connectionError(localId), nativeId: nativeSessionId(localId), hostPrompt: hostKeyPromptFor(localId), connect }
 }
 export function AgentConnectionNotice({ connection }: { connection: ReturnType<typeof useAgentConnection> }) {

@@ -6,6 +6,7 @@ export type AgentThreadState =
   | "cancelled"
   | "error"
   | "submissionUnknown"
+  | "saved"
 
 export type AgentEventType =
   | "userMessage"
@@ -56,6 +57,8 @@ export interface AgentConfigOption {
 }
 export interface AgentThreadEvent {
   sequence: number
+  attemptId?: string
+  endSequence?: number
   type: AgentEventType
   state?: AgentThreadState
   text?: string
@@ -84,15 +87,17 @@ export interface AgentInputRequest {
 }
 
 export interface AgentPlanEntry { content: string; status: string; priority?: string }
-export interface AgentCommand { name: string; description: string; input?: { hint: string }; source?: string }
+export interface AgentCommand { name: string; aliases?: string[]; description: string; input?: { hint: string }; source?: string; route?: "command" | "skill" | "client"; unavailable?: string }
 export type AgentToolContent =
   | { type: "content"; content: { type: string; text?: string } }
   | { type: "diff"; path: string; oldText?: string | null; newText: string }
   | { type: "patch"; path: string; patch: string }
-export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string }
+export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string }
 export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string }
 
 export interface AgentThreadSnapshot {
+  conversationId?: string
+  hostKey?: string
   executionId: string
   localSessionId: string
   agentId: string
@@ -110,6 +115,16 @@ export interface AgentThreadSnapshot {
   commands?: AgentCommand[]
   resumable?: boolean
 }
+
+export interface AgentLibrary {
+  rows: unknown[]
+  workspaces: Record<string, unknown>
+  storagePath: string
+  warnings: string[]
+  liveExecutions?: string[]
+}
+
+export interface AgentCatalog { commands: AgentCommand[]; configOptions: AgentConfigOption[]; version?: string; warning?: string }
 
 export interface AgentDefinition {
   id: string

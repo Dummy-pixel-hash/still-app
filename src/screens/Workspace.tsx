@@ -12,6 +12,7 @@ import {
 } from "react"
 import WindowNav from "../components/WindowNav"
 import { agentConnectionId } from "../agents/workspace"
+import { useAgentStorageError } from "../session/agentStorage"
 const RemoteAgentWorkspace = lazy(() => import("../components/RemoteAgentWorkspace"))
 
 import SessionCard from "../components/SessionCard"
@@ -192,6 +193,8 @@ export default function Workspace() {
   const [removing, setRemoving] = useState<Session | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [agentFor, setAgentFor] = useState<Session | null>(null)
+  const [agentsOpen, setAgentsOpen] = useState(false)
+  const agentSaveError = useAgentStorageError()
 
   const [authFor, setAuthFor] = useState<{
     session: Session
@@ -621,7 +624,7 @@ export default function Workspace() {
   toggleRef.current = toggleTemp
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (agentFor) return
+      if (agentsOpen) return
       if (e.repeat) return
       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return
       if (e.key.toLowerCase() !== "t") return
@@ -631,7 +634,7 @@ export default function Workspace() {
     }
     window.addEventListener("keydown", onKey, { capture: true })
     return () => window.removeEventListener("keydown", onKey, { capture: true })
-  }, [agentFor])
+  }, [agentsOpen])
 
   // Global keys: Ctrl/Cmd+K focuses search (workspace only), Ctrl+. or
   // Ctrl+` leaves the terminal. Never intercept while the terminal or any
@@ -968,17 +971,19 @@ export default function Workspace() {
   const handleStartAgentFromCard = useCallback((session: Session) => {
     setMenuId(null)
     setAgentFor(session)
+    setAgentsOpen(true)
   }, [])
 
   const closeAgents = useCallback(() => {
     const pending = authForRef.current
-    if (pending && pending.session.id === agentFor?.id) {
+    if (pending && agentsOpen) {
       authForRef.current = null
       setAuthFor(null)
       pending.resolve(null)
     }
     setAgentFor(null)
-  }, [agentFor])
+    setAgentsOpen(false)
+  }, [agentsOpen])
 
 
   // Stable handlers: the card grid is memo()'d, so re-creating these inline
@@ -1176,7 +1181,7 @@ export default function Workspace() {
               >
                 New Session
               </button>
-              <button type="button" disabled={store.sessions.length===0} title="Choose a saved server to run the agent remotely" onClick={()=>{const target=store.sessions.find(item=>connectionState(item.id)==="connected")??store.sessions[0];if(target)handleStartAgentFromCard(target)}} className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg disabled:opacity-40">Agents</button>
+              <button type="button" title="Open your projects and conversations" onClick={() => { setAgentFor(null); setAgentsOpen(true) }} className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg">Agents</button>
 
               <button
                 type="button"
@@ -1603,14 +1608,15 @@ export default function Workspace() {
         </Suspense>
       ) : null}
 
-      {agentFor ? <Suspense fallback={<div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#151517] text-[13px] text-[#a4a4ae]" role="status">Opening agents…</div>}><RemoteAgentWorkspace key={agentConnectionId(agentFor)} session={agentFor} sessions={store.sessions} onNeedAuth={onNeedAuth} keyTextFor={keyTextFor} onClose={closeAgents}
-        onOpenTerminal={() => { closeAgents(); openSession(agentFor, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(agentFor.id)}"]`)) }} /></Suspense> : null}
+      {!agentsOpen && agentSaveError && <div className="fixed bottom-5 left-1/2 z-[64] flex max-w-[90vw] -translate-x-1/2 items-center gap-4 rounded-lg bg-[#363226] px-4 py-3 text-[12px] text-[#e9d6b0]" role="alert"><span>Agent history needs attention: {agentSaveError}</span><button className="shrink-0 underline" onClick={() => { setAgentFor(null); setAgentsOpen(true) }}>Open conversations</button></div>}
+      {agentsOpen ? <Suspense fallback={<div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#151517] text-[14px] text-[#a4a4ae]" role="status">Opening conversations…</div>}><RemoteAgentWorkspace session={agentFor} sessions={store.sessions} onNeedAuth={onNeedAuth} keyTextFor={keyTextFor} onClose={closeAgents}
+        onOpenTerminal={target => { closeAgents(); openSession(target, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(target.id)}"]`)) }} /></Suspense> : null}
 
       {authFor ? (
         <AuthDialog
           session={authFor.session}
           mode={authFor.mode}
-          purpose={agentFor ? "agent" : "terminal"}
+          purpose={agentsOpen ? "agent" : "terminal"}
           onResolve={authFor.resolve}
         />
       ) : null}

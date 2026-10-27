@@ -38,6 +38,24 @@ test("OpenCode command completion does not discard an outstanding form", async (
   assert.equal((await done).stopReason, "end_turn")
 })
 
+test("OpenCode discovery includes nested commands and skills without creating a session", async () => {
+  if (process.platform === "win32") return
+  const dir = await mkdtemp("/tmp/opencode/still-discovery-")
+  const executable = `${dir}/opencode`
+  await writeFile(executable, `#!/bin/sh\nexec env STILL_TEST_PEER=opencode ${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(new URL("./protocol-peer.mjs", import.meta.url)))} "$@"\n`, { mode: 0o700 })
+  const driver = new OpenCodeDriver({ update() {} }, executable)
+  const calls = [], http = driver.http.bind(driver)
+  driver.http = async (method, path, body) => { calls.push({ method, path }); return http(method, path, body) }
+  try {
+    const catalog = await driver.discover()
+    assert.ok(catalog.commands.some(command => command.name === "team/command-23"))
+    assert.ok(catalog.commands.some(command => command.name === "skill:team/review"))
+    assert.equal(driver.id, "")
+    assert.equal(calls.filter(call => call.method === "POST" && call.path === "/api/session").length, 0)
+    assert.equal(catalog.warning, undefined)
+  } finally { await driver.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
 for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${provider} driver: startup, commands, two turns, tool/approval translation`, async () => {
   if (process.platform === "win32") return // Remote runners target POSIX SSH hosts; wrapper fixture uses /bin/sh.
   const dir = await mkdtemp("/tmp/opencode/still-protocol-")
@@ -55,7 +73,11 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
     const ready = frames.find(frame => frame.id === 2)
     assert.equal(ready.error, undefined); assert.ok(ready.result.sessionId); assert.ok(ready.result.configOptions.length)
     const commands = frames.filter(frame => frame.params?.update?.sessionUpdate === "available_commands_update").at(-1).params.update.availableCommands
-    if (provider === "opencode") assert.equal(commands.length, 25) // waits for the cold project scan
+    if (provider === "opencode") {
+      assert.equal(commands.filter(command => command.route === "command").length, 24)
+      assert.ok(commands.some(command => command.name === "skill:team/review" && command.route === "skill"))
+      assert.ok(commands.some(command => command.name === "reload"))
+    }
     for (const id of [3, 4]) {
       await host.handle({ id, method: "session/prompt", params: { prompt: [{ type: "text", text: provider === "opencode" ? "/team/command-23 arguments" : "Hello" }] } })
       assert.equal(frames.find(frame => frame.id === id).result?.stopReason, "end_turn")
@@ -88,6 +110,13 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
     if (provider !== "claude") {
       await host.handle({ id: 9, method: "session/prompt", params: { prompt: [{ type: "text", text: "/compact" }] } })
       assert.equal(frames.find(frame => frame.id === 9).result?.stopReason, "end_turn")
+    }
+    if (provider === "opencode") {
+      await host.handle({ id: 10, method: "session/prompt", params: { prompt: [{ type: "text", text: "@team/review Inspect arguments" }] } })
+      assert.equal(frames.find(frame => frame.id === 10).result?.stopReason, "end_turn")
+      assert.ok(frames.some(frame => frame.params?.update?.content?.text === "Attached skill: team/review. @team/review Inspect arguments"))
+      await host.handle({ id: 11, method: "session/prompt", params: { prompt: [{ type: "text", text: "/reload" }] } })
+      assert.equal(frames.find(frame => frame.id === 11).result?.stopReason, "end_turn")
     }
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 })

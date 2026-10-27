@@ -4,6 +4,7 @@
 //! one worker task per session id, Tauri events back to the renderer.
 
 mod agent;
+mod agent_store;
 mod commands;
 mod orb;
 pub mod core;
@@ -107,6 +108,8 @@ pub fn run() {
             still_ping,
             agent::still_agent_start,
             agent::still_agent_check,
+            agent::still_agent_catalog,
+            agent::still_agent_resolve_folder,
             agent::still_agent_send,
             agent::still_agent_set_config,
             agent::still_agent_respond,
@@ -114,6 +117,12 @@ pub fn run() {
             agent::still_agent_close,
             agent::still_agent_input,
             agent::still_agent_snapshot,
+            agent::still_agent_flush,
+            agent_store::still_agent_library,
+            agent_store::still_agent_save_metadata,
+            agent_store::still_agent_save_workspace,
+            agent_store::still_agent_delete_saved,
+            agent_store::still_agent_migrate,
             orb::still_orb_configure,
             orb::still_orb_publish,
             orb::still_orb_snapshot,

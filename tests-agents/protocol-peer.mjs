@@ -69,13 +69,14 @@ if (type === "opencode") {
       }
       return send({ data: Array.from({ length: 24 }, (_, i) => ({ name: `team/command-${i}`, description: `Command ${i}` })) })
     }
-    if (url.pathname === "/api/skill") return send({ data: [] })
+    if (url.pathname === "/api/skill") return send({ data: scanned ? [{ id: "team/review", name: "Team review", description: "Review project code" }] : [] })
+    if (url.pathname === "/api/location/reload") { event({ type: "command.updated", data: {} }); event({ type: "skill.updated", data: {} }); return send({ data: {} }) }
     if (url.pathname === "/api/model") return send({ data: [{ id: "model-a", providerID: "fixture", name: "Model A", enabled: true, variants: [] }, { id: "model-b", providerID: "fixture", name: "Model B", enabled: true, variants: [] }] })
     if (url.pathname === "/api/agent") return send({ data: scanned ? [{ id: "build", name: "Build", mode: "primary" }] : [] })
     if (url.pathname.endsWith("/model")) { sessionModel = input.model; res.writeHead(204).end(); return }
     if (url.pathname.endsWith("/prompt")) {
       running = true
-      send({ data: {} }); event({ type: "session.text.delta", data: { sessionID: "session-fixture", assistantMessageID: "msg-1", ordinal: 0, delta: "Hello world" } })
+      send({ data: {} }); event({ type: "session.text.delta", data: { sessionID: "session-fixture", assistantMessageID: "msg-1", ordinal: 0, delta: input.skills?.length ? `Attached skill: ${input.skills[0].id}. ${input.text}` : "Hello world" } })
       if (input.text === "WAIT") event({ type: "session.text.delta", data: { sessionID: "session-fixture", assistantMessageID: "wait", ordinal: 0, delta: "WAIT_ADMITTED" } })
       else { running = false; event({ type: "session.execution.succeeded", data: { sessionID: "session-fixture" } }) }
       return

@@ -408,7 +408,7 @@ export class ClaudeDriver extends Driver {
 }
 
 export class OpenCodeDriver extends Driver {
-  async start(resume) {
+  async startServer() {
     this.password = randomBytes(32).toString("hex"); this.abort = new AbortController(); this.tools = new Map(); this.scanPending = new Set(["command.updated", "skill.updated"])
     this.scanned = new Promise(resolve => { this.finishScan = resolve })
     this.server = spawn(this.executable, ["serve", "--hostname=127.0.0.1", "--port=0"], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, OPENCODE_PASSWORD: this.password, OPENCODE_SERVER_PASSWORD: this.password } })
@@ -420,13 +420,22 @@ export class OpenCodeDriver extends Driver {
     }), 30000, "OpenCode startup")
     this.url = url
     const info = await this.http("GET", "/api/info")
+    this.version = info.version || info.data?.version
     if (!String(info.version || info.data?.version || "").startsWith("2.")) throw new Error("Native command integration requires OpenCode v2. Update the remote OpenCode installation to use this connection.")
     await this.subscribe()
+    this.server.on("exit", () => { if (!this.abort.signal.aborted) this.fail(new Error("The OpenCode server exited")) })
+  }
+  async discover() {
+    await this.startServer()
+    await this.catalog(true)
+    return { commands: this.commands, configOptions: this.configs, version: this.version, warning: this.catalogWarning }
+  }
+  async start(resume) {
+    await this.startServer()
     const result = resume ? await this.http("GET", `/api/session/${encodeURIComponent(resume)}`) : await this.http("POST", "/api/session", { location: { directory: process.cwd() } })
     this.session = result.data || result; this.id = this.session.id; this.resumable = true
     if (!this.id) throw new Error("OpenCode did not return a session identity")
     await this.catalog(true)
-    this.server.on("exit", () => { if (!this.abort.signal.aborted) this.fail(new Error("The OpenCode server exited")) })
   }
   async http(method, path, body) {
     const response = await fetch(this.url + path, { method, headers: { Authorization: `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`, "Content-Type": "application/json" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(45000) })
@@ -439,20 +448,27 @@ export class OpenCodeDriver extends Driver {
     if (this.catalogTask) return this.catalogTask
     const task = this.readCatalog(waitForScan)
     this.catalogTask = task
-    try { await task } finally { if (this.catalogTask === task) this.catalogTask = null }
+    try { await task } finally {
+      if (this.catalogTask === task) this.catalogTask = null
+      if (this.catalogDirty) { this.catalogDirty = false; await this.catalog() }
+    }
   }
   async readCatalog(waitForScan) {
     const location = `?location[directory]=${encodeURIComponent(process.cwd())}`
     const read = () => Promise.all([this.http("GET", "/api/command" + location), this.http("GET", "/api/model" + location), this.http("GET", "/api/agent" + location), this.http("GET", "/api/skill" + location)])
-    let [commands, models, agents] = await read()
-    if (waitForScan && (!commands.data?.length || !agents.data?.length)) {
-      await deadline(this.scanned, 10000, "Project command discovery").catch(() => {})
-      ;[commands, models, agents] = await read()
+    let [commands, models, agents, skills] = await read()
+    if (waitForScan) {
+      this.catalogWarning = undefined
+      await deadline(this.scanned, 10000, "Project command discovery").catch(() => { this.catalogWarning = "OpenCode did not confirm the end of its project scan. The current inventory is shown; refresh to check for later commands." })
+      ;[commands, models, agents, skills] = await read()
     }
-    const session = await this.http("GET", `/api/session/${this.id}`)
+    const session = this.id ? await this.http("GET", `/api/session/${this.id}`) : {}
     this.session = session.data || session
-    this.commands = (commands.data || []).map(command => ({ name: command.name, description: command.description || "" }))
-    if (!this.commands.some(command => command.name === "compact")) this.commands.push({ name: "compact", description: "Compact this conversation" })
+    this.commands = (commands.data || []).map(command => ({ name: command.name, description: command.description || "", source: "OpenCode command", route: "command", ...(command.input ? { input: command.input } : {}) }))
+    this.skills = skills.data || []
+    for (const skill of this.skills) this.commands.push({ name: `skill:${skill.id}`, description: skill.description || skill.name || skill.id, source: "Skill", route: "skill", input: { hint: "Optional instructions" } })
+    if (!this.commands.some(command => command.name === "compact")) this.commands.push({ name: "compact", description: "Compact this conversation", source: "OpenCode" })
+    if (!this.commands.some(command => command.name === "reload")) this.commands.push({ name: "reload", description: "Reload OpenCode configuration and project commands", source: "OpenCode" })
     this.models = (models.data || []).filter(model => model.enabled !== false)
     if (!this.session.model) {
       const model = await this.http("GET", "/api/model/default" + location).catch(() => null)
@@ -473,7 +489,19 @@ export class OpenCodeDriver extends Driver {
     try {
       await this.catalog()
       const command = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
-      if (command?.[1] === "compact") { await this.http("POST", `/api/session/${this.id}/compact`, {}) }
+      const mention = text.match(/^@([^\s]+)(?:\s|$)/)
+      const skill = mention && this.skills.find(skill => skill.id === mention[1])
+      if (mention && !skill) throw new Error(`The skill @${mention[1]} is not available in this project's current inventory`)
+      if (skill) {
+        await this.http("POST", `/api/session/${this.id}/prompt`, { text, skills: [{ id: skill.id, mention: { start: 0, end: skill.id.length + 1, text: `@${skill.id}` } }] })
+      }
+      else if (command?.[1] === "reload" && !this.commands.some(entry => entry.name === "reload" && entry.route === "command")) {
+        this.scanPending = new Set(["command.updated", "skill.updated"]); this.scanned = new Promise(resolve => { this.finishScan = resolve })
+        await this.http("POST", "/api/location/reload")
+        await this.catalog(true)
+        this.update({ sessionUpdate: "notice", message: this.catalogWarning || "OpenCode configuration and project commands refreshed." }); this.finish()
+      }
+      else if (command?.[1] === "compact" && !this.commands.some(entry => entry.name === "compact" && entry.route === "command")) { await this.http("POST", `/api/session/${this.id}/compact`, {}) }
       else if (command) {
         if (!this.commands.some(entry => entry.name === command[1])) throw new Error(`/${command[1]} is not a command exposed by OpenCode in this folder`)
         await this.http("POST", `/api/session/${this.id}/command`, { name: command[1], text: command[2] || "" })
@@ -515,7 +543,10 @@ export class OpenCodeDriver extends Driver {
     const p = event.data || {}
     if (event.location?.directory === process.cwd() && this.scanPending?.delete(event.type) && !this.scanPending.size) this.finishScan()
     if (["command.updated", "model.updated", "agent.updated", "skill.updated"].includes(event.type)) {
-      if (this.id && !this.catalogTask && (!event.location || event.location.directory === process.cwd())) void this.catalog().catch(error => this.fail(error))
+      if (this.id && (!event.location || event.location.directory === process.cwd())) {
+        if (this.catalogTask) this.catalogDirty = true
+        else void this.catalog().catch(error => this.fail(error))
+      }
       return
     }
     const form = event.type === "form.created" ? p.form : undefined
@@ -622,7 +653,12 @@ export function createHost(write, driverId, executable) {
   return host
 }
 
-if (process.env.STILL_AGENT_DRIVER) {
+if (process.env.STILL_AGENT_CATALOG === "opencode") {
+  const driver = new OpenCodeDriver({ update() {} }, process.env.STILL_AGENT_EXECUTABLE)
+  try { console.log(JSON.stringify(await driver.discover())) }
+  catch (error) { console.error(errorText(error)); process.exitCode = 1 }
+  finally { await driver.close() }
+} else if (process.env.STILL_AGENT_DRIVER) {
   if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("Still's native bridge requires Node.js 20 or newer on the server")
   const write = value => process.stdout.write(JSON.stringify(value) + "\n")
   const host = createHost(write, process.env.STILL_AGENT_DRIVER, process.env.STILL_AGENT_EXECUTABLE)

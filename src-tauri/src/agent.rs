@@ -2,6 +2,7 @@
 //! host; Gemini uses ACP directly. All share the ACP v1 SSH-facing envelope.
 //! Execution depends on the verified SSH connection; detached supervision is not implemented.
 use crate::{
+    agent_store,
     commands::AppState,
     core::{SessionStatus, StillError},
     ssh_worker,
@@ -10,7 +11,7 @@ use russh::{Channel, ChannelMsg, client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -32,6 +33,10 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<Thread>>>> {
 #[serde(rename_all = "camelCase")]
 pub struct Event {
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_sequence: Option<u64>,
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,6 +80,8 @@ impl Event {
     fn new(kind: &str) -> Self {
         Self {
             sequence: 0,
+            attempt_id: None,
+            end_sequence: None,
             kind: kind.into(),
             state: None,
             text: None,
@@ -100,6 +107,10 @@ impl Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub host_key: String,
     pub execution_id: String,
     pub local_session_id: String,
     pub agent_id: String,
@@ -116,6 +127,18 @@ pub struct Snapshot {
     pub commands: Vec<Value>,
     pub pending_input: Option<Value>,
     pub resumable: bool,
+}
+impl Snapshot {
+    fn history_header(&self) -> Self {
+        Self {
+            conversation_id: self.conversation_id.clone(), host_key: self.host_key.clone(),
+            execution_id: self.execution_id.clone(), local_session_id: self.local_session_id.clone(),
+            agent_id: self.agent_id.clone(), agent_name: self.agent_name.clone(), agent_session_id: self.agent_session_id.clone(),
+            cwd: self.cwd.clone(), state: self.state.clone(), last_error: self.last_error.clone(),
+            last_sequence: self.last_sequence, turn_active: self.turn_active, resumable: self.resumable,
+            transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
+        }
+    }
 }
 struct PendingPermission {
     id: Value,
@@ -134,6 +157,8 @@ struct Thread {
     pending_input_id: Option<Value>,
     early_updates: Vec<Value>,
     cleanup_error: Option<String>,
+    unsaved: VecDeque<(Snapshot, Event)>,
+    history_lease: Option<std::fs::File>,
 }
 struct PendingConfig {
     id: String,
@@ -149,6 +174,7 @@ pub struct StartArgs {
     cwd: Option<String>,
     executable: Option<String>,
     resume_session_id: Option<String>,
+    conversation_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,7 +275,7 @@ fn directory_script(cwd: &str) -> Result<String, StillError> {
         quote(cwd)
     };
     Ok(format!(
-        "cd -- {path} || exit 73; printf 'STILL_CWD:%s\\n' \"$PWD\"; "
+        "cd -- {path} || exit 73; printf 'STILL_CWD:%s\\n' \"$(pwd -P)\"; "
     ))
 }
 
@@ -357,6 +383,7 @@ fn append_history(history: &mut Vec<Event>, event: Event) {
             last.text
                 .get_or_insert_with(String::new)
                 .push_str(event.text.as_deref().unwrap_or(""));
+            last.end_sequence = Some(event.sequence);
             return;
         }
     }
@@ -365,14 +392,48 @@ fn append_history(history: &mut Vec<Event>, event: Event) {
     }
     history.push(event);
 }
-fn emit(thread: &mut Thread, mut e: Event) {
+async fn emit(thread: &mut Thread, mut e: Event) {
     thread.snapshot.last_sequence = thread.snapshot.last_sequence.saturating_add(1);
     e.sequence = thread.snapshot.last_sequence;
+    e.attempt_id = Some(thread.snapshot.execution_id.clone());
     append_history(&mut thread.snapshot.transcript, e.clone());
+    let mut result = Ok(());
+    while let Some((snapshot, event)) = thread.unsaved.front() {
+        result = agent_store::event(&thread.app, snapshot, event).await;
+        if result.is_err() { break; }
+        thread.unsaved.pop_front();
+    }
+    if result.is_ok() { result = agent_store::event(&thread.app, &thread.snapshot, &e).await; }
+    if result.is_err() {
+        let snapshot = thread.snapshot.history_header();
+        thread.unsaved.push_back((snapshot, e.clone()));
+    }
+    agent_store::report(&thread.app, &thread.snapshot.conversation_id, e.sequence, &result);
     let _ = thread.app.emit(
         &format!("still://agent-event/{}", thread.snapshot.execution_id),
         e,
     );
+}
+
+pub async fn live_executions() -> Vec<String> {
+    registry().lock().await.keys().cloned().collect()
+}
+
+async fn flush_history(thread: &mut Thread) -> Result<(), StillError> {
+    while let Some((snapshot, event)) = thread.unsaved.front() {
+        let result = agent_store::event(&thread.app, snapshot, event).await;
+        agent_store::report(&thread.app, &snapshot.conversation_id, event.sequence, &result);
+        result?;
+        thread.unsaved.pop_front();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn still_agent_flush() -> Result<(), StillError> {
+    let threads: Vec<_> = registry().lock().await.values().cloned().collect();
+    for row in threads { flush_history(&mut *row.lock().await).await?; }
+    Ok(())
 }
 
 /// Resolve and verify the directory through the already verified SSH connection.
@@ -425,6 +486,49 @@ async fn remote_cwd(session_id: &str, directory: &str) -> Result<String, StillEr
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderArgs { native_session_id: String, cwd: String }
+
+#[tauri::command]
+pub async fn still_agent_resolve_folder(args: FolderArgs) -> Result<String, StillError> {
+    if args.cwd.trim().is_empty() { return Err(StillError::friendly("agent_project_required", "Enter the remote project folder.")); }
+    remote_cwd(&args.native_session_id, &args.cwd).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogArgs { native_session_id: String, agent_id: String, cwd: String, executable: Option<String> }
+
+#[tauri::command]
+pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError> {
+    let def = definition(&args.agent_id).ok_or_else(|| StillError::friendly("agent_unknown", "Choose a supported agent."))?;
+    if args.agent_id != "opencode" { return Ok(json!({"commands":[],"configOptions":[]})); }
+    if args.cwd.trim().is_empty() { return Err(StillError::friendly("agent_project_required", "Choose the project first.")); }
+    let cwd = remote_cwd(&args.native_session_id, &args.cwd).await?;
+    let path = executable(&def, args.executable.as_deref())?;
+    let script = login_command(&format!("cd -- {} || exit 73; exec env STILL_AGENT_CATALOG=opencode STILL_AGENT_EXECUTABLE={} node --input-type=module -e {}", quote(&cwd), quote(&path), quote(include_str!("../agent-host/bridge.mjs"))));
+    let mut channel = ssh_worker::open_agent_exec(&args.native_session_id, &script).await.map_err(|e| StillError::friendly("agent_catalog", e.to_string()))?;
+    let result = tokio::time::timeout(Duration::from_secs(65), async {
+        let mut bytes = Vec::new(); let mut stderr = Vec::new(); let mut failed = false;
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => { if bytes.len() + data.len() > FRAME_LIMIT { return Err("Project catalog exceeded 2 MiB".to_owned()); } bytes.extend_from_slice(&data); },
+                ChannelMsg::ExtendedData { data, .. } => { if stderr.len() < 16000 { stderr.extend_from_slice(&data[..data.len().min(16000 - stderr.len())]); } },
+                ChannelMsg::ExitStatus { exit_status } => failed = exit_status != 0,
+                ChannelMsg::Close | ChannelMsg::Eof => break,
+                _ => {},
+            }
+        }
+        if failed || bytes.is_empty() { return Err(format!("Could not load project commands: {}", String::from_utf8_lossy(&stderr).trim())); }
+        let catalog: Value = serde_json::from_slice(&bytes).map_err(|_| "The provider returned an invalid command catalog".to_owned())?;
+        if !catalog["commands"].is_array() || !catalog["configOptions"].is_array() { return Err("The provider omitted its command catalog".into()); }
+        Ok(catalog)
+    }).await;
+    let _ = channel.eof().await; let _ = channel.close().await;
+    result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
+}
+
 #[tauri::command]
 pub async fn still_agent_start(
     app: AppHandle,
@@ -457,10 +561,7 @@ pub async fn still_agent_start(
     };
     let cwd = remote_cwd(
         &args.native_session_id,
-        args.cwd
-            .as_deref()
-            .or(config.working_directory.as_deref())
-            .unwrap_or("~"),
+        args.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).ok_or_else(|| StillError::friendly("agent_project_required", "Choose the project folder before starting a conversation."))?,
     )
     .await?;
     let path = executable(&def, args.executable.as_deref())?;
@@ -487,21 +588,21 @@ pub async fn still_agent_start(
             def.install
         ))
     ));
+    let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
+    let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
+    let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
-    let execution_id = format!(
-        "agent-{}-{}",
-        std::process::id(),
-        IDS.fetch_add(1, Ordering::Relaxed)
-    );
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
     let (outbound, outbound_rx) = mpsc::unbounded_channel();
     let (close, close_rx) = mpsc::unbounded_channel();
     let snapshot = Snapshot {
+        conversation_id,
+        host_key: json!([config.host.to_lowercase(), config.port, config.username]).to_string(),
         execution_id: execution_id.clone(),
         local_session_id: args.local_session_id,
         agent_id: args.agent_id,
         agent_name: def.name.into(),
-        agent_session_id: None,
+        agent_session_id: args.resume_session_id.clone(),
         cwd: cwd.clone(),
         state: "connecting".into(),
         transcript: Vec::new(),
@@ -512,8 +613,13 @@ pub async fn still_agent_start(
         config_options: Vec::new(),
         commands: Vec::new(),
         pending_input: None,
-        resumable: false,
+        resumable: args.resume_session_id.is_some(),
     };
+    if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
+        let _ = channel.eof().await;
+        let _ = channel.close().await;
+        return Err(error);
+    }
     let row = Arc::new(Mutex::new(Thread {
         snapshot: snapshot.clone(),
         app,
@@ -527,6 +633,8 @@ pub async fn still_agent_start(
         pending_input_id: None,
         early_updates: Vec::new(),
         cleanup_error: None,
+        unsaved: VecDeque::new(),
+        history_lease: Some(history_lease),
     }));
     registry().lock().await.insert(execution_id, row.clone());
     tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd));
@@ -590,7 +698,7 @@ async fn run_stream(
                 thread.cleanup_error = Some(message.clone());
                 thread.snapshot.state = "submissionUnknown".into();
                 thread.snapshot.last_error = Some(message.clone());
-                let mut event = Event::new("threadError"); event.text = Some(message.clone()); emit(&mut thread, event);
+                let mut event = Event::new("threadError"); event.text = Some(message.clone()); emit(&mut thread, event).await;
             }
             let _ = reply.send(result);
             return;
@@ -614,7 +722,7 @@ async fn run_stream(
               let mut thread=row.lock().await;
               if thread.snapshot.turn_active {
                 thread.snapshot.state="working".into();
-                let mut event=Event::new("threadStopped");event.text=Some("Cancellation requested; waiting for the agent to confirm it has stopped.".into());emit(&mut thread,event);
+                let mut event=Event::new("threadStopped");event.text=Some("Cancellation requested; waiting for the agent to confirm it has stopped.".into());emit(&mut thread,event).await;
               }
             }
          },
@@ -679,7 +787,7 @@ async fn handle(
             thread.snapshot.state = "inputRequired".into();
             let mut event = Event::new("input");
             event.input = Some(input);
-            emit(&mut thread, event);
+            emit(&mut thread, event).await;
             return Ok(());
         }
         if method == "session/request_permission" {
@@ -720,7 +828,7 @@ async fn handle(
             let mut e = Event::new("permission");
             e.permission = Some(detail);
             e.state = Some("inputRequired".into());
-            emit(&mut t, e);
+            emit(&mut t, e).await;
             return Ok(());
         }
         if let Some(id) = value.get("id") {
@@ -756,7 +864,7 @@ async fn handle(
                 let mut event = Event::new("threadError");
                 event.state = Some("error".into());
                 event.text = Some(message.to_owned());
-                emit(&mut thread, event);
+                emit(&mut thread, event).await;
                 return Ok(());
             }
         }
@@ -780,7 +888,7 @@ async fn handle(
             t.snapshot.agent_name = name;
             let mut e = Event::new("threadState");
             e.state = Some("connecting".into());
-            emit(&mut t, e)
+            emit(&mut t, e).await
         }
         // authMethods lists possible sign-in routes, not whether sign-in is needed.
         // Use credentials already configured on the remote account.
@@ -821,11 +929,11 @@ async fn handle(
         if !configs.is_empty() {
             let mut config_event = Event::new("configOptions");
             config_event.config_options = Some(configs);
-            emit(&mut t, config_event);
+            emit(&mut t, config_event).await;
         }
         let mut e = Event::new("threadState");
         e.state = Some("working".into());
-        emit(&mut t, e);
+        emit(&mut t, e).await;
         let early = std::mem::take(&mut t.early_updates);
         drop(t);
         for params in early {
@@ -853,7 +961,7 @@ async fn handle(
             }
             let mut event = Event::new("configOptions");
             event.config_options = Some(thread.snapshot.config_options.clone());
-            emit(&mut thread, event);
+            emit(&mut thread, event).await;
             let _ = pending.reply.send(Ok(()));
             return Ok(());
         }
@@ -892,7 +1000,7 @@ async fn handle(
                 let mut event = Event::new("threadComplete");
                 event.state = Some(t.snapshot.state.clone());
                 event.text = Some(format!("stopReason: {stop_reason}"));
-                emit(&mut t, event);
+                emit(&mut t, event).await;
             }
         }
     }
@@ -953,7 +1061,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             t.snapshot.config_options = options.clone();
             let mut event = Event::new("configOptions");
             event.config_options = Some(options);
-            emit(&mut t, event);
+            emit(&mut t, event).await;
         }
         return;
     }
@@ -1054,7 +1162,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
         }
         _ => return,
     }
-    emit(&mut t, e)
+    emit(&mut t, e).await
 }
 async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     let mut t = row.lock().await;
@@ -1071,7 +1179,7 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     let mut e = Event::new("threadError");
     e.state = Some("error".into());
     e.text = Some(message.into());
-    emit(&mut t, e)
+    emit(&mut t, e).await
 }
 
 #[tauri::command]
@@ -1105,9 +1213,11 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     thread.snapshot.last_error = None;
     let mut event = Event::new("userMessage");
     event.text = Some(args.message.clone());
-    emit(&mut thread, event);
+    emit(&mut thread, event).await;
     if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}]}})).is_err() {
         thread.prompt=None;thread.snapshot.turn_active=false;thread.snapshot.state="submissionUnknown".into();
+        thread.snapshot.last_error = Some("The SSH stream closed while queuing the prompt. Inspect the remote process before retrying.".into());
+        let mut event = Event::new("threadError"); event.state = Some("submissionUnknown".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread, event).await;
         return Err(StillError::friendly("agent_submission_unknown","The SSH stream closed while queuing the prompt. Inspect the remote process before retrying."));
     }
     Ok(())
@@ -1229,7 +1339,8 @@ pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
     let Some(row) = registry().lock().await.get(&args.execution_id).cloned() else {
         return Ok(());
     };
-    let thread = row.lock().await;
+    let mut thread = row.lock().await;
+    flush_history(&mut thread).await?;
     if let Some(error) = &thread.cleanup_error {
         return Err(StillError::friendly("agent_close_unknown", error));
     }
@@ -1250,6 +1361,7 @@ pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
         // The worker distinguishes confirmed EOF from its bounded shutdown timeout.
     }
     registry().lock().await.remove(&args.execution_id);
+    row.lock().await.history_lease.take();
     Ok(())
 }
 #[derive(Deserialize)]
@@ -1288,7 +1400,7 @@ pub async fn still_agent_input(args: InputArgs) -> Result<(), StillError> {
     thread.snapshot.state = "working".into();
     let mut event = Event::new("threadState");
     event.state = Some("working".into());
-    emit(&mut thread, event);
+    emit(&mut thread, event).await;
     Ok(())
 }
 #[tauri::command]
@@ -1319,7 +1431,7 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
     thread.snapshot.state = "working".into();
     let mut event = Event::new("threadState");
     event.state = Some("working".into());
-    emit(&mut thread, event);
+    emit(&mut thread, event).await;
     Ok(())
 }
 
@@ -1383,6 +1495,16 @@ mod tests {
         let cwd = remote_cwd("native-catalog-fixture", root.to_str().unwrap())
             .await
             .unwrap();
+        let commands = root.join(".opencode/commands/team");
+        let skills = root.join(".opencode/skills/still-check");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(commands.join("review.md"), "---\ndescription: Still catalog fixture\n---\nReview $ARGUMENTS.").unwrap();
+        std::fs::write(skills.join("SKILL.md"), "---\nname: Still Check\ndescription: Verify the preflight inventory\n---\nInspect the fixture.").unwrap();
+        let catalog = still_agent_catalog(CatalogArgs { native_session_id:"native-catalog-fixture".into(),agent_id:"opencode".into(),cwd:cwd.clone(),executable:None }).await.unwrap();
+        let entries = catalog["commands"].as_array().unwrap();
+        assert!(entries.iter().any(|command| command["name"] == "team/review"));
+        assert!(entries.iter().any(|command| command["name"] == "skill:still-check"));
         for id in ["pi", "claude", "codex", "opencode"] {
             let command = login_command(&format!(
                 "cd -- {} || exit 73; exec env STILL_AGENT_DRIVER={} STILL_AGENT_EXECUTABLE={} node --input-type=module -e {}",

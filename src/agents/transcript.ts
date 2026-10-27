@@ -17,32 +17,33 @@ export interface TranscriptItem {
 export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = []
   let stream: TranscriptItem | undefined
-  let turn = 0
   let messageId: string | undefined
   const tools = new Map<string, TranscriptItem>()
+  let attempt: string | undefined
   for (const event of events) {
+    if (event.attemptId !== attempt) { attempt = event.attemptId; stream = undefined; tools.clear() }
+    const key = `${event.attemptId || "legacy"}:${event.sequence}`
     if (event.type === "userMessage") {
       stream = undefined
-      turn++
       tools.clear()
-      items.push({ id: `user-${turn}`, kind: "user", text: event.text || "" })
+      items.push({ id: `user-${key}`, kind: "user", text: event.text || "" })
     } else if (event.type === "assistantChunk" || event.type === "reasoningChunk") {
       const kind = event.type === "assistantChunk" ? "assistant" : "reasoning"
       if (!stream || stream.kind !== kind || event.messageId && event.messageId !== messageId) {
         messageId = event.messageId
-        stream = { id: `${kind}-${turn}-${items.length}`, kind, text: "" }
+        stream = { id: `${kind}-${key}`, kind, text: "" }
         items.push(stream)
       }
       stream.text += event.text || ""
     } else if (event.type === "assistantMessage") {
       if (stream?.kind === "assistant") stream.text = event.text || stream.text
-      else items.push({ id: `assistant-${turn}-${items.length}`, kind: "assistant", text: event.text || "" })
+      else items.push({ id: `assistant-${key}`, kind: "assistant", text: event.text || "" })
       stream = undefined
     } else if ((event.type === "toolStart" || event.type === "toolUpdate") && event.toolCallId) {
       stream = undefined
       let tool = tools.get(event.toolCallId)
       if (!tool) {
-        tool = { id: `tool-${turn}-${event.toolCallId}`, kind: "tool", text: "" }
+        tool = { id: `tool-${key}-${event.toolCallId}`, kind: "tool", text: "" }
         tools.set(event.toolCallId, tool)
         items.push(tool)
       }
@@ -56,8 +57,11 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
       if (event.toolKind) tool.toolKind = event.toolKind
       if (event.outputDelta) tool.text += event.outputDelta
     } else if (event.type === "notice" && event.text) {
-      items.push({ id: `notice-${turn}-${items.length}`, kind: "notice", text: event.text })
-    } else if (event.type === "threadComplete" || event.type === "threadError" || event.type === "permission") {
+      items.push({ id: `notice-${key}`, kind: "notice", text: event.text })
+    } else if (event.type === "threadError") {
+      stream = undefined
+      if (event.text) items.push({ id: `error-${key}`, kind: "notice", status: "error", title: "Agent error", text: event.text })
+    } else if (event.type === "threadComplete" || event.type === "permission") {
       stream = undefined
     }
   }

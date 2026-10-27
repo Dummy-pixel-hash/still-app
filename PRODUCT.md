@@ -20,6 +20,8 @@ The user is adding an opt-in floating orb to glance at sessions while working el
 
 The agent workspace is a project-and-conversation surface for existing coding agents on remote servers. The user explicitly selected `pingdotgg/t3code` as the reference for organisation, visual hierarchy, and interaction. Opening Agents must open that surface directly; it must not create or navigate into a terminal as a connection prerequisite. Terminal folders and agent project folders have independent ownership.
 
+The global Agents entry opens a device-owned conversation library with no implicit server or project. A project is an explicitly chosen server/account and canonical remote folder. New servers can be added for agents without creating terminal cards. Saved conversations can be read offline; connecting to resume is a deliberate action. Still stores its conversation history, drafts, project organization, and provider-session references under the native application-data directory. The remote provider remains the authority for executing and resuming its own session.
+
 ## Capabilities and Constraints
 
 - Preserve session identity, tmux persistence, terminal rendering, authentication, and host-key checks.

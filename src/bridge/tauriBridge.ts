@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
 import type { OrbAction, OrbSnapshot } from "../orb/types"
-import type { AgentAvailability, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentCatalog, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -31,6 +31,15 @@ function serializeOrb<T>(operation: () => Promise<T>): Promise<T> {
 export const tauriBridge: NativeBridge = {
   adapterName: "Tauri native bridge",
   isDevelopmentAdapter: false,
+  agentLibrary: () => invoke<AgentLibrary>("still_agent_library"),
+  agentFlush: () => invoke("still_agent_flush"),
+  agentSaveMetadata: (conversationId, meta) => invoke("still_agent_save_metadata", { args: { conversationId, meta } }),
+  agentSaveWorkspace: (key, value) => invoke("still_agent_save_workspace", { args: { key, value } }),
+  agentDeleteSaved: conversationId => invoke("still_agent_delete_saved", { args: { conversationId } }),
+  agentMigrate: (rows, deleted, workspaces) => invoke("still_agent_migrate", { args: { rows, deleted, workspaces } }),
+  subscribeAgentStorage: callback => listen("still://agent-storage", event => callback(event.payload as { conversationId: string; sequence: number; error?: string })),
+  agentCatalog: (nativeSessionId, agentId, cwd, executable) => invoke<AgentCatalog>("still_agent_catalog", { args: { nativeSessionId, agentId, cwd, executable } }),
+  agentResolveFolder: (nativeSessionId, cwd) => invoke<string>("still_agent_resolve_folder", { args: { nativeSessionId, cwd } }),
   agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId,...options}})},
   agentCheck(nativeSessionId:string,agentId?:string,executable?:string){return invoke<AgentAvailability[]>("still_agent_check",{args:{nativeSessionId,agentId,executable}})},
   agentSend(executionId:string,message:string){return invoke<void>("still_agent_send",{args:{executionId,message}})},

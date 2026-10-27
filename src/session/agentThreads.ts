@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react"
 import { nativeBridge, type Unsubscribe } from "../bridge/nativeBridge"
-import type { AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentCatalog, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import { hostKey, normalizeFolder, type ConversationMeta } from "../agents/workspace"
 import type { Session } from "../types"
+import { discardAgentSave, flushAgentSaves, initializeAgentStorage, scheduleAgentSave, useAgentStorage } from "./agentStorage"
 
 export type AgentThreadRow = AgentThreadSnapshot & { touchedAt: number; meta: ConversationMeta; previousTranscript?: AgentThreadEvent[] }
 const rows = new Map<string, AgentThreadRow>()
@@ -12,9 +13,8 @@ const subscribing = new Map<string, Promise<void>>()
 const restored = new Set<string>()
 const tombstones = new Set<string>()
 const INDEX_KEY = "still.agents.index.v2"
-let saveError: string | undefined
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
-  const defaults = { id: row.executionId, hostKey: "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
+  const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
   if (!row.meta || typeof row.meta !== "object") return defaults
   return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title: typeof row.meta.title === "string" ? row.meta.title : "", folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "" }
 }
@@ -27,36 +27,38 @@ export function useAgentThreads(): AgentThreadRow[] {
   return [...rows.values()].sort((a, b) => b.touchedAt - a.touchedAt)
 }
 export function useAgentSaveError() {
-  useSyncExternalStore(subscribe, snapshotVersion, snapshotVersion)
-  return saveError
+  return useAgentStorage().error
 }
-function persist() {
-  try {
-    const data = [...rows.values()].sort((a, b) => b.touchedAt - a.touchedAt)
-      .map(({ previousTranscript, ...row }) => ({ ...row, previousEventCount: previousTranscript?.filter(event => event.type !== "permission" && event.type !== "input").length || 0, pendingPermission: undefined, pendingInput: undefined, transcript: row.transcript.filter(event => event.type !== "permission" && event.type !== "input") }))
-    localStorage.setItem(INDEX_KEY, JSON.stringify(data))
-    localStorage.setItem("still.agents.deleted.v2", JSON.stringify([...tombstones]))
-    saveError = undefined
-  } catch { saveError = "Conversation changes could not be saved on this device. Keep Still open and copy important messages before restarting." }
+function persist(row?: AgentThreadRow) {
+  for (const current of row ? [row] : rows.values()) {
+    const meta = { ...current.meta }
+    scheduleAgentSave(meta.id, () => nativeBridge.agentSaveMetadata(meta.id, meta))
+  }
 }
-function restore() {
-  try {
-    const deleted: unknown = JSON.parse(localStorage.getItem("still.agents.deleted.v2") || "[]")
-    if (Array.isArray(deleted)) deleted.filter(id => typeof id === "string").forEach(id => tombstones.add(id))
-    const data: unknown = JSON.parse(localStorage.getItem(INDEX_KEY) || localStorage.getItem("still.agents.index.v1") || "[]")
-    if (!Array.isArray(data)) return
-    for (const row of data) {
+let loading: Promise<void> | undefined
+export function loadAgentThreads() {
+  if (loading) return loading
+  loading = initializeAgentStorage(() => {
+    const data = JSON.parse(localStorage.getItem(INDEX_KEY) || localStorage.getItem("still.agents.index.v1") || "[]")
+    const deleted = JSON.parse(localStorage.getItem("still.agents.deleted.v2") || "[]")
+    return { rows: Array.isArray(data) ? data.map(row => row && typeof row === "object" && typeof row.cwd === "string" ? { ...row, meta: metadata(row) } : row) : [], deleted: Array.isArray(deleted) ? deleted.filter(id => typeof id === "string") : [], workspaces: JSON.parse(localStorage.getItem("still.agents.workspace.v2") || "{}") }
+  }).then(library => {
+    for (const value of library.rows) {
+      const row = value as AgentThreadRow & { previousEventCount?: number }
       if (!row || typeof row.executionId !== "string" || typeof row.localSessionId !== "string" || !Array.isArray(row.transcript)) continue
-      if (tombstones.has(row.executionId)) continue
+      if (tombstones.has(row.executionId) || rows.has(row.executionId)) continue
+      const firstCurrent = row.transcript.findIndex(event => event.attemptId === row.executionId)
+      const previousCount = firstCurrent > 0 ? firstCurrent : row.previousEventCount || (firstCurrent < 0 && row.transcript.some(event => event.attemptId) ? row.transcript.length : 0)
       rows.set(row.executionId, { ...row, meta: metadata(row), configOptions: Array.isArray(row.configOptions) ? row.configOptions : [],
-        previousTranscript: Number.isSafeInteger(row.previousEventCount) && row.previousEventCount > 0 ? row.transcript.slice(0, row.previousEventCount) : undefined,
-        state: "error", turnActive: false, pendingPermission: undefined, pendingInput: undefined,
-        lastError: row.resumable ? "This conversation is saved. Resume it to continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." })
-      restored.add(row.executionId)
+        previousTranscript: previousCount ? row.transcript.slice(0, previousCount) : undefined,
+        state: row.state === "submissionUnknown" || row.meta?.submissionUnknown ? "submissionUnknown" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.meta?.submissionUnknown ? row.lastError || "The last prompt's delivery was not confirmed. Inspect the provider session before continuing." : undefined })
+      if (!library.liveExecutions?.includes(row.executionId)) restored.add(row.executionId)
     }
-  } catch { /* Ignore corrupt or unavailable local cache. */ }
+    emit()
+    for (const id of library.liveExecutions || []) if (rows.has(id)) void subscribeRemoteAgent(id)
+  }).catch(error => { loading = undefined; throw error })
+  return loading
 }
-restore()
 function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (!Number.isSafeInteger(event.sequence) || event.sequence <= row.lastSequence) return
   row.lastSequence = event.sequence
@@ -68,19 +70,22 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   }
   if (event.type === "permission" && event.permission) { row.pendingPermission = event.permission; row.state = "inputRequired" }
   if (event.type === "input" && event.input) { row.pendingInput = event.input; row.state = "inputRequired" }
-  if (event.type === "threadComplete") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "complete"; row.lastError = undefined }
+  if (event.type === "threadComplete") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "complete"; row.lastError = undefined; row.meta = { ...row.meta, submissionUnknown: false } }
   if (event.type === "threadStopped") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = true; row.state = "working"; row.lastError = event.text || "Waiting for remote cancellation confirmation." }
   if (event.type === "configOptions" && event.configOptions) row.configOptions = event.configOptions
   if (event.type === "commands" && event.commands) row.commands = event.commands
-  if (event.type === "threadError") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = "error"; row.lastError = event.text || "Remote agent error." }
+  if (event.type === "threadError") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "error"; row.lastError = event.text || "Remote agent error." }
   const last = row.transcript[row.transcript.length - 1]
-  if ((event.type === "assistantChunk" || event.type === "reasoningChunk") && last?.type === event.type && last.messageId === event.messageId) {
-    row.transcript = [...row.transcript.slice(0, -1), { ...last, text: (last.text || "") + (event.text || "") }]
+  if ((event.type === "assistantChunk" || event.type === "reasoningChunk") && last?.type === event.type && last.messageId === event.messageId && last.attemptId === event.attemptId) {
+    row.transcript = [...row.transcript.slice(0, -1), { ...last, endSequence: event.sequence, text: (last.text || "") + (event.text || "") }]
   } else row.transcript = [...row.transcript, event]
   // Streaming chunks need not synchronously serialize the whole history every token.
-  if (event.type !== "assistantChunk" && event.type !== "reasoningChunk") persist()
-  emit()
+  if (["userMessage", "threadComplete", "permission", "threadError"].includes(event.type)) persist(row)
+  if (["assistantChunk", "reasoningChunk", "toolUpdate"].includes(event.type)) scheduleRender()
+  else emit()
 }
+let renderFrame = 0
+function scheduleRender() { if (!renderFrame) renderFrame = requestAnimationFrame(() => { renderFrame = 0; emit() }) }
 export async function refreshAgentThread(id: string) {
   const current = await nativeBridge.agentSnapshot(id)
   if (!current || typeof current.executionId !== "string") throw new Error("This remote agent process is no longer available.")
@@ -91,13 +96,20 @@ export async function refreshAgentThread(id: string) {
     const previous = old?.previousTranscript || []
     const live = old?.transcript.slice(previous.length) || []
     const first = current.transcript[0]?.sequence
-    const prefix = first === undefined ? live : live.filter(event => event.sequence < first)
-    rows.set(id, { ...current, previousTranscript: old?.previousTranscript, transcript: [...previous, ...prefix, ...current.transcript], meta: old?.meta || metadata(current), touchedAt: old?.touchedAt || Date.now() })
+    const prefix = first === undefined ? live : live.filter(event => (event.endSequence || event.sequence) < first)
+    const unresolved = old?.meta.submissionUnknown && !current.turnActive && current.lastSequence <= old.lastSequence
+    rows.set(id, { ...current, ...(unresolved ? { state: "submissionUnknown" as const, lastError: old.lastError } : {}), previousTranscript: old?.previousTranscript, transcript: [...previous, ...prefix, ...current.transcript], meta: old?.meta ? { ...old.meta, submissionUnknown: !!unresolved } : metadata(current), touchedAt: old?.touchedAt || Date.now() })
   }
   restored.delete(id)
-  persist(); emit()
+  emit()
+}
+export async function refreshAgentCommands(id: string, load: () => Promise<AgentCatalog>) {
+  const catalog = await load(), row = rows.get(id)
+  if (row) { row.commands = catalog.commands; emit() }
+  return catalog
 }
 export function subscribeRemoteAgent(id: string): Promise<void> {
+  if (restored.has(id)) return Promise.resolve()
   if (subscribing.has(id)) return subscribing.get(id)!
   if (subscriptions.has(id)) return Promise.resolve()
   const task = (async () => {
@@ -111,7 +123,7 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
       if (row) {
         row.state = "submissionUnknown"; row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false
         row.lastError = restored.has(id) ? row.resumable ? "This conversation is saved. Resume it to continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." : error instanceof Error ? error.message : "Remote process is unavailable. Inspect the server before retrying."
-        persist(); emit()
+        emit()
       }
     }
   })().finally(() => subscribing.delete(id))
@@ -127,8 +139,9 @@ export async function sendAgentMessage(id: string, message: string) {
   catch (error) {
     const current = rows.get(id)!
     current.state = "submissionUnknown"; current.turnActive = false
+    current.meta = { ...current.meta, submissionUnknown: true }; persist(current)
     current.lastError = error instanceof Error ? error.message : "The prompt may have reached the server. Inspect it before retrying."
-    persist(); emit(); throw error
+    emit(); throw error
   }
 }
 export async function respondAgentPermission(id: string, requestId: string | number, optionId: string) {
@@ -139,13 +152,20 @@ export async function respondAgentPermission(id: string, requestId: string | num
 export function cancelAgentTurn(id: string) { return nativeBridge.agentCancel(id) }
 export async function startRemoteAgent(nativeId: string, localId: string, agentId: string, options?: AgentLaunchOptions, owner?: Session, onCreated?: (row: AgentThreadRow) => void) {
   if (!nativeId) throw new Error("Connect to this server in Still and verify its host key first.")
+  await loadAgentThreads()
   const current = await nativeBridge.agentStart(nativeId, localId, agentId, options)
-  rows.set(current.executionId, { ...current, meta: metadata(current), touchedAt: Date.now() }); persist(); emit()
+  const previous = options?.conversationId ? [...rows.values()].find(row => row.meta.id === options.conversationId) : undefined
+  if (previous) {
+    rows.delete(previous.executionId); restored.delete(previous.executionId); tombstones.add(previous.executionId)
+    subscriptions.get(previous.executionId)?.(); subscriptions.delete(previous.executionId)
+  }
+  rows.set(current.executionId, { ...current, meta: previous?.meta || metadata(current), previousTranscript: previous?.transcript, transcript: [...(previous?.transcript || []), ...current.transcript], touchedAt: Date.now() }); emit()
   // Failed startup still belongs to its server/folder and remains inspectable.
-  if (owner) { rows.get(current.executionId)!.meta.hostKey = hostKey(owner); persist(); emit() }
+  if (owner) { rows.get(current.executionId)!.meta.hostKey = hostKey(owner); persist(rows.get(current.executionId)); emit() }
   onCreated?.(rows.get(current.executionId)!)
   await subscribeRemoteAgent(current.executionId)
   if (rows.get(current.executionId)?.state === "connecting") await waitForAgentReady(current.executionId)
+  await refreshAgentThread(current.executionId)
   return rows.get(current.executionId)!
 }
 function waitForAgentReady(id: string) {
@@ -175,7 +195,7 @@ export function claimAgentThreads(session: Session, relatedSessionIds: string[])
 export function updateThreadMeta(id: string, patch: Partial<ConversationMeta>) {
   const row = rows.get(id)
   if (!row) return
-  row.meta = { ...row.meta, ...patch, id: row.meta.id }; persist(); emit()
+  row.meta = { ...row.meta, ...patch, id: row.meta.id }; persist(row); emit()
 }
 export function clearAgentDraft(id: string, submitted: string) {
   const row = rows.get(id)
@@ -186,25 +206,27 @@ export async function deleteAgentThread(id: string) {
   if (!row) return
   if (row.turnActive) throw new Error("Stop this conversation before deleting it.")
   if (!restored.has(id)) await nativeBridge.agentClose(id)
+  await flushAgentSaves()
+  await nativeBridge.agentDeleteSaved(row.meta.id)
+  discardAgentSave(row.meta.id)
   tombstones.add(id); rows.delete(id); restored.delete(id)
   subscriptions.get(id)?.(); subscriptions.delete(id)
-  persist(); emit()
+  emit()
 }
 export function canResumeAgentThread(row: AgentThreadRow) {
-  return !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
+  return row.state !== "submissionUnknown" && !row.meta.submissionUnknown && !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
 }
 export async function resumeAgentThread(id: string, start: (agent: string, options: AgentLaunchOptions) => Promise<AgentThreadRow>, executable?: string) {
   const row = rows.get(id)
   if (!row || !canResumeAgentThread(row)) throw new Error("Refresh this conversation before resuming. An uncertain or active execution cannot be replaced safely.")
   if (!restored.has(id)) await nativeBridge.agentClose(id)
-  const next = await start(row.agentId, { cwd: row.cwd, resumeSessionId: row.agentSessionId, executable })
+  await flushAgentSaves()
+  const next = await start(row.agentId, { cwd: row.cwd, resumeSessionId: row.agentSessionId, conversationId: row.meta.id, executable })
   if (!idleState(next)) throw new Error(next.lastError || "The saved agent session could not be resumed.")
-  next.meta = { ...row.meta }
-  next.previousTranscript = row.transcript
-  next.transcript = [...row.transcript, ...next.transcript]
+  if (!next.previousTranscript) { next.previousTranscript = row.transcript; next.transcript = [...row.transcript, ...next.transcript] }
   tombstones.add(id); rows.delete(id); restored.delete(id)
   subscriptions.get(id)?.(); subscriptions.delete(id)
-  persist(); emit(); return next
+  persist(next); emit(); return next
 }
 const idleState = (row: AgentThreadRow) => ["working", "complete", "cancelled"].includes(row.state) && !row.turnActive
 export async function setAgentConfig(id: string, configId: string, value: string | boolean) {
