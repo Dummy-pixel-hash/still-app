@@ -165,6 +165,9 @@ export interface NativeBridge extends OrbBridge {
   agentSnapshot(executionId:string):Promise<AgentThreadSnapshot>
   subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>
 
+  /** Open an http(s) URL in the OS default browser. */
+  openExternal(url: string): Promise<void>
+
   /** IPC round-trip probe: React -> Tauri IPC -> Rust -> response -> React. */
   ping(): Promise<{ status: string; app: string; version: string }>
 
@@ -240,6 +243,7 @@ export const failingBridge: NativeBridge = {
   async subscribeOrbSnapshot() { throw new Error("No native runtime: orb companion unavailable.") },
   async subscribeOrbActions() { throw new Error("No native runtime: orb companion unavailable.") },
   async orbCommand() { throw new Error("No native runtime: orb companion unavailable.") },
+  async openExternal() { throw new Error("No native runtime: cannot open a browser link.") },
   async ping(): Promise<{ status: string; app: string; version: string }> {
     throw new Error(
       "Still production bundle has no Tauri native runtime: " +

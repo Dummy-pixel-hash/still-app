@@ -63,6 +63,10 @@ export const tauriBridge: NativeBridge = {
     return serializeOrb(() => invoke<void>("still_orb_command", { command }))
   },
 
+  openExternal(url: string) {
+    return invoke<void>("still_open_url", { url })
+  },
+
   async ping() {
     // DIAG-ONLY: startup IPC health check ("can the packaged WebView
     // invoke ANY Tauri command?"). Never gates connecting.

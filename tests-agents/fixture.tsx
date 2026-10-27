@@ -14,6 +14,7 @@ const sinks = new Map<string, (event: AgentThreadEvent) => void>()
 let counter = 0
 const h = {
   checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], inputs: [] as unknown[],
+  external: [] as string[],
   rejectConfig: false, rejectSend: false, closed: false, resumable: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   trustCalls: 0, forgetCalls: 0, deferStartup: false, startupFail: false,
   releaseStartup: () => {},
@@ -46,6 +47,7 @@ const h = {
 Object.assign(window, { agentFixture: h })
 registerNativeBridge({
   ...mockBridge,
+  async openExternal(url) { h.external.push(url) },
   agentCheck: async (_native, agentId, executable) => {
     h.checks.push({ agentId, executable })
     return (agentId ? AGENTS.filter(a => a.id === agentId) : AGENTS).map(a => ({ agentId: a.id, available: true, installed: true, runtime: a.id === "gemini" ? "acp" as const : "native" as const, runtimeAvailable: true, executable: executable || `/home/dev/.local/bin/${a.executable}` }))

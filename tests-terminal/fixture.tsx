@@ -30,6 +30,7 @@ const h = {
   resizes: [] as { cols: number; rows: number }[],
   refreshes: 0,
   writesBySession: [] as { id: string; bytes: number[] }[],
+  external: [] as string[],
   reads: 0,
   rejectCopy: false,
   rejectPaste: false,
@@ -44,7 +45,7 @@ const h = {
     h.receive(text)
     await new Promise<void>(resolve => terminal.write("", resolve))
   },
-  clear: () => { h.writes.length = 0; h.resizes.length = 0; h.emits.length = 0; h.refreshes = 0; h.writesBySession.length = 0 },
+  clear: () => { h.writes.length = 0; h.resizes.length = 0; h.emits.length = 0; h.refreshes = 0; h.writesBySession.length = 0; h.external.length = 0 },
   resolvePaste: (text: string) => { readResolve?.(text) },
   reconnect: () => connect(),
   disconnect: () => disconnectSession("fixture"),
@@ -95,6 +96,7 @@ registerNativeBridge({
     h.writes.push(bytes)
     h.writesBySession.push({ id, bytes })
   },
+  async openExternal(url) { h.external.push(url) },
   async resize(_id, cols, rows) { h.resizes.push({ cols, rows }) },
   async refresh() { h.refreshes++ },
   async clipboardWriteText(text) {

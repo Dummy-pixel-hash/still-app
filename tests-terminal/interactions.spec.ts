@@ -350,6 +350,18 @@ test("native bridge uses the narrowly permitted clipboard plugin commands", asyn
   expect(calls).toEqual({seen:["plugin:clipboard-manager|write_text", "plugin:clipboard-manager|read_text"], text:"native λ"})
 })
 
+test("external links go through the native opener command", async ({ page }) => {
+  const calls = await page.evaluate(async () => {
+    const seen: { cmd: string; args: unknown }[] = []
+    ;(window as any).__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string, args: unknown) => { seen.push({ cmd, args }) },
+    }
+    await (window as any).harness.tauriBridge.openExternal("https://example.com/docs?q=1")
+    return seen
+  })
+  expect(calls).toEqual([{ cmd: "still_open_url", args: { url: "https://example.com/docs?q=1" } }])
+})
+
 test("browser fallback reports failure and restores focus when every copy path is denied", async ({ page }) => {
   const result = await page.evaluate(async () => {
     Object.defineProperty(navigator, "clipboard", { configurable:true, value:{writeText:async()=>{throw new Error("denied")}} })
@@ -370,4 +382,62 @@ test("pinch and horizontal gestures do not become remote wheel reports", async (
     a.term.element.dispatchEvent(new WheelEvent("wheel", { bubbles:true, cancelable:true, deltaMode:0, deltaX:100, deltaY:0, clientX:rect.x+20, clientY:rect.y+20 }))
   })
   expect(await emittedText(page)).toBe("")
+})
+
+/** Click a substring on a buffer row; returns once the pointer is positioned. */
+async function clickBufferText(page: Page, row: number, needle: string, ctrl = false, index = 0) {
+  const point = await page.evaluate(({ row, needle, index }) => {
+    const term = (window as any).harness.term
+    const text = term.buffer.active.getLine(row)!.translateToString(true)
+    let col = -1
+    for (let n = 0; n <= index; n++) col = text.indexOf(needle, col + 1)
+    const cell = term._core._renderService.dimensions.css.cell
+    const screen = term.element.querySelector(".xterm-screen") as HTMLElement
+    const rect = screen.getBoundingClientRect()
+    return { x: rect.x + (col + 0.5) * cell.width, y: rect.y + (row - term.buffer.active.viewportY + 0.5) * cell.height }
+  }, { row, needle, index })
+  // Leave the terminal first: xterm caches links per row while the pointer
+  // stays there, and this test changes that row's contents between cases.
+  const viewport = page.viewportSize()!
+  await page.mouse.move(viewport.width - 2, viewport.height - 2)
+  // Return via a neighbouring cell: xterm skips mousemove when the cell is
+  // unchanged, and the mouseleave left its cached cell behind.
+  await page.mouse.move(point.x + 20, point.y + 20)
+  await page.mouse.move(point.x, point.y)
+  if (ctrl) await page.keyboard.down("Control")
+  await page.mouse.down()
+  await page.mouse.up()
+  if (ctrl) await page.keyboard.up("Control")
+}
+
+test("Ctrl+click opens http(s) terminal links; plain clicks and unsafe schemes do not", async ({ page }) => {
+  await h(page, 'harness.emit("\\x1b[2J\\x1b[Hhttps://example.com/docs?q=1  www.example.org/test\\r\\n")')
+  await clickBufferText(page, 0, "https://")
+  expect(await h(page, "harness.external")).toEqual([])
+
+  await clickBufferText(page, 0, "https://", true)
+  expect(await h(page, "harness.external")).toEqual(["https://example.com/docs?q=1"])
+
+  await h(page, "harness.clear()")
+  await clickBufferText(page, 0, "www.", true)
+  expect(await h(page, "harness.external")).toEqual(["https://www.example.org/test"])
+
+  // A URL longer than the terminal width must stay one link across the wrap.
+  await h(page, "harness.clear()")
+  const long = `https://example.com/${"a".repeat(130)}`
+  await h(page, `harness.emit("\\x1b[2J\\x1b[H${long}\\r\\n")`)
+  await clickBufferText(page, 0, "https://", true)
+  expect(await h(page, "harness.external")).toEqual([long])
+
+  // OSC 8 hyperlinks use the same Ctrl+click gate, and non-http schemes are
+  // rejected before they reach the opener.
+  await h(page, "harness.clear()")
+  await h(page, 'harness.emit("\\x1b[2J\\x1b[H\\x1b]8;;https://example.com/osc\\x07osc-link\\x1b]8;;\\x07\\r\\n")')
+  await clickBufferText(page, 0, "osc-link", true)
+  expect(await h(page, "harness.external")).toEqual(["https://example.com/osc"])
+
+  await h(page, "harness.clear()")
+  await h(page, 'harness.emit("\\x1b[2J\\x1b[H\\x1b]8;;javascript:alert(1)\\x07unsafe\\x1b]8;;\\x07\\r\\n")')
+  await clickBufferText(page, 0, "unsafe", true)
+  expect(await h(page, "harness.external")).toEqual([])
 })

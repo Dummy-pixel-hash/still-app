@@ -212,6 +212,21 @@ test("markdown uses proper tables and never executes supplied HTML", async ({ pa
   await expect(page.locator(".agent-prose a")).not.toHaveAttribute("href", /javascript:/)
 })
 
+test("agent links open externally on Ctrl+click and never navigate the app", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.emit(h.current, { type: "assistantChunk", text: "Read [the docs](https://example.com/docs) or click [unsafe](javascript:alert(1))." }) })
+  const safe = page.locator(".agent-prose a").filter({ hasText: "the docs" })
+  await safe.click()
+  expect(await page.evaluate(() => (window as any).agentFixture.external)).toEqual([])
+  expect(page.url()).toContain("/tests-agents/fixture.html")
+  await safe.click({ modifiers: ["Control"] })
+  expect(await page.evaluate(() => (window as any).agentFixture.external)).toEqual(["https://example.com/docs"])
+  expect(page.url()).toContain("/tests-agents/fixture.html")
+  const unsafe = page.locator(".agent-prose a").filter({ hasText: "unsafe" })
+  await unsafe.click({ modifiers: ["Control"] })
+  expect(await page.evaluate(() => (window as any).agentFixture.external)).toEqual(["https://example.com/docs"])
+})
+
 test("closing Agents cancels pending authentication without creating a terminal", async ({ page }) => {
   await page.goto("/tests-agents/fixture.html?workspace")
   await page.evaluate(() => { (window as any).agentFixture.requireAuth = true })

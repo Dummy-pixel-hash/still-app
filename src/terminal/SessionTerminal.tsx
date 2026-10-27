@@ -21,7 +21,9 @@ import {
   writeSession,
 } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
+import { openExternalUrl } from "../bridge/external"
 import { bindTerminalClipboard } from "./clipboard"
+import { bindTerminalLinks } from "./links"
 import { bindApplicationWheel } from "./wheel"
 import CustomScrollbar from "./CustomScrollbar"
 import type { ImageInsertStyle, TerminalPrefs } from "../types"
@@ -164,6 +166,10 @@ export default function SessionTerminal({
     else terminal.open(fitHost)
     terminalRef.current = terminal
     setTerminal(terminal)
+
+    const links = bindTerminalLinks(terminal, (url) => {
+      void openExternalUrl(url).catch(() => notify("Could not open the link in your browser."))
+    })
 
     // GPU rendering for the main surface only (never the small card
     // previews — WebGL context limits). On context loss the addon must be
@@ -341,6 +347,7 @@ export default function SessionTerminal({
       if (visibleFrame) window.cancelAnimationFrame(visibleFrame)
       document.fonts?.removeEventListener?.("loadingdone", refitOnFonts)
       clipboard.dispose()
+      links.dispose()
       unbindWheel()
       dataDispose.dispose()
       binaryDispose.dispose()

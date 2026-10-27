@@ -599,6 +599,32 @@ pub async fn still_disconnect(
     }
 }
 
+/// Open a validated http(s) URL in the OS default browser.
+///
+/// The renderer is not trusted with an opener: only http/https with a host is
+/// passed through. Using the `open` crate avoids a shell entirely (and its
+/// ShellExecute feature uses ShellExecuteExW on Windows rather than `cmd /c`).
+fn openable_url(raw: &str) -> Result<String, StillError> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 8192 {
+        return Err(StillError::invalid("url", "No link to open."));
+    }
+    let parsed = url::Url::parse(raw)
+        .map_err(|_| StillError::invalid("url", "That is not a valid link."))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(StillError::invalid("url", "Only http and https links can be opened."));
+    }
+    Ok(parsed.to_string())
+}
+
+#[tauri::command]
+pub fn still_open_url(url: String) -> Result<(), StillError> {
+    let url = openable_url(&url)?;
+    open::that_detached(url).map_err(|e| {
+        StillError::friendly("open_failed", format!("Could not open the link: {e}"))
+    })
+}
+
 /// DIAG-ONLY: fire-and-forget frontend checkpoint sink.
 /// Writes one JSONL record to the same append-only diagnostic log so the
 /// packaged Windows WebView can report reached stages without a console.
@@ -824,4 +850,28 @@ pub async fn still_forget_host(args: HostArgs) -> Result<(), StillError> {
     let (host, port) = host_args_valid(&args)?;
     let _ = hostkeys::forget_trusted(&host, port);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openable_url;
+
+    #[test]
+    fn external_open_accepts_only_http_and_https() {
+        assert_eq!(
+            openable_url(" https://example.com/a?q=1 ").unwrap(),
+            "https://example.com/a?q=1"
+        );
+        assert!(openable_url("HTTPS://EXAMPLE.COM").is_ok());
+        for bad in [
+            "",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "mailto:user@example.com",
+            "https://",
+            "not a url",
+        ] {
+            assert!(openable_url(bad).is_err(), "accepted {bad:?}");
+        }
+    }
 }

@@ -1,12 +1,26 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AgentToolContent } from "../agents/types"
+import { openExternalUrl } from "../bridge/external"
 
 /** Standard markdown/GFM, with raw HTML disabled and safe URL transformation. */
 export function AgentMessage({ text }: { text: string }) {
   return <div className="agent-prose"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml
     components={{
-      a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+      a: ({ href, children }) => <a
+        href={href}
+        title="Ctrl/Cmd+click to open in your browser"
+        onClick={(event) => {
+          event.preventDefault()
+          if (event.ctrlKey || event.metaKey) void openExternalUrl(href).catch(() => {})
+        }}
+        onAuxClick={(event) => event.preventDefault()}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.ctrlKey || event.metaKey || event.altKey) return
+          event.preventDefault()
+          void openExternalUrl(href).catch(() => {})
+        }}
+      >{children}</a>,
       pre: ({ children }) => <div className="agent-code"><pre>{children}</pre></div>,
       table: ({ children }) => <div className="agent-table"><table>{children}</table></div>,
     }}>{text}</ReactMarkdown></div>

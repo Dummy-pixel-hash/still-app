@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { ByteRing } from '../src/session/byteRing.ts'
 import { WheelSteps } from '../src/terminal/wheel.ts'
 import { decodeClipboardRequest, MAX_REMOTE_COPY_BYTES } from '../src/terminal/clipboard.ts'
+import { findLinks, normalizeExternalUrl } from '../src/terminal/links.ts'
 
 const encode = text => Buffer.from(text).toString('base64')
 
@@ -49,4 +50,22 @@ test('OSC52 accepts bounded Unicode writes, never reads, malformed or oversized 
     assert.equal(decodeClipboardRequest(invalid), null)
   }
   assert.equal(decodeClipboardRequest(`c;${encode('x'.repeat(MAX_REMOTE_COPY_BYTES + 1))}`), null)
+})
+
+test('terminal links accept only http(s), normalize www, and trim prose punctuation', () => {
+  assert.deepEqual(findLinks('see https://example.com/a?q=1 now.'), [
+    { start: 4, end: 29, url: 'https://example.com/a?q=1' },
+  ])
+  assert.deepEqual(findLinks('(https://example.com/foo_(bar)).'), [
+    { start: 1, end: 30, url: 'https://example.com/foo_(bar)' },
+  ])
+  assert.deepEqual(findLinks('www.example.org/test'), [
+    { start: 0, end: 20, url: 'https://www.example.org/test' },
+  ])
+  assert.deepEqual(findLinks('javascript:alert(1) file:///etc/passwd'), [])
+  assert.equal(normalizeExternalUrl(' https://example.com '), 'https://example.com/')
+  assert.equal(normalizeExternalUrl('HTTPS://EXAMPLE.COM'), 'https://example.com/')
+  assert.equal(normalizeExternalUrl('https://'), null)
+  assert.equal(normalizeExternalUrl('https://example.com/\nrm -rf /'), null)
+  assert.equal(normalizeExternalUrl(`https://example.com/${'a'.repeat(9000)}`), null)
 })

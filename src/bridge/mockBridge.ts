@@ -46,6 +46,12 @@ export const mockBridge: NativeBridge = {
   adapterName: "Local UI simulation (development-only)",
   isDevelopmentAdapter: true,
 
+  async openExternal(url) {
+    // Browser preview: the app has no OS opener. User activation (Ctrl+click)
+    // makes this a real tab in a normal browser; ignored if popups are blocked.
+    window.open(url, "_blank", "noopener,noreferrer")
+  },
+
   async ping() {
     return {
       status: "ok (renderer simulation — no native runtime)",

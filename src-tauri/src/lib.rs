@@ -123,6 +123,7 @@ pub fn run() {
             commands::still_resize,
             commands::still_refresh,
             commands::still_upload_image,
+            commands::still_open_url,
             commands::still_status,
             commands::still_disconnect,
             commands::still_forget_secret,
