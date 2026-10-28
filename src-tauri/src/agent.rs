@@ -1,6 +1,5 @@
-//! Foreground remote agent runner. Native provider drivers use the bundled Node
-//! host; Gemini uses ACP directly. All share the ACP v1 SSH-facing envelope.
-//! Execution depends on the verified SSH connection; detached supervision is not implemented.
+//! Remote ACP transport attached to a private, detached server-side worker.
+//! Losing SSH detaches the UI; the worker and its replay journal stay on the server.
 use crate::{
     agent_store,
     commands::AppState,
@@ -10,6 +9,7 @@ use crate::{
 use russh::{Channel, ChannelMsg, client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use base64::Engine;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -27,6 +27,14 @@ static IDS: AtomicU64 = AtomicU64::new(1);
 static THREADS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Thread>>>>> = OnceLock::new();
 fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<Thread>>>> {
     THREADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn next_request_id() -> u64 {
+    let now = (agent_store::timestamp() as u64).saturating_mul(1000);
+    loop {
+        let old = IDS.load(Ordering::SeqCst);
+        let next = old.saturating_add(1).max(now);
+        if IDS.compare_exchange_weak(old,next,Ordering::SeqCst,Ordering::SeqCst).is_ok() { return next; }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +87,14 @@ pub struct Event {
     pub checkpoint: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_capabilities: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_outcome: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_active: Option<bool>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -107,6 +123,10 @@ impl Event {
             output_delta: None,
             checkpoint: None,
             history_capabilities: None,
+            request: None,
+            request_outcome: None,
+            remote_cursor: None,
+            turn_active: None,
         }
     }
 }
@@ -137,6 +157,14 @@ pub struct Snapshot {
     pub history_capabilities: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_message_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub persistent: bool,
+    #[serde(default)]
+    pub remote_cursor: u64,
+    #[serde(default)]
+    pub prompt_id: Option<Value>,
+    #[serde(default)]
+    pub recovery_required: bool,
 }
 impl Snapshot {
     fn history_header(&self) -> Self {
@@ -149,6 +177,7 @@ impl Snapshot {
             transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
             history_capabilities: self.history_capabilities.clone(),
             active_message_ids: None,
+            persistent: self.persistent, remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
         }
     }
 }
@@ -164,6 +193,10 @@ struct Thread {
     permission: Option<PendingPermission>,
     prompt: Option<Value>,
     config_requests: HashMap<u64, PendingConfig>,
+    response_delivery: Option<PendingResponse>,
+    transport_active: bool,
+    transport_epoch: u64,
+    recovering_uncertain: bool,
     close: mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>,
     resume_session_id: Option<String>,
     pending_input_id: Option<Value>,
@@ -185,6 +218,11 @@ struct PendingConfig {
     value: Value,
     reply: oneshot::Sender<Result<(), String>>,
 }
+struct PendingResponse {
+    id: Value,
+    outcome: Value,
+    reply: oneshot::Sender<Result<(), String>>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartArgs {
@@ -200,6 +238,13 @@ pub struct StartArgs {
 #[serde(rename_all = "camelCase")]
 pub struct IdArgs {
     execution_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachArgs {
+    native_session_id: String,
+    execution_id: String,
+    conversation_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -391,11 +436,11 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
                 .map(str::to_owned);
             Availability {
                 agent_id: id.to_owned(),
-                available: path.is_some() && (id == "gemini" || node_ready),
+                available: path.is_some() && node_ready,
                 installed: path.is_some(),
                 runtime: if id == "gemini" { "acp" } else { "native" }.into(),
-                runtime_available: id == "gemini" || node_ready,
-                message: if path.is_some() && id != "gemini" && !node_ready { Some("Installed. Still's native bridge needs Node.js 20 or newer on this server.".into()) } else { None },
+                runtime_available: node_ready,
+                message: if path.is_some() && !node_ready { Some("Installed. Persistent agent sessions need Node.js 20 or newer on this server.".into()) } else { None },
                 executable: path,
             }
         })
@@ -440,6 +485,8 @@ async fn emit(thread: &mut Thread, mut e: Event) {
     thread.snapshot.last_sequence = thread.snapshot.last_sequence.saturating_add(1);
     e.sequence = thread.snapshot.last_sequence;
     e.attempt_id = Some(thread.snapshot.execution_id.clone());
+    e.remote_cursor = thread.snapshot.persistent.then_some(thread.snapshot.remote_cursor);
+    e.turn_active = Some(thread.snapshot.turn_active);
     if e.kind == "userMessage" { thread.messages.push(e.clone()); }
     else { apply_history_event(&mut thread.messages, &e); }
     append_history(&mut thread.snapshot.transcript, e.clone());
@@ -575,6 +622,30 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
+fn persistent_command(execution: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<String, StillError> {
+    if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
+    }
+    let definition = definition(agent_id).ok_or_else(|| StillError::friendly("agent_unsupported", "Unknown agent."))?;
+    let (command, env) = if agent_id == "gemini" {
+        (std::iter::once(executable.to_owned()).chain(definition.args.iter().map(|arg| (*arg).to_owned())).collect::<Vec<_>>(), json!({}))
+    } else {
+        (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
+    };
+    let payload = json!({"executionId":execution,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env,"source":include_str!("../agent-host/supervisor.mjs")});
+    let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).map_err(|error| StillError::friendly("agent_launch", error.to_string()))?);
+    let bootstrap = r#"import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
+const config=JSON.parse(Buffer.from(process.argv[1],'base64').toString('utf8'));
+const root=path.join(process.env.HOME,'.local','state','still','agents');
+const directory=path.join(root,config.executionId);config.directory=directory;
+if(config.create){fs.mkdirSync(directory,{recursive:true,mode:0o700});const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==process.getuid())throw new Error('Unsafe worker directory');fs.chmodSync(directory,0o700);fs.writeFileSync(path.join(directory,'transport.mjs'),config.source,{mode:0o600,flag:'wx'});}
+delete config.source;
+const child=spawn(process.execPath,[path.join(directory,'transport.mjs'),'attach',Buffer.from(JSON.stringify(config)).toString('base64')],{stdio:'inherit'});
+child.on('error',error=>{console.error(error.message);process.exitCode=1});child.on('exit',(code)=>process.exit(code??1));
+"#;
+    Ok(login_command(&format!("exec node --input-type=module -e {} {}", quote(bootstrap), quote(&encoded))))
+}
+
 #[tauri::command]
 pub async fn still_agent_start(
     app: AppHandle,
@@ -611,30 +682,8 @@ pub async fn still_agent_start(
     )
     .await?;
     let path = executable(&def, args.executable.as_deref())?;
-    let launch = if args.agent_id == "gemini" {
-        std::iter::once(path.as_str())
-            .chain(def.args.iter().copied())
-            .map(quote)
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        format!(
-            "env STILL_AGENT_DRIVER={} STILL_AGENT_EXECUTABLE={} node --input-type=module -e {}",
-            quote(&args.agent_id),
-            quote(&path),
-            quote(include_str!("../agent-host/bridge.mjs"))
-        )
-    };
-    let remote = login_command(&format!(
-        "cd -- {} || exit 73; command -v {} >/dev/null 2>&1 || {{ printf '%s\\n' {} >&2; exit 127; }}; exec {launch}",
-        quote(&cwd),
-        quote(&path),
-        quote(&format!(
-            "Install {} on this remote server, or set its executable path in Agent setup.",
-            def.install
-        ))
-    ));
     let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
+    let remote = persistent_command(&execution_id, &cwd, &args.agent_id, &path, true, 0)?;
     let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
     let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
@@ -662,8 +711,10 @@ pub async fn still_agent_start(
         resumable: args.resume_session_id.is_some(),
         history_capabilities: json!({"revert":false,"retry":false}),
         active_message_ids: None,
+        persistent: true, remote_cursor: 0, prompt_id: None, recovery_required: false,
     };
     if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
+        let _ = send(&channel,&json!({"jsonrpc":"2.0","id":"startup-cleanup","method":"_still/shutdown"})).await;
         let _ = channel.eof().await;
         let _ = channel.close().await;
         return Err(error);
@@ -671,7 +722,7 @@ pub async fn still_agent_start(
     let messages = if args.conversation_id.is_some() {
         match agent_store::history_messages(&app, snapshot.conversation_id.clone()).await {
             Ok(messages) => messages,
-            Err(error) => { let _ = channel.eof().await; let _ = channel.close().await; return Err(error); }
+            Err(error) => { let _ = send(&channel,&json!({"jsonrpc":"2.0","id":"startup-cleanup","method":"_still/shutdown"})).await; let _ = channel.eof().await; let _ = channel.close().await; return Err(error); }
         }
     } else { Vec::new() };
     let row = Arc::new(Mutex::new(Thread {
@@ -682,6 +733,10 @@ pub async fn still_agent_start(
         permission: None,
         prompt: None,
         config_requests: HashMap::new(),
+        response_delivery: None,
+        transport_active: true,
+        transport_epoch: 1,
+        recovering_uncertain: false,
         close,
         resume_session_id: args.resume_session_id,
         pending_input_id: None,
@@ -705,9 +760,18 @@ async fn run(
     close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cwd: String,
 ) {
-    run_stream(&mut channel, row, outbound, cancel, close, cwd).await;
+    let epoch = row.lock().await.transport_epoch;
+    run_stream(&mut channel, row.clone(), outbound, cancel, close, cwd).await;
     // Every exit, including malformed frames and initialization timeout, closes
     // stdin explicitly so the remote host can reap its native child processes.
+    let mut thread = row.lock().await;
+    if thread.transport_epoch == epoch {
+        thread.transport_active = false;
+        if let Some(pending) = thread.response_delivery.take() {
+            let _ = pending.reply.send(Err("The agent connection closed before the response was sent.".into()));
+        }
+    }
+    drop(thread);
     let _ = channel.eof().await;
     let _ = channel.close().await;
 }
@@ -720,7 +784,7 @@ async fn run_stream(
     mut close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cwd: String,
 ) {
-    if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{fail(&row,&format!("ACP initialize failed: {error}")).await;return}
+    if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{transport_lost(&row,&format!("ACP initialize failed: {error}")).await;return}
     let mut buffer = Vec::new();
     let mut stage = 0_u8;
     let mut session_id = None;
@@ -733,6 +797,11 @@ async fn run_stream(
     loop {
         tokio::select! {
           Some(reply) = close.recv() => {
+            if row.lock().await.snapshot.persistent {
+                if let Err(error) = send(&channel, &json!({"jsonrpc":"2.0","id":"still-close","method":"_still/shutdown"})).await {
+                    let _ = reply.send(Err(format!("Could not stop the persistent worker: {error}"))); return;
+                }
+            }
             if let Err(error) = channel.eof().await {
                 let _ = reply.send(Err(format!("Could not request agent shutdown: {error}")));
                 return;
@@ -763,14 +832,26 @@ async fn run_stream(
          _ = cancel.recv(), if !cancel_received => {
             cancel_received=true;
              if let Some((request_id,_))=permission.take(){
-               if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":request_id,"result":{"outcome":{"outcome":"cancelled"}}})).await{fail(&row,&error).await;return;}
-               let mut thread=row.lock().await;thread.snapshot.pending_permission=None;thread.permission=None;
+                if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":request_id,"result":{"outcome":{"outcome":"cancelled"}}})).await{fail(&row,&error).await;return;}
+                let mut thread=row.lock().await;
+                let request = thread.snapshot.pending_permission.take();
+                thread.permission=None;
+                if let Some(request) = request {
+                    let mut event = Event::new("requestOutcome");
+                    event.request_outcome = Some(json!({"requestId":request_id,"kind":"permission","title":request["title"].as_str().unwrap_or("Permission required"),"outcome":"cancelled"}));
+                    emit(&mut thread,event).await;
+                }
              }
              {
                 let mut thread = row.lock().await;
-                if let Some(request_id) = thread.pending_input_id.take() {
-                  let _ = send(&channel, &json!({"jsonrpc":"2.0","id":request_id,"result":{"action":"cancel"}})).await;
-                  thread.snapshot.pending_input = None;
+                 if let Some(request_id) = thread.pending_input_id.take() {
+                   let _ = send(&channel, &json!({"jsonrpc":"2.0","id":request_id,"result":{"action":"cancel"}})).await;
+                   let request = thread.snapshot.pending_input.take();
+                   if let Some(request) = request {
+                     let mut event = Event::new("requestOutcome");
+                     event.request_outcome = Some(json!({"requestId":request_id,"kind":"question","title":request["title"].as_str().unwrap_or("Agent needs your input"),"outcome":"cancelled"}));
+                     emit(&mut thread,event).await;
+                   }
                 }
              }
             if let Some(session)=session_id.as_ref(){
@@ -782,8 +863,41 @@ async fn run_stream(
               }
             }
          },
-          Some(value)=outbound.recv()=>{if permission.as_ref().is_some_and(|(id,_)|value.get("id")==Some(id)&&value.get("result").is_some()){permission=None;}if value.get("method").and_then(Value::as_str)==Some("session/prompt"){cancel_received=false;}if let Err(error)=send(&channel,&value).await{fail(&row,&format!("SSH stream closed before request send: {error}")).await;return}},
-           incoming=channel.wait()=>match incoming{Some(ChannelMsg::Data{data})=>{buffer.extend_from_slice(&data);if buffer.len()>FRAME_LIMIT{fail(&row,"ACP frame exceeded 2 MiB.").await;return}while let Some(end)=buffer.iter().position(|byte|*byte==b'\n'){let frame:Vec<u8>=buffer.drain(..=end).collect();if frame.iter().all(u8::is_ascii_whitespace){continue;}let value=match serde_json::from_slice::<Value>(&frame){Ok(value)=>value,Err(_)=>{fail(&row,"Remote stdout was not valid ACP JSON. Check whether the login shell prints a startup banner.").await;return}};if let Err(error)=handle(channel,&row,&cwd,&mut stage,&mut session_id,&mut permission,value).await{fail(&row,&error).await;return}}},Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{fail(&row,&format!("Remote agent process exited. Check installation and authentication in the server terminal. Background survival is not guaranteed. {}",stderr.trim())).await;return},_=>{}}
+          Some(value)=outbound.recv()=>{
+            let mut thread = row.lock().await;
+            let pending_response = value.get("result").is_some() && thread.response_delivery.as_ref().is_some_and(|pending| value.get("id") == Some(&pending.id));
+            if pending_response {
+                let pending = thread.response_delivery.take().unwrap();
+                let kind = pending.outcome["kind"].as_str().unwrap_or("");
+                let active = if kind == "permission" { thread.permission.as_ref().map(|request| &request.id) == Some(&pending.id) } else { thread.pending_input_id.as_ref() == Some(&pending.id) };
+                if !active {
+                    let _ = pending.reply.send(Err("This request was cancelled before its response was sent.".into()));
+                    continue;
+                }
+                match send(&channel,&value).await {
+                    Ok(()) => {
+                        if thread.snapshot.persistent { thread.response_delivery = Some(pending); continue; }
+                        if kind == "permission" { thread.permission = None; thread.snapshot.pending_permission = None; permission = None; }
+                        else { thread.pending_input_id = None; thread.snapshot.pending_input = None; }
+                        thread.snapshot.state = "working".into();
+                        let mut event = Event::new("requestOutcome"); event.request_outcome = Some(pending.outcome); emit(&mut thread,event).await;
+                        let mut event = Event::new("threadState"); event.state = Some("working".into()); emit(&mut thread,event).await;
+                        let _ = pending.reply.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let mut outcome = pending.outcome; outcome["outcome"] = json!("uncertain");
+                        let mut event = Event::new("requestOutcome"); event.request_outcome = Some(outcome); emit(&mut thread,event).await;
+                        let _ = pending.reply.send(Err(format!("Response delivery was not confirmed: {error}")));
+                        drop(thread); transport_lost(&row,&format!("SSH stream closed while sending the response: {error}")).await; return;
+                    }
+                }
+            } else {
+                drop(thread);
+                if value.get("method").and_then(Value::as_str)==Some("session/prompt"){cancel_received=false;}
+                if let Err(error)=send(&channel,&value).await{transport_lost(&row,&format!("SSH stream closed before request send: {error}")).await;return}
+            }
+          },
+           incoming=channel.wait()=>match incoming{Some(ChannelMsg::Data{data})=>{buffer.extend_from_slice(&data);if buffer.len()>FRAME_LIMIT{fail(&row,"ACP frame exceeded 2 MiB.").await;return}while let Some(end)=buffer.iter().position(|byte|*byte==b'\n'){let frame:Vec<u8>=buffer.drain(..=end).collect();if frame.iter().all(u8::is_ascii_whitespace){continue;}let value=match serde_json::from_slice::<Value>(&frame){Ok(value)=>value,Err(_)=>{fail(&row,"Remote stdout was not valid ACP JSON. Check whether the login shell prints a startup banner.").await;return}};if let Err(error)=handle(channel,&row,&cwd,&mut stage,&mut session_id,&mut permission,value).await{fail(&row,&error).await;return}}},Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{transport_lost(&row,stderr.trim()).await;return},_=>{}}
         }
     }
 }
@@ -801,7 +915,65 @@ async fn handle(
     permission: &mut Option<(Value, Vec<Value>)>,
     value: Value,
 ) -> Result<(), String> {
+    if let Some(cursor) = value.pointer("/_still/index").and_then(Value::as_u64) {
+        let mut thread = row.lock().await;
+        if cursor <= thread.snapshot.remote_cursor && value.pointer("/_still/pending").and_then(Value::as_bool) != Some(true) { return Ok(()); }
+        thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(cursor);
+    }
     if let Some(method) = value.get("method").and_then(Value::as_str) {
+        if method == "_still/request_outcome" {
+            let outcome = value.get("params").cloned().ok_or("Missing request outcome")?;
+            let mut thread = row.lock().await;
+            let request_id = outcome.get("requestId").cloned().ok_or("Missing response identity")?;
+            if outcome["kind"] == "permission" { thread.permission = None; thread.snapshot.pending_permission = None; *permission = None; }
+            else { thread.pending_input_id = None; thread.snapshot.pending_input = None; }
+            thread.snapshot.state = "working".into();
+            let mut event = Event::new("requestOutcome"); event.request_outcome = Some(outcome); emit(&mut thread,event).await;
+            if thread.response_delivery.as_ref().is_some_and(|pending| pending.id == request_id) {
+                let pending = thread.response_delivery.take().unwrap(); let _ = pending.reply.send(Ok(()));
+            }
+            let mut event = Event::new("threadState"); event.state = Some("working".into()); emit(&mut thread,event).await;
+            return Ok(());
+        }
+        if method == "_still/history_reverted" {
+            let params = &value["params"];
+            let message_id = params["messageId"].as_str().ok_or("Missing history boundary")?;
+            let mut thread = row.lock().await;
+            if thread.messages.iter().any(|message| message.message_id.as_deref() == Some(message_id)) {
+                thread.snapshot.agent_session_id = params["sessionId"].as_str().map(str::to_owned);
+                *session_id = thread.snapshot.agent_session_id.clone();
+                thread.snapshot.state = "working".into(); thread.snapshot.last_error = None;
+                thread.recovering_uncertain = false;
+                thread.snapshot.recovery_required = false;
+                let mut event = Event::new("historyReverted"); event.message_id = Some(message_id.to_owned()); emit(&mut thread,event).await;
+            }
+            return Ok(());
+        }
+        if method == "_still/caught_up" {
+            let mut thread = row.lock().await;
+            let params = &value["params"];
+            thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(params["index"].as_u64().unwrap_or(0));
+            let unconfirmed_prompt = thread.prompt.is_some() && params["busy"] == false;
+            thread.snapshot.turn_active = params["busy"].as_bool().unwrap_or(false);
+            if unconfirmed_prompt || thread.recovering_uncertain {
+                thread.snapshot.state = "submissionUnknown".into();
+                thread.snapshot.recovery_required = true;
+                thread.snapshot.last_error = Some("The last prompt was not confirmed by the remote worker. It has not been resent. Inspect the provider session before continuing.".into());
+                let mut event = Event::new("threadError"); event.state = Some("submissionUnknown".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread,event).await;
+                return Ok(());
+            }
+            if matches!(thread.snapshot.state.as_str(), "error" | "submissionUnknown") {
+                let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread,event).await;
+                return Ok(());
+            }
+            if thread.snapshot.pending_input.is_some() || thread.snapshot.pending_permission.is_some() { thread.snapshot.state = "inputRequired".into(); }
+            else { thread.snapshot.state = "working".into(); }
+            thread.prompt = params.get("activePrompt").filter(|value| !value.is_null()).cloned();
+            thread.snapshot.prompt_id = thread.prompt.clone();
+            thread.snapshot.last_error = None;
+            let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread,event).await;
+            return Ok(());
+        }
         if method == "session/update" {
             let params = value.get("params").cloned().unwrap_or(Value::Null);
             if *stage < 3 {
@@ -921,6 +1093,9 @@ async fn handle(
             let mut thread = row.lock().await;
             if thread.prompt.as_ref().is_some_and(|request| request == &id) {
                 thread.prompt = None;
+                thread.snapshot.prompt_id = None;
+                thread.recovering_uncertain = false;
+                thread.snapshot.recovery_required = false;
                 thread.snapshot.turn_active = false;
                 thread.snapshot.state = "error".into();
                 thread.snapshot.last_error = Some(message.to_owned());
@@ -985,6 +1160,7 @@ async fn handle(
             .unwrap_or_default();
         add_legacy_config(&mut configs, result);
         let mut t = row.lock().await;
+        if let Some(maximum) = result.pointer("/_meta/maxRequestId").and_then(Value::as_u64) { IDS.fetch_max(maximum,Ordering::SeqCst); }
         t.snapshot.agent_session_id = Some(sid);
         t.snapshot.resumable = result
             .pointer("/_meta/resumable")
@@ -996,6 +1172,10 @@ async fn handle(
         capability_event.history_capabilities = Some(t.snapshot.history_capabilities.clone());
         emit(&mut t, capability_event).await;
         t.snapshot.config_options = configs.clone();
+        t.snapshot.turn_active = result.pointer("/_meta/busy").and_then(Value::as_bool).unwrap_or(t.snapshot.turn_active);
+        let restored_prompt = result.pointer("/_meta/activePrompt").filter(|value| !value.is_null()).cloned();
+        if let Some(prompt) = restored_prompt { t.prompt = Some(prompt); }
+        t.snapshot.prompt_id = t.prompt.clone();
         t.snapshot.state = "working".into();
         if !configs.is_empty() {
             let mut config_event = Event::new("configOptions");
@@ -1086,10 +1266,24 @@ async fn handle(
                     ));
                 }
                 t.prompt = None;
+                t.snapshot.prompt_id = None;
+                t.recovering_uncertain = false;
+                t.snapshot.recovery_required = false;
                 t.snapshot.turn_active = false;
-                t.snapshot.pending_permission = None;
-                t.snapshot.pending_input = None;
-                t.pending_input_id = None;
+                if let Some(request) = t.snapshot.pending_permission.take() {
+                    if let Some((request_id, _)) = permission.take() {
+                        let mut event = Event::new("requestOutcome");
+                        event.request_outcome = Some(json!({"requestId":request_id,"kind":"permission","title":request["title"].as_str().unwrap_or("Permission required"),"outcome":"uncertain"}));
+                        emit(&mut t,event).await;
+                    }
+                }
+                if let Some(request) = t.snapshot.pending_input.take() {
+                    if let Some(request_id) = t.pending_input_id.take() {
+                        let mut event = Event::new("requestOutcome");
+                        event.request_outcome = Some(json!({"requestId":request_id,"kind":"question","title":request["title"].as_str().unwrap_or("Agent needs your input"),"outcome":"uncertain"}));
+                        emit(&mut t,event).await;
+                    }
+                }
                 t.permission = None;
                 t.snapshot.last_error = None;
                 *permission = None;
@@ -1288,6 +1482,12 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     for (_, pending) in t.config_requests.drain() {
         let _ = pending.reply.send(Err(message.into()));
     }
+    if let Some(pending) = t.response_delivery.take() {
+        let mut outcome = pending.outcome;
+        outcome["outcome"] = json!("uncertain");
+        let mut event = Event::new("requestOutcome"); event.request_outcome = Some(outcome); emit(&mut t,event).await;
+        let _ = pending.reply.send(Err(message.into()));
+    }
     if let Some(pending) = t.history_request.take() { let _ = pending.reply.send(Err(message.into())); }
     t.snapshot.turn_active = false;
     let mut e = Event::new("threadError");
@@ -1295,8 +1495,46 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     e.text = Some(message.into());
     emit(&mut t, e).await
 }
+async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
+    let mut thread = row.lock().await;
+    if !thread.snapshot.persistent { drop(thread); fail(row,detail).await; return; }
+    if detail.contains("Persistent worker is not available") || detail.contains("remote agent process has ended") || detail.contains("Cannot find module") {
+        drop(thread); fail(row, "The server-side worker is no longer available. Resume the provider’s saved session explicitly; no prompt has been resent.").await; return;
+    }
+    thread.recovering_uncertain = thread.recovering_uncertain || thread.history_request.is_some() || matches!(thread.snapshot.state.as_str(), "submissionUnknown" | "rewinding");
+    thread.snapshot.recovery_required = thread.recovering_uncertain;
+    thread.snapshot.state = "detached".into();
+    thread.transport_active = false;
+    thread.snapshot.last_error = Some(if detail.is_empty() {
+        "Connection interrupted. The agent continues on the server; reconnect to catch up.".to_owned()
+    } else { format!("Could not attach to the remote agent: {detail}") });
+    for (_, pending) in thread.config_requests.drain() { let _ = pending.reply.send(Err("Connection interrupted during configuration update.".into())); }
+    if let Some(pending) = thread.response_delivery.take() { let _ = pending.reply.send(Err("Response delivery was not confirmed. Reattach to check its status.".into())); }
+    if let Some(pending) = thread.history_request.take() { let _ = pending.reply.send(Err("History change was not confirmed. Reattach before retrying.".into())); }
+    let mut event = Event::new("threadState"); event.state = Some("detached".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread,event).await;
+}
 fn failure_state(thread: &Thread) -> &'static str {
     if thread.history_request.is_some() || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
+}
+
+async fn queue_request_response(thread: &mut Thread, id: Value, response: Value, outcome: Value) -> Result<oneshot::Receiver<Result<(), String>>, StillError> {
+    if thread.response_delivery.is_some() {
+        return Err(StillError::friendly("agent_response_busy", "A response is already being sent."));
+    }
+    let (reply, receiver) = oneshot::channel();
+    thread.response_delivery = Some(PendingResponse { id: id.clone(), outcome, reply });
+    if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"result":response})).is_err() {
+        thread.response_delivery = None;
+        return Err(StillError::friendly("agent_disconnected", "The agent disconnected before the response could be queued."));
+    }
+    Ok(receiver)
+}
+
+async fn await_request_delivery(response: oneshot::Receiver<Result<(), String>>) -> Result<(), StillError> {
+    tokio::time::timeout(Duration::from_secs(20), response).await
+        .map_err(|_| StillError::friendly("agent_response_unknown", "Response delivery was not confirmed. Check request status before retrying."))?
+        .map_err(|_| StillError::friendly("agent_response_unknown", "The response acknowledgement was lost. Check request status before retrying."))?
+        .map_err(|message| StillError::friendly("agent_response_failed", message))
 }
 
 #[tauri::command]
@@ -1324,8 +1562,9 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     let sid = thread.snapshot.agent_session_id.clone().ok_or_else(|| {
         StillError::friendly("agent_not_ready", "ACP session is still initializing.")
     })?;
-    let id = IDS.fetch_add(1, Ordering::Relaxed) + 100;
+    let id = next_request_id();
     thread.prompt = Some(json!(id));
+    thread.snapshot.prompt_id = Some(json!(id));
     thread.snapshot.turn_active = true;
     thread.snapshot.state = "working".into();
     thread.snapshot.last_error = None;
@@ -1353,8 +1592,8 @@ pub async fn still_agent_revert(args: RevertArgs) -> Result<Snapshot, StillError
     if thread.outbound.is_closed() { return Err(StillError::friendly("agent_process_lost", "Resume this conversation before changing its history.")); }
     let message = thread.messages.iter().find(|message| message.message_id.as_deref() == Some(args.message_id.as_str()) && message.checkpoint.is_some()).cloned().ok_or_else(|| StillError::friendly("agent_history_stale", "This message has no current provider checkpoint."))?;
     flush_history(&mut thread).await?;
-    let request_id = IDS.fetch_add(1, Ordering::Relaxed) + 1200;
-    let request = json!({"jsonrpc":"2.0","id":request_id,"method":"_still/session/revert","params":{"sessionId":thread.snapshot.agent_session_id,"checkpoint":message.checkpoint}});
+    let request_id = next_request_id();
+    let request = json!({"jsonrpc":"2.0","id":request_id,"method":"_still/session/revert","params":{"sessionId":thread.snapshot.agent_session_id,"checkpoint":message.checkpoint},"_meta":{"messageId":args.message_id}});
     let (reply, response) = oneshot::channel();
     let previous_state = thread.snapshot.state.clone();
     thread.snapshot.state = "rewinding".into();
@@ -1423,7 +1662,7 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
             "Choose a value offered by this agent.",
         ));
     }
-    let request_id = IDS.fetch_add(1, Ordering::Relaxed) + 900;
+    let request_id = next_request_id();
     let (reply, receive) = oneshot::channel();
     let request = match args.config_id.as_str() {
         "still:mode" => {
@@ -1470,7 +1709,62 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
 }
 
 async fn find_thread(id: &str) -> Result<Arc<Mutex<Thread>>, StillError> {
-    registry().lock().await.get(id).cloned().ok_or_else(||StillError::friendly("agent_process_lost","This foreground process is no longer attached. Inspect the remote host before starting a replacement."))
+    registry().lock().await.get(id).cloned().ok_or_else(||StillError::friendly("agent_process_lost","This agent transport is no longer attached. Reattach to the server before starting a replacement."))
+}
+
+#[tauri::command]
+pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args: AttachArgs) -> Result<Snapshot, StillError> {
+    let owner = state.sessions.lock().await.get(&args.native_session_id).cloned().ok_or_else(|| StillError::friendly("agent_session", "Reconnect and verify this server first."))?;
+    let server = owner.lock().await;
+    if server.status != SessionStatus::Live { return Err(StillError::friendly("agent_session", "Wait until the SSH connection is live.")); }
+    let host_key = json!([server.config.host.to_lowercase(), server.config.port, server.config.username]).to_string();
+    drop(server);
+    let existing = registry().lock().await.get(&args.execution_id).cloned();
+    let saved = if let Some(row) = &existing { row.lock().await.snapshot.clone() }
+        else { agent_store::load_snapshot(&app, args.conversation_id.clone()).await? };
+    if saved.execution_id != args.execution_id || saved.conversation_id != args.conversation_id || saved.host_key != host_key || !saved.persistent {
+        return Err(StillError::friendly("agent_attach_identity", "This persistent execution belongs to a different conversation or server."));
+    }
+    if let Some(row) = &existing {
+        let thread = row.lock().await;
+        if thread.transport_active {
+            if thread.snapshot.state == "detached" { return Err(StillError::friendly("agent_attach_pending", "The old transport is still closing. Try again shortly.")); }
+            return Ok(thread.snapshot.clone());
+        }
+    }
+    let remote = persistent_command(&saved.execution_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
+    let channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
+    let (outbound, outbound_rx) = mpsc::unbounded_channel();
+    let (cancel, cancel_rx) = mpsc::unbounded_channel();
+    let (close, close_rx) = mpsc::unbounded_channel();
+    let row = if let Some(row) = existing {
+        let mut thread = row.lock().await;
+        if thread.transport_active { return Ok(thread.snapshot.clone()); }
+        thread.outbound = outbound; thread.cancel = cancel; thread.close = close;
+        thread.permission = None; thread.pending_input_id = None;
+        thread.snapshot.pending_permission = None; thread.snapshot.pending_input = None;
+        thread.snapshot.state = "connecting".into(); thread.snapshot.last_error = None;
+        thread.transport_active = true;
+        thread.transport_epoch = thread.transport_epoch.saturating_add(1);
+        drop(thread); row
+    } else {
+        let lease = agent_store::lease(&app, args.conversation_id).await?;
+        let messages = agent_store::history_messages(&app, saved.conversation_id.clone()).await?;
+        let recovering_uncertain = saved.recovery_required || matches!(saved.state.as_str(), "submissionUnknown" | "rewinding");
+        let mut snapshot = saved;
+        snapshot.state = "connecting".into(); snapshot.last_error = None;
+        Arc::new(Mutex::new(Thread {
+            prompt: snapshot.prompt_id.clone(), snapshot, app, outbound, cancel, close,
+            permission: None, pending_input_id: None, config_requests: HashMap::new(), response_delivery: None,
+            transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
+            unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None,
+        }))
+    };
+    let snapshot = row.lock().await.snapshot.clone();
+    registry().lock().await.insert(args.execution_id, row.clone());
+    let cwd = snapshot.cwd.clone();
+    tokio::spawn(run(channel,row,outbound_rx,cancel_rx,close_rx,cwd));
+    Ok(snapshot)
 }
 #[tauri::command]
 pub async fn still_agent_snapshot(args: IdArgs) -> Result<Snapshot, StillError> {
@@ -1544,27 +1838,17 @@ pub async fn still_agent_input(args: InputArgs) -> Result<(), StillError> {
             "This question is no longer pending.",
         ));
     }
+    let title = thread.snapshot.pending_input.as_ref().and_then(|request| request["title"].as_str()).unwrap_or("Agent needs your input").to_owned();
+    let answered = args.answers.is_some();
     let result = if let Some(answers) = args.answers {
         json!({"action":"accept","content":answers})
     } else {
         json!({"action":"decline"})
     };
-    thread
-        .outbound
-        .send(json!({"jsonrpc":"2.0","id":args.request_id,"result":result}))
-        .map_err(|_| {
-            StillError::friendly(
-                "agent_disconnected",
-                "Agent disconnected before receiving your answer.",
-            )
-        })?;
-    thread.pending_input_id = None;
-    thread.snapshot.pending_input = None;
-    thread.snapshot.state = "working".into();
-    let mut event = Event::new("threadState");
-    event.state = Some("working".into());
-    emit(&mut thread, event).await;
-    Ok(())
+    let outcome = json!({"requestId":args.request_id,"kind":"question","title":title,"outcome":if answered {"answered"} else {"dismissed"}});
+    let response = queue_request_response(&mut thread,args.request_id,result,outcome).await?;
+    drop(thread);
+    await_request_delivery(response).await
 }
 #[tauri::command]
 pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError> {
@@ -1580,27 +1864,37 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
             "This approval belongs to a different request.",
         ));
     }
-    if !permission.options.iter().any(|option| {
+    let selected = permission.options.iter().find(|option| {
         option.get("optionId").and_then(Value::as_str) == Some(args.option_id.as_str())
-    }) {
+    });
+    let Some(selected) = selected else {
         return Err(StillError::friendly(
             "agent_permission_invalid",
             "Choose an option the remote agent actually offered.",
         ));
-    }
-    thread.outbound.send(json!({"jsonrpc":"2.0","id":args.request_id,"result":{"outcome":{"outcome":"selected","optionId":args.option_id}}})).map_err(|_|StillError::friendly("agent_disconnected","Remote process ended before approval was delivered."))?;
-    thread.snapshot.pending_permission = None;
-    thread.permission = None;
-    thread.snapshot.state = "working".into();
-    let mut event = Event::new("threadState");
-    event.state = Some("working".into());
-    emit(&mut thread, event).await;
-    Ok(())
+    };
+    let title = thread.snapshot.pending_permission.as_ref().and_then(|request| request["title"].as_str()).unwrap_or("Permission required").to_owned();
+    let option_name = selected.get("name").and_then(Value::as_str).unwrap_or(&args.option_id).to_owned();
+    let option_kind = selected.get("kind").and_then(Value::as_str).unwrap_or("");
+    let outcome_kind = if option_kind.starts_with("reject") { "rejected" } else if option_kind.starts_with("allow") { "approved" } else { "uncertain" };
+    let outcome = json!({"requestId":args.request_id,"kind":"permission","title":title,"outcome":outcome_kind,"responseLabel":option_name});
+    let result = json!({"outcome":{"outcome":"selected","optionId":args.option_id}});
+    let response = queue_request_response(&mut thread,args.request_id,result,outcome).await?;
+    drop(thread);
+    await_request_delivery(response).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_ids_do_not_reuse_prompt_receipts_after_reattachment() {
+        let first = next_request_id();
+        let remote_maximum = first.saturating_add(1000);
+        IDS.fetch_max(remote_maximum,Ordering::SeqCst);
+        assert!(next_request_id() > remote_maximum);
+        let a = next_request_id(); let b = next_request_id(); assert!(b > a);
+    }
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires localhost SSH fixture and installed Pi/Claude/Codex/OpenCode; performs no model prompts"]

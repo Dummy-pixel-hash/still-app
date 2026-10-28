@@ -75,6 +75,11 @@ export function useConversationScroll(key: string, revision: unknown) {
     position.current = { id, offset: 20, top: viewport.current?.scrollTop || 0, mode: "reading" }
     correct(); capture(); viewport.current?.focus({ preventScroll: true })
   }
+  const revealRequest = (id: string) => {
+    if (!["following", "anchoring"].includes(position.current.mode) || window.getSelection()?.isCollapsed === false) return
+    position.current = { id, offset: 16, top: viewport.current?.scrollTop || 0, mode: "reading" }
+    correct(); capture()
+  }
   const preparePrepend = () => { position.current.mode = "reading"; capture() }
-  return { viewport, content, atLatest, onScroll, onWheel, follow, anchorTurn, jumpTo, preparePrepend }
+  return { viewport, content, atLatest, onScroll, onWheel, follow, anchorTurn, jumpTo, revealRequest, preparePrepend }
 }

@@ -1,0 +1,210 @@
+import { test, expect, type Page } from "@playwright/test"
+
+test.beforeEach(async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/tests-agents/fixture.html")
+})
+async function connect(page: Page) {
+  if (!await page.getByRole("button", { name:"Add project folder",exact:true }).isVisible()) await page.getByRole("button", { name:"Toggle projects" }).click()
+  await page.getByRole("button", {name:"Add project folder",exact:true}).click()
+  await page.getByLabel("Remote project folder").fill("/srv/still")
+  await page.getByRole("button", {name:"Open folder",exact:true}).click()
+  await expect(page.getByRole("button",{name:"Model: Model A",exact:true})).toBeEnabled()
+  await page.getByLabel("Message agent").fill("Redesign regression")
+  await page.getByLabel("Message agent").press("Enter")
+  await expect(page.locator(".agent-message-assistant")).toBeVisible()
+  await page.evaluate(() => (window as any).agentFixture.finish())
+}
+async function ask(page: Page, properties: Record<string,unknown>, required: string[] = []) {
+  await page.evaluate(({properties,required}) => {
+    const h = (window as any).agentFixture
+    h.emit(h.current,{type:"input",input:{requestId:"redesign-question",title:"Choose the implementation",schema:{properties,required}}})
+  },{properties,required})
+}
+
+test("model updates are serialized and reasoning stays in the same menu",async({page})=>{
+  await connect(page)
+  await page.getByLabel("Message agent").fill("Keep this draft")
+  await page.evaluate(()=>{(window as any).agentFixture.deferConfig=true})
+  await page.getByRole("button",{name:"Model: Model A",exact:true}).click()
+  await page.getByRole("option",{name:"Model B",exact:true}).click()
+  await expect(page.getByRole("listbox",{name:"Models",exact:true})).toHaveAttribute("aria-busy","true")
+  await page.getByRole("radio",{name:"High",exact:true}).focus()
+  await page.keyboard.press("Space")
+  expect(await page.evaluate(()=>(window as any).agentFixture.configs)).toEqual([{configId:"model",value:"b"}])
+  await page.evaluate(()=>{const h=(window as any).agentFixture;h.deferConfig=false;h.releaseConfig()})
+  await expect(page.getByRole("option",{name:"Model B",exact:true})).toHaveAttribute("aria-selected","true")
+  await expect(page.getByRole("listbox",{name:"Models",exact:true})).toHaveAttribute("aria-busy","false")
+  await page.getByRole("radio",{name:"High",exact:true}).check()
+  await expect(page.getByRole("radio",{name:"High",exact:true})).toBeChecked()
+  await page.getByRole("button",{name:"Done",exact:true}).click()
+  await expect(page.getByLabel("Message agent")).toHaveValue("Keep this draft")
+  await expect(page.getByRole("button",{name:"Conversation settings",exact:true})).toHaveCount(0)
+})
+
+test("reasoning and model commands target the combined menu, modes remain adjacent",async({page})=>{
+  await connect(page)
+  await page.getByLabel("Message agent").press("ControlOrMeta+p")
+  await page.getByLabel("Search commands").fill("variants")
+  await page.getByLabel("Search commands").press("Enter")
+  await expect(page.getByRole("radio",{name:"Medium",exact:true})).toBeFocused()
+  await page.keyboard.press("Escape")
+  await page.getByRole("button",{name:"Agent: Ask",exact:true}).click()
+  await page.getByRole("option",{name:/^Code/}).click()
+  await expect(page.getByRole("button",{name:"Agent: Code",exact:true})).toBeFocused()
+  await page.getByRole("button",{name:"Model: Model A",exact:true}).click()
+  await page.getByRole("button",{name:"Done",exact:true}).focus()
+  await page.keyboard.press("Enter")
+  expect(await page.evaluate(()=>(window as any).agentFixture.sends.length)).toBe(1)
+})
+
+test("unsupported reasoning and mode controls are not fabricated",async({page})=>{
+  await connect(page)
+  await page.evaluate(()=>{const h=(window as any).agentFixture;h.emit(h.current,{type:"configOptions",configOptions:[{id:"model",name:"Model",category:"model",type:"select",currentValue:"x",options:[{value:"x",name:"Only model"}]}]})})
+  await expect(page.getByRole("button",{name:/^Agent:/})).toHaveCount(0)
+  await page.getByRole("button",{name:"Model: Only model",exact:true}).click()
+  await expect(page.getByRole("radiogroup",{name:"Reasoning",exact:true})).toHaveCount(0)
+  await expect(page.getByRole("option",{name:"Only model",exact:true})).toBeVisible()
+})
+
+test("question controls preserve multiple selections, false, zero, and multiline answers",async({page})=>{
+  await connect(page)
+  await ask(page,{
+    strategy:{type:"string",title:"Strategy",oneOf:[{const:"reuse",title:"Reuse existing"},{const:"replace",title:"Replace it"}]},
+    checks:{type:"array",title:"Checks",items:{enum:["Tests","Docs","Lint"]}},
+    retries:{type:"integer",title:"Retries",minimum:0},
+    flag:{type:"boolean",title:"Enable preview"},
+    note:{type:"string",title:"Notes"},
+  },["strategy","checks","retries","flag"])
+  await page.getByRole("radio",{name:"Reuse existing",exact:true}).check()
+  await page.getByRole("checkbox",{name:"Tests",exact:true}).check()
+  await page.getByRole("checkbox",{name:"Docs",exact:true}).check()
+  await page.getByLabel("Retries",{exact:true}).fill("0")
+  await page.getByLabel("Notes",{exact:true}).fill("First line\nSecond line")
+  expect(await page.evaluate(()=>(window as any).agentFixture.inputs)).toEqual([])
+  await page.getByRole("button",{name:"Submit answers",exact:true}).click()
+  expect(await page.evaluate(()=>(window as any).agentFixture.inputs.at(-1).answers)).toEqual({strategy:"reuse",checks:["Tests","Docs"],retries:0,flag:false,note:"First line\nSecond line"})
+  await expect(page.locator('.agent-request-card[data-request-status="answered"]')).toContainText("Answer sent")
+})
+
+test("expanding a question keeps one form and preserves answers on close",async({page})=>{
+  await connect(page)
+  await ask(page,{note:{type:"string",title:"Implementation notes"}},["note"])
+  await page.getByLabel("Implementation notes",{exact:true}).fill("Keep this answer")
+  await page.getByRole("button",{name:"Expand request",exact:true}).click()
+  await expect(page.getByRole("dialog",{name:"Choose the implementation",exact:true})).toBeVisible()
+  await expect(page.getByLabel("Implementation notes",{exact:true})).toHaveCount(1)
+  await expect(page.getByLabel("Implementation notes",{exact:true})).toHaveValue("Keep this answer")
+  await expect(page.locator(".agent-main")).toHaveAttribute("inert","")
+  await page.keyboard.press("Escape")
+  await expect(page.getByLabel("Implementation notes",{exact:true})).toHaveValue("Keep this answer")
+  expect(await page.evaluate(()=>(window as any).agentFixture.inputs)).toEqual([])
+})
+
+test("question validation focuses the invalid field without submitting",async({page})=>{
+  await connect(page)
+  await ask(page,{checks:{type:"array",title:"Checks",items:{enum:["Tests","Docs"]}},count:{type:"integer",title:"Count",minimum:0}},["checks","count"])
+  await page.getByRole("button",{name:"Submit answers",exact:true}).click()
+  await expect(page.getByRole("checkbox",{name:"Tests",exact:true})).toBeFocused()
+  await expect(page.getByText("Select at least one option.",{exact:true})).toBeVisible()
+  await page.getByRole("checkbox",{name:"Tests",exact:true}).check()
+  await page.getByLabel("Count",{exact:true}).fill("-1")
+  await page.getByRole("button",{name:"Submit answers",exact:true}).click()
+  await expect(page.getByLabel("Count",{exact:true})).toBeFocused()
+  expect(await page.evaluate(()=>(window as any).agentFixture.inputs)).toEqual([])
+})
+
+test("delivery failures retain answers and require checking status before retry",async({page})=>{
+  await connect(page)
+  await ask(page,{note:{type:"string",title:"Your answer"}},["note"])
+  await page.getByLabel("Your answer",{exact:true}).fill("Do not lose this")
+  await page.evaluate(()=>{(window as any).agentFixture.rejectResponse=true})
+  await page.getByRole("button",{name:"Submit answer",exact:true}).click()
+  await expect(page.getByRole("button",{name:"Check request status",exact:true})).toBeVisible()
+  await expect(page.getByLabel("Your answer",{exact:true})).toHaveValue("Do not lose this")
+  await expect(page.getByRole("button",{name:"Submit answer",exact:true})).toBeDisabled()
+  await page.evaluate(()=>{(window as any).agentFixture.rejectResponse=false})
+  await page.getByRole("button",{name:"Check request status",exact:true}).click()
+  await expect(page.getByRole("button",{name:"Submit answer",exact:true})).toBeEnabled()
+  await page.getByRole("button",{name:"Submit answer",exact:true}).click()
+  expect(await page.evaluate(()=>(window as any).agentFixture.inputs.length)).toBe(1)
+})
+
+test("duplicate submissions are blocked and outcomes survive a local reload",async({page})=>{
+  await connect(page)
+  await ask(page,{note:{type:"string",title:"Answer"}},["note"])
+  await page.getByLabel("Answer",{exact:true}).fill("Private draft answer")
+  await page.evaluate(()=>{(window as any).agentFixture.deferResponse=true})
+  await page.getByRole("button",{name:"Submit answer",exact:true}).click()
+  await expect(page.getByRole("button",{name:"Sending…",exact:true})).toBeDisabled()
+  await page.evaluate(()=>{const h=(window as any).agentFixture;h.releaseResponse()})
+  await expect(page.locator('[data-request-status="answered"]')).toBeVisible()
+  const saved = await page.evaluate(()=>JSON.stringify((window as any).agentFixture.saved()))
+  expect(saved).not.toContain("Private draft answer")
+  expect(saved).toContain('"requestOutcome"')
+  await page.reload()
+  await page.locator(".agent-thread-open").first().click()
+  await expect(page.locator('[data-request-status="answered"]')).toContainText("Answer sent")
+  await expect(page.getByRole("button",{name:"Submit answer",exact:true})).toHaveCount(0)
+})
+
+test("unsafe form types are read-only and Enter never grants permission",async({page})=>{
+  await connect(page)
+  await ask(page,{nested:{type:"object",title:"Nested object"}},["nested"])
+  await expect(page.getByRole("button",{name:"Submit answer",exact:true})).toBeDisabled()
+  await page.getByRole("button",{name:"Dismiss request",exact:true}).click()
+  await page.evaluate(()=>(window as any).agentFixture.approval())
+  await page.getByRole("region",{name:"Requested operation",exact:true}).focus()
+  await page.keyboard.press("Enter")
+  expect(await page.evaluate(()=>(window as any).agentFixture.approvals)).toEqual([])
+  await page.getByRole("button",{name:"Reject",exact:true}).click()
+  await expect(page.locator('[data-request-status="rejected"]')).toContainText("Request rejected")
+})
+
+test("preview scenarios render interactive model, question and permission examples",async({page})=>{
+  await page.goto("/tests-agents/fixture.html?demo&scenario=models")
+  await expect(page.getByRole("dialog",{name:"Model and reasoning",exact:true})).toBeVisible()
+  await expect(page.getByRole("option",{name:"Claude Sonnet 4",exact:true})).toHaveAttribute("aria-selected","true")
+  await page.getByRole("button",{name:"Done",exact:true}).click()
+  await expect(page.getByRole("button",{name:"Agent: Build",exact:true})).toBeVisible()
+  await page.goto("/tests-agents/fixture.html?demo&scenario=question")
+  await expect(page.getByRole("radio",{name:"Extend the existing session",exact:true})).toBeVisible()
+  await page.goto("/tests-agents/fixture.html?demo&scenario=approval")
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible()
+})
+
+test("a detached persistent agent reattaches without starting or sending another prompt",async({page})=>{
+  await page.evaluate(()=>{(window as any).agentFixture.persistent=true})
+  await connect(page)
+  const before=await page.evaluate(()=>{const h=(window as any).agentFixture;return {id:h.current,starts:h.starts.length,sends:h.sends.length}})
+  await page.evaluate(()=>{const h=(window as any).agentFixture;h.emit(h.current,{type:"threadState",state:"detached",text:"Connection interrupted"})})
+  await expect.poll(()=>page.evaluate(()=>(window as any).agentFixture.attaches.length)).toBe(1)
+  await expect(page.locator(".agent-status")).toHaveText("Ready")
+  expect(await page.evaluate(()=>{const h=(window as any).agentFixture;return {id:h.current,starts:h.starts.length,sends:h.sends.length}})).toEqual(before)
+})
+
+test("completed expanded requests remain dismissible and narrow model options are reachable",async({page})=>{
+  await connect(page)
+  await ask(page,{note:{type:"string",title:"Your answer"}},["note"])
+  await page.getByRole("button",{name:"Expand request",exact:true}).click()
+  await page.getByLabel("Your answer",{exact:true}).fill("Proceed")
+  await page.getByRole("button",{name:"Submit answer",exact:true}).click()
+  await expect(page.getByRole("dialog",{name:"Choose the implementation",exact:true})).toContainText("Answer sent")
+  await page.getByRole("button",{name:"Close expanded request",exact:true}).click()
+  await page.setViewportSize({width:320,height:400})
+  await page.getByRole("button",{name:"Model: Model A",exact:true}).click()
+  await expect(page.getByRole("option",{name:"Model A",exact:true})).toBeInViewport()
+  await expect(page.getByRole("button",{name:"Done",exact:true})).toBeInViewport()
+})
+
+test("a no-longer-pending question becomes read-only when a new request arrives",async({page})=>{
+  await connect(page)
+  await ask(page,{note:{type:"string",title:"Old answer"}},["note"])
+  await page.evaluate(()=>{
+    const h=(window as any).agentFixture
+    h.emit(h.current,{type:"threadComplete",state:"working"})
+    h.emit(h.current,{type:"input",input:{requestId:"new-id",title:"New question",schema:{properties:{note:{type:"string",title:"New answer"}},required:["note"]}}})
+  })
+  await expect(page.getByLabel("Old answer",{exact:true})).toHaveCount(0)
+  await expect(page.getByLabel("New answer",{exact:true})).toBeVisible()
+})

@@ -1,4 +1,4 @@
-import type { AgentCommand } from "./types"
+import type { AgentCommand, AgentConfigOption } from "./types"
 
 /** Native TUI names checked against OpenCode v2.0.29 (042d0832).
  * Still actions have explicit scope; server registrations always take precedence.
@@ -10,12 +10,12 @@ export const workspaceCommands: AgentCommand[] = [
   { name: "models", description: "Choose a model", route: "client", source: "Still" },
   { name: "agents", description: "Choose the provider's agent or conversation mode", route: "client", source: "Still" },
   { name: "variants", aliases: ["thinking", "effort"], description: "Choose a model's reasoning level", route: "client", source: "Still" },
+  { name: "refresh-session", aliases: ["refresh"], description: "Refresh this conversation's models, settings, and session state", route: "client", source: "Still" },
   { name: "providers", description: "Choose a coding agent for a new conversation", route: "client", source: "Still" },
   { name: "skills", description: "Browse available project skills", route: "client", source: "Still" },
   { name: "rename", description: "Rename this conversation in Still", route: "client", source: "Still", input: { hint: "Optional conversation name" } },
   { name: "copy", description: "Copy the saved conversation as Markdown", route: "client", source: "Still" },
   { name: "timeline", description: "Find a message in this conversation", route: "client", source: "Still" },
-  { name: "settings", description: "Open conversation settings", route: "client", source: "Still" },
   { name: "help", description: "Browse commands and availability details", route: "client", source: "Still" },
 ]
 export const openCodeTuiCommands: AgentCommand[] = [
@@ -44,7 +44,7 @@ export const openCodeTuiCommands: AgentCommand[] = [
   ["exit", "Exit the OpenCode terminal app", "Close the Agents workspace to return to Still. This does not quit a separate OpenCode TUI."],
 ].map(([name, description, unavailable]) => ({ name, description, unavailable, source: "OpenCode TUI", ...(name === "pair" ? { aliases: ["web"] } : name === "exit" ? { aliases: ["quit", "q"] } : {}) }))
 
-export function commandInventory(provider: AgentCommand[], agentId: string) {
+export function commandInventory(provider: AgentCommand[], agentId: string, extraControls: AgentConfigOption[] = []): AgentCommand[] {
   const names = new Set(provider.map(command => command.name))
-  return [...provider, ...workspaceCommands.filter(command => !names.has(command.name)), ...(agentId === "opencode" ? openCodeTuiCommands.filter(command => !names.has(command.name)) : [])]
+  return [...provider, ...workspaceCommands.filter(command => !names.has(command.name)), ...extraControls.map(option => ({ name: `configure:${option.id}`, description: `Configure ${option.name}${option.description ? ` · ${option.description}` : ""}`, route: "client" as const, source: "Still", configId: option.id })).filter(command => !names.has(command.name)), ...(agentId === "opencode" ? openCodeTuiCommands.filter(command => !names.has(command.name)) : [])]
 }

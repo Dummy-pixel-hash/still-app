@@ -50,6 +50,7 @@ export const tauriBridge: NativeBridge = {
   agentClose(executionId:string){return invoke<void>("still_agent_close",{args:{executionId}})},
   agentRespondInput(executionId:string,requestId:string|number,answers:Record<string,unknown>|null){return invoke<void>("still_agent_input",{args:{executionId,requestId,answers}})},
   agentSnapshot(executionId:string){return invoke<AgentThreadSnapshot>("still_agent_snapshot",{args:{executionId}})},
+  agentAttach(nativeSessionId:string,executionId:string,conversationId:string){return invoke<AgentThreadSnapshot>("still_agent_attach",{args:{nativeSessionId,executionId,conversationId}})},
   subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void){return listen<AgentThreadEvent>(`still://agent-event/${executionId}`,event=>callback(event.payload))},
 
 

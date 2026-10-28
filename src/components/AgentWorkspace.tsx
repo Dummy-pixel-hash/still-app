@@ -15,7 +15,7 @@ import { useAgentListMotion } from "../agents/useAgentListMotion"
 import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
 import { commandInventory } from "../agents/commands"
-import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, refreshAgentCommands, refreshAgentThread, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
+import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, reconcileAgentRequest, refreshAgentCommands, refreshAgentThread, respondAgentInput, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
 import { discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
 import { nativeBridge } from "../bridge/nativeBridge"
@@ -25,8 +25,11 @@ import AgentMenu from "./AgentMenu"
 import AgentProviderMark, { StillAgentMark } from "./AgentProviderMark"
 import AgentChanges, { AgentChangeSummary } from "./AgentChanges"
 import { changeTotals, conversationChanges } from "../agents/changes"
-import { CommandPicker, ConfigPicker } from "./AgentControls"
-import { AgentTimeline, InputCard, PermissionCard } from "./AgentTimeline"
+import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
+import AgentModelPicker from "./AgentModelPicker"
+import { AgentTimeline } from "./AgentTimeline"
+import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
+import { requestKey, questionFields } from "../agents/requests"
 import type { TranscriptItem } from "../agents/transcript"
 import "../styles/agent-workspace.css"
 
@@ -35,6 +38,8 @@ type Props = {
   sessions?: Session[]
   onSelectHost?: (session: Session | null) => void
   onConnect?: () => Promise<void>
+  onReattach?: (row: AgentThreadRow) => Promise<void>
+  transportId?: string
   connected?: boolean
   connectionNotice?: React.ReactNode
   onClose: () => void
@@ -46,7 +51,7 @@ type Props = {
 }
 const messageOf = (e: unknown) => e && typeof e === "object" && "message" in e ? String(e.message) : String(e || "Operation failed")
 const idle = (row: AgentThreadRow | null) => !!row && !row.turnActive && !row.pendingPermission && !row.pendingInput && ["working", "complete", "cancelled"].includes(row.state)
-const statusOf = (row: AgentThreadRow) => row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? "Failed" : row.turnActive ? "Working" : "Ready"
+const statusOf = (row: AgentThreadRow) => row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? "Failed" : row.turnActive ? "Working" : "Ready"
 const historyWindows = new Map<string, string>()
 const promptStarters = [
   { icon: "code" as const, label: "Build a feature", prompt: "Help me build a feature in this project. First, look at the structure and ask me what I want to add." },
@@ -58,7 +63,7 @@ function relativeActivity(at: number) {
   return minutes < 1 ? "now" : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`
 }
 
-export default function AgentWorkspace({ session, sessions = [], onSelectHost, onConnect, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ session, sessions = [], onSelectHost, onConnect, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
   const [hydrated, setHydrated] = useState(false)
@@ -72,8 +77,13 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
   const [undo, setUndo] = useState<{ id: string; at?: number } | null>(null)
   const [busy, setBusy] = useState(false), [configBusy, setConfigBusy] = useState(false)
-  const [error, setError] = useState(""), [advanced, setAdvanced] = useState(false)
+  const [error, setError] = useState("")
   const [commandOpen, setCommandOpen] = useState(false), [commandQuery, setCommandQuery] = useState("")
+  const [modelMenu, setModelMenu] = useState<"model" | "reasoning" | null>(null)
+  const [extraControl, setExtraControl] = useState<string | null>(null)
+  const [configError, setConfigError] = useState("")
+  const [reattaching, setReattaching] = useState(false)
+  const attachAttempt = useRef("")
   const [timelineOpen, setTimelineOpen] = useState(false), [timelineQuery, setTimelineQuery] = useState("")
   const [feedback, setFeedback] = useState("")
   const [review, setReview] = useState(false)
@@ -82,14 +92,17 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [projectChoices, setProjectChoices] = useState(false)
   const [addingServer, setAddingServer] = useState(false)
   const [catalogBusy, setCatalogBusy] = useState(false), [catalogError, setCatalogError] = useState("")
+  const [requestDrafts, setRequestDrafts] = useState<Record<string, Record<string, unknown>>>({})
+  const [requestErrors, setRequestErrors] = useState<Record<string, string>>({})
+  const [requestBusyId, setRequestBusyId] = useState<string | null>(null)
+  const [expandedRequest, setExpandedRequest] = useState<string | null>(null)
+  const requestOperations = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
   const [, updateHistoryWindow] = useState(0)
   const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), search = useRef<HTMLInputElement>(null)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const navigationPanel = useRef<HTMLElement>(null)
-  const settingsPopover = useRef<HTMLDivElement>(null)
   const projectPopover = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
-  useAgentPopover(settingsPopover, advanced, "end", true)
   useAgentPopover(projectPopover, projectChoices, "start", true)
   const navigation = useRef(0), mounted = useRef(true), prefsRef = useRef(prefs)
   const folderOperation = useRef(0)
@@ -101,6 +114,15 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const context = current ? { host: current.meta.hostKey, folder: current.meta.folder } : project
   const contextKey = context ? projectKey(context) : "unassigned"
   const connectedHere = !!context && context.host === host && connected
+  useEffect(() => {
+    if (!current?.persistent || !onReattach || !transportId || !connectedHere || !["saved", "detached"].includes(current.state)) return
+    const key = `${current.executionId}:${transportId}:${current.state}`
+    if (attachAttempt.current === key) return
+    attachAttempt.current = key
+    const revision = navigation.current
+    setReattaching(true)
+    void onReattach(current).catch(failure => { if (mounted.current && revision === navigation.current) setError(messageOf(failure)) }).finally(() => { if (mounted.current && revision === navigation.current) setReattaching(false) })
+  }, [current?.executionId, current?.state, transportId, connectedHere, onReattach])
   const agentId = current?.agentId || prefs.agent
   const definition = AGENTS.find(agent => agent.id === agentId) || AGENTS[0]
   const executable = context ? prefs.executables[context.host]?.[agentId]?.trim() || undefined : undefined
@@ -114,7 +136,23 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const activeAgent = current || prepared
   const draft = current ? current.meta.draft : prefs.drafts[draftKey] || ""
   const fields = activeAgent?.configOptions || []
-  const items = useMemo(() => conversation(current?.transcript || []), [current?.transcript])
+  const modelControl = fields.find(option => option.category === "model")
+  const reasoningControl = reasoningOption(fields)
+  const agentModeControl = modeOption(fields)
+  const otherControls = fields.filter(option => option !== modelControl && option !== reasoningControl && option !== agentModeControl)
+  const items = useMemo(() => {
+    const transcript = conversation(current?.transcript || [])
+    if (!current) return transcript
+    const kind = current.pendingPermission ? "permission" : current.pendingInput ? "question" : undefined
+    const request = current.pendingPermission || current.pendingInput
+    if (!kind || !request) return transcript
+    const found = [...transcript].reverse().find(item => item.kind === "request" && item.attemptId === current.executionId && item.requestKind === kind && item.requestId === request.requestId)
+    if (found) {
+      if (kind === "permission") found.permission = current.pendingPermission
+      else found.agentInput = current.pendingInput
+    } else transcript.push({ id: `pending-${requestKey(current.executionId, kind, request.requestId)}`, kind: "request", attemptId: current.executionId, requestKind: kind, requestId: request.requestId, title: request.title, text: "", permission: current.pendingPermission, agentInput: current.pendingInput })
+    return transcript
+  }, [current?.transcript, current?.pendingPermission, current?.pendingInput])
   const changes = useMemo(() => conversationChanges(items), [items])
   const openHistoryAction = useCallback((message: TranscriptItem, retry: boolean) => { setError(""); setHistoryAction({ message, retry }) }, [])
   const historyActions = useMemo(() => ({ capabilities: current?.historyCapabilities, enabled: connectedHere && !busy && !configBusy && !!current && !current.turnActive && !current.pendingInput && !current.pendingPermission && !current.meta.archivedAt && !current.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(current.state), act: openHistoryAction }), [current?.historyCapabilities, current?.state, current?.turnActive, current?.pendingInput, current?.pendingPermission, current?.meta.archivedAt, current?.meta.submissionUnknown, connectedHere, busy, configBusy, openHistoryAction])
@@ -137,11 +175,69 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const knownServers = [...prefs.servers, ...sessions, ...(session ? [session] : [])]
   const hosts = [...new Map([...projects.map(p => sessionForHost(p.host, knownServers)).filter((s): s is Session => !!s), ...knownServers].map(s => [hostKey(s), s])).values()]
   const providerCommands = activeAgent?.commands || []
-  const commands = commandInventory(providerCommands, agentId)
+  const commands = commandInventory(providerCommands, agentId, otherControls)
   const sidebarExpanded = sidebar || !prefs.sidebarCollapsed
   const sidebarOverlay = sidebar && narrowNavigation
-  const dialogOpen = folderOpen || !!deleting || timelineOpen || !!historyAction
+  const dialogOpen = folderOpen || !!deleting || timelineOpen || !!historyAction || !!extraControl || !!expandedRequest
   const attentionCount = allThreads.filter(row => row.pendingPermission || row.pendingInput).length
+  const activeRequestKind = current?.pendingPermission ? "permission" : current?.pendingInput ? "question" : undefined
+  const activeRequestId = current?.pendingPermission?.requestId ?? current?.pendingInput?.requestId
+  const requestKeyFor = (kind: "question" | "permission", id: string | number) => requestKey(current?.executionId || "", kind, id)
+  const activeRequestKey = activeRequestKind && activeRequestId !== undefined ? requestKeyFor(activeRequestKind, activeRequestId) : undefined
+  const activeRequestItem = [...items].reverse().find(item => item.kind === "request" && item.attemptId === current?.executionId && item.requestKind === activeRequestKind && item.requestId === activeRequestId && !item.requestOutcome)
+  useLayoutEffect(() => { if (activeRequestItem) scroll.revealRequest(activeRequestItem.id) },[activeRequestItem?.id])
+  const expandedItem = items.find(item => item.id === expandedRequest)
+  const requestActions: AgentRequestActions = {
+    activeKey: activeRequestKey,
+    busy: requestBusyId === activeRequestKey,
+    available: connectedHere && current?.state === "inputRequired",
+    expandedId: expandedRequest,
+    expand: id => { setModelMenu(null); setCommandOpen(false); setProjectChoices(false); setExpandedRequest(id) },
+    keyFor: item => requestKey(item.attemptId || "historical", item.requestKind || "question", item.requestId ?? ""),
+    answersFor: (key, request) => requestDrafts[key] || Object.fromEntries(questionFields(request).fields.filter(([, field]) => field.type === "boolean").map(([id]) => [id, false])),
+    errorFor: key => requestErrors[key],
+    updateAnswers: (key, answers) => setRequestDrafts(old => ({ ...old, [key]: answers })),
+    answer: (item, answers) => {
+      if (!current || item.attemptId !== current.executionId || item.requestId === undefined || !item.agentInput || !connectedHere) return
+      const executionId = current.executionId, key = requestKeyFor("question", item.requestId)
+      if (requestOperations.current.has(key)) return
+      requestOperations.current.add(key)
+      setRequestBusyId(key); setRequestErrors(old => { const next = { ...old }; delete next[key]; return next })
+      void respondAgentInput(executionId, item.requestId, answers).then(() => {
+        setRequestDrafts(old => { const next = { ...old }; delete next[key]; return next })
+      }).catch(failure => {
+        setRequestErrors(old => ({ ...old, [key]: messageOf(failure) }))
+      }).finally(() => { requestOperations.current.delete(key); setRequestBusyId(old => old === key ? null : old) })
+    },
+    permission: (item, optionId) => {
+      if (!current || item.attemptId !== current.executionId || item.requestId === undefined || !item.permission || !connectedHere) return
+      const executionId = current.executionId, key = requestKeyFor("permission", item.requestId)
+      if (requestOperations.current.has(key)) return
+      requestOperations.current.add(key)
+      setRequestBusyId(key); setRequestErrors(old => { const next = { ...old }; delete next[key]; return next })
+      void respondAgentPermission(executionId, item.requestId, optionId).catch(failure => {
+        setRequestErrors(old => ({ ...old, [key]: messageOf(failure) }))
+      }).finally(() => { requestOperations.current.delete(key); setRequestBusyId(old => old === key ? null : old) })
+    },
+    reconcile: item => {
+      if (!current || item.attemptId !== current.executionId || item.requestId === undefined || !item.requestKind || !connectedHere) return
+      const key = requestKeyFor(item.requestKind, item.requestId)
+      if (requestOperations.current.has(key)) return
+      requestOperations.current.add(key); setRequestBusyId(key)
+      void reconcileAgentRequest(current.executionId, item.requestKind, item.requestId).then(() => {
+        setRequestErrors(old => { const next = { ...old }; delete next[key]; return next })
+      }).catch(failure => setRequestErrors(old => ({ ...old, [key]: messageOf(failure) }))).finally(() => { requestOperations.current.delete(key); setRequestBusyId(old => old === key ? null : old) })
+    },
+  }
+  const previousRequest = useRef<TranscriptItem | null>(null)
+  useEffect(() => {
+    const prior = previousRequest.current
+    if (prior && !activeRequestItem && prior.attemptId === current?.executionId) {
+      const result = items.find(item => item.id === prior.id)
+      if (result) setFeedback(requestOutcomeLabel(result))
+    }
+    previousRequest.current = activeRequestItem || null
+  }, [activeRequestItem, current?.executionId, items])
   const savedStatus = !hydrated ? "Opening history…" : storage.error ? "Changes need saving" : storage.pending ? "Saving locally…" : "Saved on this device"
   useEffect(() => {
     const media = matchMedia("(max-width: 800px)")
@@ -176,8 +272,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       return Object.values(paths).some(Boolean) ? Promise.all(AGENTS.map(agent => callbacks.current.onCheck(agent.id, paths[agent.id]))).then(rows => rows.flat()) : callbacks.current.onCheck()
     })
   }, [host, connected])
-  useEffect(() => { setCatalogError(""); setHistoryAction(null) }, [contextKey, agentId, selected])
-  useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setAdvanced(false); setCommandOpen(false) }, [selected, current?.executionId])
+  useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
+  useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setCommandOpen(false) }, [selected, current?.executionId])
   useEffect(() => { setReview(false) }, [selected, view])
   useEffect(() => { const input = textarea.current; if (input) { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 156)}px` } }, [draft, selected, view])
   useEffect(() => { mounted.current = true; const previous = document.activeElement as HTMLElement | null; surface.current?.focus(); return () => { mounted.current = false; void flushAgentSaves(); if (previous?.isConnected) previous.focus() } }, [])
@@ -185,29 +281,30 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     if (!dialogOpen) return
     const previous = returnFocus.current
     const modal = surface.current?.querySelector<HTMLElement>(".agent-modal")
-    const target = modal?.querySelector<HTMLElement>('input:not(:disabled),select:not(:disabled)') || modal?.querySelector<HTMLElement>('button:not(:disabled)')
+    const target = expandedRequest ? modal?.querySelector<HTMLElement>('[aria-label="Close expanded request"]') : modal?.querySelector<HTMLElement>('input:not(:disabled),select:not(:disabled)') || modal?.querySelector<HTMLElement>('button:not(:disabled)')
     target?.focus({ preventScroll: true })
     return () => { requestAnimationFrame(() => {
       if (surface.current?.querySelector(".agent-modal")) return
       if (previous?.isConnected && !previous.closest("[inert]")) previous.focus({ preventScroll: true })
+      else if (expandedRequest) (surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(expandedRequest)}"] .agent-request-expand`) || textarea.current)?.focus({ preventScroll: true })
       else textarea.current?.focus({ preventScroll: true })
     }) }
-  }, [folderOpen, !!deleting, timelineOpen, !!historyAction])
+  }, [folderOpen, !!deleting, timelineOpen, !!historyAction, extraControl, expandedRequest])
   useEffect(() => {
-    if (!advanced && !projectChoices) return
+    if (!projectChoices) return
     const outside = (event: PointerEvent) => {
-      if (!(event.target as HTMLElement).closest('.agent-advanced,.agent-context-choices,[data-agent-popover-trigger]')) { setAdvanced(false); setProjectChoices(false) }
+      if (!(event.target as HTMLElement).closest('.agent-context-choices,[data-agent-popover-trigger]')) setProjectChoices(false)
     }
     document.addEventListener("pointerdown", outside)
     return () => document.removeEventListener("pointerdown", outside)
-  }, [advanced, projectChoices])
+  }, [projectChoices])
 
   const setDraft = (text: string) => current ? updateThreadMeta(current.executionId, { draft: text }) : setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: text } }))
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
   const selectHost = (key: string) => { const server = sessionForHost(key, hosts); if (server) onSelectHost?.(server) }
   const revealProjects = (focusSearch = false) => {
     setMenu(null)
-    setCommandOpen(false); setAdvanced(false); setProjectChoices(false)
+    setCommandOpen(false); setProjectChoices(false); setModelMenu(null)
     if (matchMedia("(max-width: 800px)").matches) { setReview(false); setSidebar(true) }
     else setPrefs(old => ({ ...old, sidebarCollapsed: false }))
     if (focusSearch) requestAnimationFrame(() => search.current?.focus({ preventScroll: true }))
@@ -222,9 +319,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }))
     }
   }
-  const home = () => { navigation.current++; setSelected(null); setProject(null); setView("home"); setCommandOpen(false); setMenu(null); setAdvanced(false); setProjectChoices(false); setSidebar(false); setError("") }
+  const home = () => { navigation.current++; setSelected(null); setProject(null); setView("home"); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError("") }
   const openProject = (p: AgentProject) => { navigation.current++; setSelected(null); setProject(p); setView("project"); setCommandOpen(false); setMenu(null); setSidebar(false); setError(""); selectHost(p.host) }
-  const newThread = (p: AgentProject | null = null) => { navigation.current++; setDraftGeneration(value => value + 1); setSelected(null); setProject(p); setView("draft"); setArchived(false); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setAdvanced(false); setError(""); if (p) selectHost(p.host); requestAnimationFrame(() => { if (!surface.current?.querySelector(".agent-command-menu")) textarea.current?.focus() }) }
+  const newThread = (p: AgentProject | null = null) => { navigation.current++; setDraftGeneration(value => value + 1); setSelected(null); setProject(p); setView("draft"); setArchived(false); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError(""); if (p) selectHost(p.host); requestAnimationFrame(() => { if (!surface.current?.querySelector(".agent-command-menu")) textarea.current?.focus() }) }
   const assignProject = (p: AgentProject) => {
     if (startScreen && !current && !project && prefsRef.current.drafts.unassigned) {
       const key = projectKey(p)
@@ -251,7 +348,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     if (!context || !connectedHere || !prepared || !preparation.ready) throw new Error("Wait for the selected agent to finish connecting.")
     preparation.claim()
     updateThreadMeta(prepared.executionId, { prepared: false, draft })
-    setSelected(prepared.meta.id); setProject({ host: context.host, folder: prepared.cwd }); setView("draft"); setAdvanced(false)
+    setSelected(prepared.meta.id); setProject({ host: context.host, folder: prepared.cwd }); setView("draft")
     setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" } }))
     return prepared
   }
@@ -262,7 +359,6 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     if (command.name === "new") newThread(context)
     else if (command.name === "open") chooseFolder()
     else if (command.name === "sessions") revealProjects(true)
-    else if (command.name === "settings") { setProjectChoices(false); setAdvanced(true) }
     else if (command.name === "help") { setCommandQuery(""); setCommandOpen(true) }
     else if (command.name === "skills") { setCommandQuery("skill:"); setCommandOpen(true) }
     else if (command.name === "rename") {
@@ -277,13 +373,16 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     }
     else if (command.name === "timeline") { if (current) { setTimelineQuery(""); setTimelineOpen(true) } else setError("Open a conversation to find a message.") }
     else if (command.name === "providers") { if (current) setError("Choose a coding agent when starting a new conversation."); else surface.current?.querySelector<HTMLButtonElement>('[data-config-id="provider"] > button')?.click() }
-    else {
-      const category = command.name === "models" ? "model" : command.name === "variants" ? "thought_level" : "mode"
-      const option = fields.find(option => option.category === category)
-      if (!option) { setError(context ? `${definition.label}’s ${category === "model" ? "models" : "modes"} appear when its connection is ready.` : "Choose a project before selecting agent settings."); return }
-      if (category !== "model") setAdvanced(true)
-      requestAnimationFrame(() => surface.current?.querySelector<HTMLButtonElement>(`[data-config-id="${CSS.escape(option.id)}"] > button`)?.click())
+    else if (command.name === "refresh-session") { if (current && current.state !== "saved") void run(() => refreshAgentThread(current.executionId)); else setError("Open a live conversation to refresh its session.") }
+    else if (["models", "variants"].includes(command.name)) {
+      if (!modelControl && !reasoningControl) { setError(context ? `${definition.label}’s model controls appear when its connection is ready.` : "Choose a project before selecting a model."); return }
+      setProjectChoices(false); setModelMenu(command.name === "variants" ? "reasoning" : "model")
     }
+    else if (command.name === "agents") {
+      if (!agentModeControl) { setError(context ? `${definition.label} has no selectable agent modes for this conversation.` : "Choose a project to load agent modes."); return }
+      requestAnimationFrame(() => surface.current?.querySelector<HTMLButtonElement>(`[data-config-id="${CSS.escape(agentModeControl.id)}"] > button`)?.click())
+    }
+    else if (command.configId) { setExtraControl(command.configId); setConfigError("") }
   }
   const send = async () => {
     const text = draft.trim(), parsed = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
@@ -299,9 +398,16 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     })
   }
   const changeConfig = async (id: string, value: string | boolean) => {
-    if (!activeAgent) return
-    setConfigBusy(true); setError("")
-    try { await setAgentConfig(activeAgent.executionId, id, value) } catch (e) { setError(messageOf(e)) } finally { setConfigBusy(false) }
+    if (!activeAgent) throw new Error("Connect an agent before changing its configuration.")
+    const revision = navigation.current
+    setConfigBusy(true); setConfigError("")
+    try { await setAgentConfig(activeAgent.executionId, id, value) }
+    finally { if (mounted.current && revision === navigation.current) setConfigBusy(false) }
+  }
+  const changeSecondaryConfig = async (id: string, value: string | boolean) => {
+    const revision = navigation.current
+    try { await changeConfig(id, value) }
+    catch (failure) { if (mounted.current && revision === navigation.current) setConfigError(messageOf(failure)) }
   }
   const resume = async () => {
     if (!current) return
@@ -381,19 +487,19 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const recent = threads.filter(row => view !== "project" || context && row.meta.hostKey === context.host && row.meta.folder === context.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || b.meta.activityAt - a.meta.activityAt)
 
   return <section ref={surface} className="agent-workspace" tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
-    onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-command-menu,.agent-advanced,.agent-context-choices')) returnFocus.current = e.target as HTMLElement }}
+    onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices')) returnFocus.current = e.target as HTMLElement }}
     onPointerDown={e => { if (!(e.target as HTMLElement).closest(".agent-thread-menu,.agent-thread-more")) setMenu(null) }}
     onKeyDown={e => {
       e.stopPropagation()
-      if (!dialogOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") { e.preventDefault(); setSidebar(false); setAdvanced(false); setProjectChoices(false); if (!showComposer) newThread(); setCommandQuery(""); setCommandOpen(true) }
+      if (!dialogOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") { e.preventDefault(); setSidebar(false); setProjectChoices(false); setModelMenu(null); if (!showComposer) newThread(); setCommandQuery(""); setCommandOpen(true) }
       if (!folderOpen && !timelineOpen && !deleting && !historyAction && (e.ctrlKey || e.metaKey) && e.key === "\\") {
         e.preventDefault()
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (advanced) setAdvanced(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
       if (e.key === "Tab") {
-        const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || (review && matchMedia("(max-width: 1000px)").matches ? surface.current?.querySelector(".agent-review") : null) || (advanced ? settingsPopover.current : projectChoices ? projectPopover.current : null) || surface.current
+        const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || (review && matchMedia("(max-width: 1000px)").matches ? surface.current?.querySelector(".agent-review") : null) || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
         if (e.shiftKey && (document.activeElement === elements[0] || document.activeElement === surface.current)) { e.preventDefault(); elements.at(-1)?.focus() }
         else if (!e.shiftKey && document.activeElement === elements.at(-1)) { e.preventDefault(); elements[0]?.focus() }
@@ -462,7 +568,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       </header>
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       <div className="agent-workbody">
-      <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""} ${current?.pendingPermission || current?.pendingInput ? "has-request" : ""}`}>
+      <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`}>
       {view === "settings" ? <section className="agent-setup">
         <div className="agent-settings-heading"><h1>Agent settings</h1><p>Use the coding agents already installed on your server.</p></div>
         <label className="agent-field">Server<select aria-label="Settings server" value={host} onChange={e => selectHost(e.target.value)}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label>
@@ -477,32 +583,36 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       </section> : <>
         <div ref={scroll.viewport} className="agent-conversation" tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
           <div ref={scroll.content} className="agent-message-list">
-            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{current.turnActive && !current.pendingInput && !current.pendingPermission && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={() => setReview(true)} />}</>
+            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{current.turnActive && !current.pendingInput && !current.pendingPermission && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={() => setReview(true)} />}</>
               : startScreen ? <div className="agent-welcome"><div className="agent-welcome-symbol"><StillAgentMark size={48} /></div><h1>What will you build?</h1><p>A fresh idea. A tricky bug. Your next great thing.</p>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
         </div>
         {showComposer && <div className="agent-composer-area">
-          {!scroll.atLatest && current && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
-          {current?.state === "saved" ? <><div className="agent-saved-notice"><span><AgentIcon name="check" size={15} />Saved on this device</span>{canResumeAgentThread(current) && (connectedHere ? <button className="agent-button" disabled={busy} onClick={() => void resume()}>Resume conversation</button> : <button className="agent-button" onClick={() => { if (current.meta.hostKey === host) void onConnect?.(); else selectHost(current.meta.hostKey) }}>Connect to resume</button>)}</div>{current.meta.hostKey === host && !connected && connectionNotice}</> : session && connectionNotice}
-          {current?.pendingPermission && <PermissionCard request={current.pendingPermission} busy={busy} respond={option => void run(() => respondAgentPermission(current.executionId, current.pendingPermission!.requestId, option))} />}
-          {current?.pendingInput && <InputCard key={`${current.executionId}:${current.pendingInput.requestId}`} request={current.pendingInput} busy={busy} respond={answers => void run(() => nativeBridge.agentRespondInput(current.executionId, current.pendingInput!.requestId, answers))} />}
+          {!scroll.atLatest && current && !activeRequestItem && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
+          {activeRequestItem && current && <button className={`agent-request-jump ${activeRequestKind === "permission" ? "is-approval" : "is-question"}`} onClick={() => {
+            if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)
+            else { findMessage(activeRequestItem.id); requestAnimationFrame(() => surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(activeRequestItem.id)}"] .agent-request-expand`)?.focus({ preventScroll: true })) }
+          }}><span className="agent-status-dot attention" />{activeRequestKind === "permission" ? "Approval needed" : "Your answer is needed"}<span>Review request</span><AgentIcon name="chevron" size={13} /></button>}
+          {current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{reattaching || current.state === "connecting" ? "Reattaching to the server-side agent…" : "Agent execution is kept on your server"}</span>{onReattach && (connectedHere ? <button className="agent-button" disabled={reattaching || current.state === "connecting"} onClick={() => { setReattaching(true); void onReattach(current).catch(failure => setError(messageOf(failure))).finally(() => setReattaching(false)) }}>Reattach agent</button> : <button className="agent-button" onClick={() => { if (current.meta.hostKey === host) void onConnect?.(); else selectHost(current.meta.hostKey) }}>Connect to reattach</button>)}</div> : current?.state === "saved" ? <><div className="agent-saved-notice"><span><AgentIcon name="check" size={15} />Saved on this device</span>{canResumeAgentThread(current) && (connectedHere ? <button className="agent-button" disabled={busy} onClick={() => void resume()}>Resume conversation</button> : <button className="agent-button" onClick={() => { if (current.meta.hostKey === host) void onConnect?.(); else selectHost(current.meta.hostKey) }}>Connect to resume</button>)}</div></> : null}
+          {session && connectionNotice}
           {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span>{current && canResumeAgentThread(current) && <button className="agent-button" disabled={busy || !connectedHere} onClick={() => void resume()}>Resume conversation</button>}</div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
           <form className="agent-composer" onSubmit={e => { e.preventDefault(); void send() }}>
             {commandOpen && <CommandPicker commands={commands} query={commandQuery} onQuery={setCommandQuery} onSelect={chooseCommand} onClose={() => { setCommandOpen(false); textarea.current?.focus() }} loading={catalogBusy || preparing && !preparation.ready && !preparation.error} error={catalogError || preparation.error} refresh={() => void refreshCatalog()} />}
-            <textarea ref={textarea} aria-label="Message agent" rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setAdvanced(false); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <textarea ref={textarea} aria-label="Message agent" rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current ? <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} /> : <span className="agent-composer-provider"><AgentProviderMark id={current.agentId} size={20} />{current.agentName}</span>}
-                {fields.filter(option => option.category === "model").map(option => <ConfigPicker key={`${activeAgent?.meta.id || "draft"}:${option.id}`} option={option} disabled={!idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={(id, value) => void changeConfig(id, value)} />)}
+                <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Resume this conversation to change its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
+                {agentModeControl && <ConfigPicker key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
-              <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setAdvanced(false); setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button><button type="button" className="agent-icon-button" data-agent-popover-trigger aria-label="Conversation settings" title="Conversation settings" aria-haspopup="dialog" aria-expanded={advanced} onClick={() => { setCommandOpen(false); setProjectChoices(false); setAdvanced(!advanced) }}><AgentIcon name="settings" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
+              <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
             </div>
-            {advanced && <div ref={settingsPopover} className="agent-advanced" role="dialog" aria-label="Conversation settings"><div className="agent-advanced-header"><strong>Conversation settings</strong><button type="button" className="agent-icon-button" aria-label="Close conversation settings" onClick={() => setAdvanced(false)}><AgentIcon name="close" size={15} /></button></div>{fields.filter(option => option.category !== "model").map(option => <div className="agent-setting-row" key={option.id}><span>{option.name}</span><ConfigPicker option={option} disabled={!idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={(id, value) => void changeConfig(id, value)} /></div>)}{!fields.length && <p>{current || preparation.ready ? "This agent has not reported any configurable settings." : context ? "Connecting the selected agent to load its models and settings." : "Choose a project to load agent settings."}</p>}{current && current.state !== "saved" && <button type="button" className="agent-button" disabled={busy} onClick={() => void run(() => refreshAgentThread(current.executionId))}><AgentIcon name="refresh" size={14} />Refresh session</button>}</div>}
           </form>
-          <div className="agent-composer-footnote">{context ? <div className="agent-context-line"><AgentIcon name="folder" size={13} /><span title={context.folder}>{context.folder}</span><small title={hostLabel(context.host)}>{hostLabel(context.host)}</small>{!current && <button type="button" data-agent-popover-trigger aria-label="Change project" title="Change project" aria-haspopup="dialog" aria-expanded={projectChoices} onClick={() => { setAdvanced(false); setCommandOpen(false); setProjectChoices(!projectChoices) }}><AgentIcon name="chevron" size={11} /></button>}</div> : <button type="button" className="agent-choose-project" data-agent-popover-trigger aria-haspopup="dialog" aria-expanded={projectChoices || folderOpen} onClick={() => { setAdvanced(false); setCommandOpen(false); if (projects.length) setProjectChoices(!projectChoices); else chooseFolder() }}><AgentIcon name="folder" size={14} /><span>Choose project</span><AgentIcon name="chevron" size={11} style={{ transform: "rotate(90deg)" }} /></button>}<span>{discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : "↵ Send · ⇧↵ New line · / Commands"}</span></div>
+          {configError && !extraControl && <p className="agent-model-error" role="alert">{configError}</p>}
+          <div className="agent-composer-footnote">{context ? <div className="agent-context-line"><AgentIcon name="folder" size={13} /><span title={context.folder}>{context.folder}</span><small title={hostLabel(context.host)}>{hostLabel(context.host)}</small>{!current && <button type="button" data-agent-popover-trigger aria-label="Change project" title="Change project" aria-haspopup="dialog" aria-expanded={projectChoices} onClick={() => { setCommandOpen(false); setProjectChoices(!projectChoices) }}><AgentIcon name="chevron" size={11} /></button>}</div> : <button type="button" className="agent-choose-project" data-agent-popover-trigger aria-haspopup="dialog" aria-expanded={projectChoices || folderOpen} onClick={() => { setCommandOpen(false); if (projects.length) setProjectChoices(!projectChoices); else chooseFolder() }}><AgentIcon name="folder" size={14} /><span>Choose project</span><AgentIcon name="chevron" size={11} style={{ transform: "rotate(90deg)" }} /></button>}<span>{discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : "↵ Send · ⇧↵ New line · / Commands"}</span></div>
         </div>}
         {startScreen && <div className="agent-launch-extras"><div className="agent-starters">{promptStarters.map(starter => <button key={starter.label} disabled={!!draft.trim() || busy} onClick={() => useStarter(starter.prompt)}><AgentIcon name={starter.icon} size={16} /><span>{starter.label}</span></button>)}</div>{recent.length > 0 && <section className="agent-recents"><div className="agent-section-label"><span>Pick up where you left off</span><button className="agent-link-button" onClick={() => revealProjects(true)}>View all {recent.length} conversations <AgentIcon name="chevron" size={12} /></button></div>{recent.slice(0, 3).map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</section>}<p className="agent-launch-note"><AgentIcon name="check" size={12} />Conversations stay on this device. Your agent runs on your server.</p></div>}
       </>}
@@ -511,6 +621,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       </div>
       {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
+    {expandedItem && <div className="agent-confirm-backdrop agent-request-backdrop"><AgentRequest key={expandedItem.id} item={expandedItem} actions={requestActions} expanded /></div>}
+    {extraControl && <div className="agent-confirm-backdrop"><section className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-label={fields.find(option => option.id === extraControl)?.name || "Agent control"}><div className="agent-modal-heading"><h2>{fields.find(option => option.id === extraControl)?.name || "Agent control"}</h2><button className="agent-icon-button" aria-label="Close agent control" onClick={() => setExtraControl(null)}><AgentIcon name="close" /></button></div>{fields.filter(option => option.id === extraControl).map(option => <div key={option.id}>{option.description && <p>{option.description}</p>}<ConfigPicker option={option} disabled={!connectedHere || !idle(activeAgent) || configBusy} change={changeSecondaryConfig} /></div>)}{configError && <p className="agent-model-error" role="alert">{configError}</p>}</section></div>}
     {historyAction && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-history-confirm" role="dialog" aria-modal="true" aria-labelledby="agent-history-title"><h2 id="agent-history-title">{historyAction.retry ? "Retry this message?" : "Revert to this message?"}</h2><p>{historyAction.retry ? "Return to before this message and send it again with the currently selected model." : "Return to before this message. Its replies and later messages will leave the active conversation."}</p><blockquote>{historyAction.message.text.slice(0, 240)}{historyAction.message.text.length > 240 ? "…" : ""}</blockquote><p>Project files stay as they are. {current.agentId === "pi" ? "Pi continues from a fork at this point." : "This updates the agent’s conversation history."}</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" disabled={busy} onClick={() => setHistoryAction(null)}>Cancel</button><button className="agent-primary" disabled={busy || !connectedHere || !canChangeAgentHistory(current, historyAction.message.messageId || "", historyAction.retry)} onClick={() => void applyHistoryAction()}>{busy ? "Updating history…" : historyAction.retry ? "Retry message" : "Revert conversation"}</button></div></section></div>}
     {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{items.filter(item => ["user", "assistant"].includes(item.kind) && item.text.toLowerCase().includes(timelineQuery.toLowerCase())).map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>)}</div></section></div>}
     {folderOpen && <div className="agent-confirm-backdrop"><section className="agent-modal agent-folder-picker" role="dialog" aria-modal="true" aria-labelledby="agent-project-title"><div className="agent-modal-heading"><div><h2 id="agent-project-title">Choose a project</h2><p>A folder on the server where your agent will work.</p></div><button className="agent-icon-button" aria-label="Close project picker" onClick={closeFolder}><AgentIcon name="close" /></button></div>

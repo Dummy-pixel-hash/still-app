@@ -12,6 +12,7 @@ export function useAgentConnection(session: Session | null, askAuth: AskSessionA
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(true), attempted = useRef("")
+  const everConnected = useRef(false), retries = useRef(0)
   const connecting = useRef("")
   const callbacks = useRef({ askAuth, keyTextFor, session })
   callbacks.current = { askAuth, keyTextFor, session }
@@ -30,9 +31,48 @@ export function useAgentConnection(session: Session | null, askAuth: AskSessionA
   }, [localId])
   useEffect(() => {
     mounted.current = true
+    everConnected.current = connectionState(localId) === "connected"
+    retries.current = 0
     if (session && attempted.current !== localId) { attempted.current = localId; setError(null); void connect() }
     return () => { mounted.current = false }
   }, [localId, connect, !!session])
+  useEffect(() => {
+    if (state === "connected") { everConnected.current = true; retries.current = 0 }
+  }, [state])
+  useEffect(() => {
+    if (!session) return
+    let cancelled = false
+    const recover = async () => {
+      if (cancelled || !everConnected.current || document.visibilityState === "hidden" || hostKeyPromptFor(localId) || isConnectPending(localId)) return
+      const target = callbacks.current.session
+      if (!target || agentConnectionId(target) !== localId) return
+      // Never turn a wake event into an unsolicited password dialog.
+      const stored = target.authMethod === "key" && target.keyId
+        ? !!callbacks.current.keyTextFor(target.keyId) || await nativeBridge.hasKeySecret(target.keyId).catch(() => false)
+        : await nativeBridge.hasCredential(target.host,target.port,target.username).catch(() => false)
+      if (!stored || cancelled) return
+      const id = nativeSessionId(localId)
+      if (connectionState(localId) === "connected" && id) {
+        const status = await nativeBridge.status(id).catch(() => null)
+        if (cancelled || nativeSessionId(localId) !== id) return
+        if (status && ["live", "connected"].includes(status.status.toLowerCase())) return
+        await disconnectSession(localId,{ silent: true })
+      }
+      if (!cancelled) await connect()
+    }
+    const wake = () => { void recover() }
+    let lastTick = Date.now()
+    const sleepWatch = setInterval(() => {
+      const now = Date.now(), gap = now - lastTick
+      lastTick = now
+      if (gap > 30000) wake()
+    },15000)
+    window.addEventListener("online",wake)
+    window.addEventListener("focus",wake)
+    document.addEventListener("visibilitychange",wake)
+    const timer = state === "error" && everConnected.current ? setTimeout(wake,Math.min(30000,1000 * 2 ** Math.min(retries.current++,5))) : undefined
+    return () => { cancelled = true; clearInterval(sleepWatch); clearTimeout(timer); window.removeEventListener("online",wake); window.removeEventListener("focus",wake); document.removeEventListener("visibilitychange",wake) }
+  }, [localId, state, connect, !!session])
   return { localId, state, busy, error: error || connectionError(localId), nativeId: nativeSessionId(localId), hostPrompt: hostKeyPromptFor(localId), connect }
 }
 export function AgentConnectionNotice({ connection }: { connection: ReturnType<typeof useAgentConnection> }) {

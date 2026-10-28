@@ -1,7 +1,8 @@
 import type { CSSProperties } from "react"
 
-export type AgentIconName = "back" | "chevron" | "plus" | "folder" | "chat" | "search" | "more" | "close" | "arrow" | "stop" | "settings" | "terminal" | "check" | "pin" | "archive" | "trash" | "edit" | "panel" | "refresh" | "code" | "file" | "command"
+export type AgentIconName = "back" | "chevron" | "plus" | "folder" | "chat" | "search" | "more" | "close" | "arrow" | "stop" | "settings" | "terminal" | "check" | "pin" | "archive" | "trash" | "edit" | "panel" | "refresh" | "code" | "file" | "command" | "expand"
 const paths: Record<AgentIconName, string> = {
+  expand: "M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7",
   back: "m14 6-6 6 6 6M8 12h12", chevron: "m9 5 7 7-7 7", plus: "M12 5v14M5 12h14",
   folder: "M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z", chat: "M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z",
   search: "M16 16l5 5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0", more: "M5 12h.01M12 12h.01M19 12h.01",

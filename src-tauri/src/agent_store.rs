@@ -162,8 +162,12 @@ fn replay(records: Vec<Record>) -> Result<Value, String> {
                 }
                 let mut value = serde_json::to_value(&event).map_err(|e| e.to_string())?;
                 if matches!(event.kind.as_str(), "permission" | "input") {
-                    value["type"] = json!("notice");
-                    value["text"] = json!(event.permission.as_ref().and_then(|v| v["title"].as_str()).or_else(|| event.input.as_ref().and_then(|v| v["title"].as_str())).unwrap_or("Agent requested input"));
+                    let permission = event.kind == "permission";
+                    let request_id = event.permission.as_ref().and_then(|value| value.get("requestId")).or_else(|| event.input.as_ref().and_then(|value| value.get("requestId"))).cloned().unwrap_or(Value::Null);
+                    let title = event.permission.as_ref().and_then(|value| value["title"].as_str()).or_else(|| event.input.as_ref().and_then(|value| value["title"].as_str())).unwrap_or("Agent requested input");
+                    value["type"] = json!("agentRequest");
+                    value["request"] = json!({"requestId":request_id,"kind":if permission {"permission"} else {"question"},"title":title});
+                    value["text"] = json!(title);
                     value.as_object_mut().unwrap().remove("permission");
                     value.as_object_mut().unwrap().remove("input");
                 }
@@ -195,7 +199,16 @@ fn fields(snapshot: &Snapshot) -> Value {
         "agentId": snapshot.agent_id, "agentName": snapshot.agent_name,
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
-        "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities})
+        "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities,
+        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required})
+}
+
+pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, StillError> {
+    disk(app, move |root| {
+        if file(root, &id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let row = replay(records(&file(root, &id, "jsonl")?, &mut Vec::new())?)?;
+        serde_json::from_value(row).map_err(|error| error.to_string())
+    }).await
 }
 
 async fn disk<T: Send + 'static>(app: &AppHandle, operation: impl FnOnce(&Path) -> Result<T, String> + Send + 'static) -> Result<T, StillError> {
@@ -255,16 +268,30 @@ pub async fn event(app: &AppHandle, snapshot: &Snapshot, event: &Event) -> Resul
     let mut header = fields(snapshot);
     if let Some(configs) = &event.config_options { header["configOptions"] = json!(configs); }
     if let Some(commands) = &event.commands { header["commands"] = commands.clone(); }
-    if matches!(event.kind.as_str(), "userMessage" | "threadComplete" | "threadError" | "permission" | "input") { header["touchedAt"] = json!(timestamp()); }
-    let mut event = event.clone();
-    if matches!(event.kind.as_str(), "permission" | "input") {
-        event.text = Some(format!("{}: {}", if event.kind == "permission" { "Approval requested" } else { "Input requested" }, event.permission.as_ref().and_then(|v| v["title"].as_str()).or_else(|| event.input.as_ref().and_then(|v| v["title"].as_str())).unwrap_or("Agent needs input")));
-        event.kind = "notice".into(); event.permission = None; event.input = None;
-    }
+    if matches!(event.kind.as_str(), "userMessage" | "threadComplete" | "threadError" | "permission" | "input" | "requestOutcome") { header["touchedAt"] = json!(timestamp()); }
+    let event = history_event(event);
     disk(app, move |root| {
         if file(root, &id, "deleted")?.exists() { return Ok(()); }
         append(&file(root, &id, "jsonl")?, &Record::Event { fields: header, event })
     }).await
+}
+
+/// Keep request identity and outcomes in history; unfinished form values remain in memory.
+fn history_event(event: &Event) -> Event {
+    let mut event = event.clone();
+    if matches!(event.kind.as_str(), "permission" | "input") {
+        let permission = event.kind == "permission";
+        let request = event.permission.as_ref().or(event.input.as_ref());
+        event.request = request.map(|request| json!({
+            "requestId":request["requestId"],
+            "kind":if permission {"permission"} else {"question"},
+            "title":request["title"].as_str().unwrap_or("Agent needs input")
+        }));
+        event.kind = "agentRequest".into();
+        event.permission = None;
+        event.input = None;
+    }
+    event
 }
 
 #[tauri::command]
@@ -419,6 +446,19 @@ pub fn report(app: &AppHandle, id: &str, sequence: u64, result: &Result<(), Stil
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_history_retains_identity_and_outcome_without_form_payloads() {
+        let question: Event = serde_json::from_value(json!({"sequence":1,"attemptId":"execution","type":"input","input":{"requestId":"q-1","title":"Choose a branch","schema":{"properties":{"secret":{"type":"string","default":"never-store-this"}}}}})).unwrap();
+        let safe = history_event(&question);
+        assert_eq!(safe.kind,"agentRequest");
+        assert_eq!(safe.request.as_ref().unwrap()["requestId"],"q-1");
+        assert_eq!(safe.request.as_ref().unwrap()["kind"],"question");
+        assert!(!serde_json::to_string(&safe).unwrap().contains("never-store-this"));
+        let outcome: Event = serde_json::from_value(json!({"sequence":2,"attemptId":"execution","type":"requestOutcome","requestOutcome":{"requestId":"q-1","kind":"question","title":"Choose a branch","outcome":"answered"}})).unwrap();
+        let recovered = replay(vec![Record::Create { row:json!({"executionId":"execution","lastSequence":0,"transcript":[]}) },Record::Event {fields:json!({"executionId":"execution","lastSequence":1}),event:safe},Record::Event {fields:json!({"executionId":"execution","lastSequence":2}),event:outcome}]).unwrap();
+        assert_eq!(recovered["transcript"][0]["request"]["requestId"],"q-1");
+        assert_eq!(recovered["transcript"][1]["requestOutcome"]["outcome"],"answered");
+    }
     fn root() -> PathBuf {
         static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("still-history-{}-{}-{}", std::process::id(), timestamp(), ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));

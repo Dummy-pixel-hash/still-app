@@ -1,8 +1,8 @@
-import type { AgentThreadEvent, AgentToolContent } from "./types"
+import type { AgentInputRequest, AgentPermissionRequest, AgentRequestKind, AgentRequestOutcome, AgentRequestSummary, AgentThreadEvent, AgentToolContent } from "./types"
 
 export interface TranscriptItem {
   id: string
-  kind: "user" | "assistant" | "reasoning" | "tool" | "notice"
+  kind: "user" | "assistant" | "reasoning" | "tool" | "notice" | "request"
   text: string
   title?: string
   status?: string
@@ -13,6 +13,13 @@ export interface TranscriptItem {
   locations?: Array<{ path: string; line?: number }>
   messageId?: string
   checkpoint?: Record<string, unknown>
+  requestId?: string | number
+  requestKind?: AgentRequestKind
+  request?: AgentRequestSummary
+  permission?: AgentPermissionRequest
+  agentInput?: AgentInputRequest
+  requestOutcome?: AgentRequestOutcome
+  attemptId?: string
 }
 
 /** Project ACP events into readable messages; protocol sequence remains untouched. */
@@ -21,9 +28,16 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
   let stream: TranscriptItem | undefined
   let messageId: string | undefined
   const tools = new Map<string, TranscriptItem>()
+  const requests = new Map<string, TranscriptItem>()
   let attempt: string | undefined
+  const requestKey = (kind: AgentRequestKind, id: string | number) => JSON.stringify([kind, id])
+  const expireRequests = () => {
+    for (const item of requests.values()) if (!item.requestOutcome) item.requestOutcome = {
+      requestId: item.requestId!, kind: item.requestKind!, title: item.title || "Agent request", outcome: "uncertain",
+    }
+  }
   for (const event of events) {
-    if (event.attemptId !== attempt) { attempt = event.attemptId; stream = undefined; tools.clear() }
+    if (event.attemptId !== attempt) { attempt = event.attemptId; stream = undefined; tools.clear(); requests.clear() }
     const key = `${event.attemptId || "legacy"}:${event.sequence}`
     if (event.type === "userMessage") {
       stream = undefined
@@ -60,11 +74,40 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
       if (event.outputDelta) tool.text += event.outputDelta
     } else if (event.type === "notice" && event.text) {
       items.push({ id: `notice-${key}`, kind: "notice", text: event.text })
+    } else if (event.type === "permission" && event.permission) {
+      stream = undefined
+      const request = event.permission
+      const existing = requests.get(requestKey("permission", request.requestId))
+      if (existing && !existing.requestOutcome) { existing.permission = request; continue }
+      const item: TranscriptItem = { id: `request-permission-${key}-${String(request.requestId)}`, kind: "request", attemptId: event.attemptId, title: request.title, text: request.description || "", requestId: request.requestId, requestKind: "permission", permission: request }
+      requests.set(requestKey("permission", request.requestId), item)
+      items.push(item)
+    } else if (event.type === "input" && event.input) {
+      stream = undefined
+      const request = event.input
+      const existing = requests.get(requestKey("question", request.requestId))
+      if (existing && !existing.requestOutcome) { existing.agentInput = request; continue }
+      const item: TranscriptItem = { id: `request-question-${key}-${String(request.requestId)}`, kind: "request", attemptId: event.attemptId, title: request.title, text: "", requestId: request.requestId, requestKind: "question", agentInput: request }
+      requests.set(requestKey("question", request.requestId), item)
+      items.push(item)
+    } else if (event.type === "agentRequest" && event.request) {
+      stream = undefined
+      const request = event.request
+      const item: TranscriptItem = { id: `request-${request.kind}-${key}-${String(request.requestId)}`, kind: "request", attemptId: event.attemptId, title: request.title, text: "", requestId: request.requestId, requestKind: request.kind }
+      requests.set(requestKey(request.kind, request.requestId), item)
+      items.push(item)
+    } else if (event.type === "requestOutcome" && event.requestOutcome) {
+      const result = event.requestOutcome
+      const item = requests.get(requestKey(result.kind, result.requestId))
+      if (item) item.requestOutcome = result
+      else items.push({ id: `request-result-${key}`, kind: "request", attemptId: event.attemptId, title: result.title, text: "", requestId: result.requestId, requestKind: result.kind, requestOutcome: result })
     } else if (event.type === "threadError") {
       stream = undefined
+      expireRequests()
       if (event.text) items.push({ id: `error-${key}`, kind: "notice", status: "error", title: "Agent error", text: event.text })
-    } else if (event.type === "threadComplete" || event.type === "permission") {
+    } else if (event.type === "threadComplete" || event.type === "threadStopped") {
       stream = undefined
+      expireRequests()
     }
   }
   return items

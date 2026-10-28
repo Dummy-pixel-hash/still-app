@@ -13,6 +13,8 @@ const subscribing = new Map<string, Promise<void>>()
 const restored = new Set<string>()
 const tombstones = new Set<string>()
 const historyOperations = new Set<string>()
+const requestOperations = new Set<string>()
+const unconfirmedRequests = new Set<string>()
 const INDEX_KEY = "still.agents.index.v2"
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
   const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
@@ -67,14 +69,22 @@ export function loadAgentThreads() {
 function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (!Number.isSafeInteger(event.sequence) || event.sequence <= row.lastSequence) return
   row.lastSequence = event.sequence
-  if (["userMessage", "threadComplete", "permission", "threadError"].includes(event.type)) { row.touchedAt = Date.now(); row.meta = { ...row.meta, activityAt: row.touchedAt } }
+  if (event.remoteCursor !== undefined) row.remoteCursor = event.remoteCursor
+  if (event.turnActive !== undefined) row.turnActive = event.turnActive
+  if (["userMessage", "threadComplete", "permission", "input", "requestOutcome", "threadError"].includes(event.type)) { row.touchedAt = Date.now(); row.meta = { ...row.meta, activityAt: row.touchedAt } }
   if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "" } }
   if (event.type === "threadState" && event.state) {
     row.state = event.state
+    if (event.state === "detached") row.lastError = event.text || "The agent continues on the server. Reattach to catch up."
+    else if (event.state === "working" || event.state === "connecting") row.lastError = undefined
     if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined }
   }
   if (event.type === "permission" && event.permission) { row.pendingPermission = event.permission; row.state = "inputRequired" }
   if (event.type === "input" && event.input) { row.pendingInput = event.input; row.state = "inputRequired" }
+  if (event.type === "requestOutcome" && event.requestOutcome) {
+    if (event.requestOutcome.kind === "permission" && row.pendingPermission?.requestId === event.requestOutcome.requestId) row.pendingPermission = undefined
+    if (event.requestOutcome.kind === "question" && row.pendingInput?.requestId === event.requestOutcome.requestId) row.pendingInput = undefined
+  }
   if (event.type === "threadComplete") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "complete"; row.lastError = undefined; row.meta = { ...row.meta, submissionUnknown: false } }
   if (event.type === "threadStopped") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = true; row.state = "working"; row.lastError = event.text || "Waiting for remote cancellation confirmation." }
   if (event.type === "configOptions" && event.configOptions) row.configOptions = event.configOptions
@@ -96,7 +106,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
     row.transcript = [...row.transcript.slice(0, -1), { ...last, endSequence: event.sequence, text: (last.text || "") + (event.text || "") }]
   } else row.transcript = [...row.transcript, event]
   // Streaming chunks need not synchronously serialize the whole history every token.
-  if (["userMessage", "threadComplete", "permission", "threadError", "historyReverted"].includes(event.type)) persist(row)
+  if (["userMessage", "threadComplete", "permission", "input", "requestOutcome", "threadError", "historyReverted"].includes(event.type)) persist(row)
   if (["assistantChunk", "reasoningChunk", "toolUpdate"].includes(event.type)) scheduleRender()
   else emit()
 }
@@ -142,6 +152,21 @@ export async function refreshAgentThread(id: string) {
   restored.delete(id)
   emit()
 }
+const attaching = new Map<string, Promise<void>>()
+export function reattachAgentThread(id: string, nativeId: string): Promise<void> {
+  const current = attaching.get(id)
+  if (current) return current
+  const row = rows.get(id)
+  if (!row?.persistent || !nativeId) return Promise.reject(new Error("Connect this conversation’s server before reattaching."))
+  const task = (async () => {
+    await nativeBridge.agentAttach(nativeId,id,row.meta.id)
+    restored.delete(id)
+    if (!subscriptions.has(id)) await subscribeRemoteAgent(id)
+    await refreshAgentThread(id)
+  })().finally(() => attaching.delete(id))
+  attaching.set(id,task)
+  return task
+}
 export async function refreshAgentCommands(id: string, load: () => Promise<AgentCatalog>) {
   const catalog = await load(), row = rows.get(id)
   if (row) { row.commands = catalog.commands; emit() }
@@ -160,7 +185,8 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
       subscriptions.get(id)?.(); subscriptions.delete(id)
       const row = rows.get(id)
       if (row) {
-        row.state = "submissionUnknown"; row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false
+        row.state = row.persistent ? "detached" : "submissionUnknown"
+        if (!row.persistent) { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false }
         row.lastError = restored.has(id) ? row.resumable ? "This conversation is saved. Resume it to continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." : error instanceof Error ? error.message : "Remote process is unavailable. Inspect the server before retrying."
         emit()
       }
@@ -186,7 +212,35 @@ export async function sendAgentMessage(id: string, message: string, duringHistor
 export async function respondAgentPermission(id: string, requestId: string | number, optionId: string) {
   const row = rows.get(id)
   if (!row?.pendingPermission || row.pendingPermission.requestId !== requestId || !row.pendingPermission.options.some(option => option.optionId === optionId)) throw new Error("This permission is stale. Refresh the agent thread.")
-  await nativeBridge.agentRespondPermission(id, requestId, optionId)
+  await respondToRequest(id, "permission", requestId, () => nativeBridge.agentRespondPermission(id, requestId, optionId))
+}
+export async function respondAgentInput(id: string, requestId: string | number, answers: Record<string, unknown> | null) {
+  const row = rows.get(id)
+  if (!row?.pendingInput || row.pendingInput.requestId !== requestId) throw new Error("This question is stale. Refresh the agent thread.")
+  await respondToRequest(id, "question", requestId, () => nativeBridge.agentRespondInput(id, requestId, answers))
+}
+async function respondToRequest(id: string, kind: "question" | "permission", requestId: string | number, send: () => Promise<void>) {
+  const key = JSON.stringify([id, kind, requestId])
+  const row = rows.get(id)
+  if (!row || restored.has(id) || ["saved", "error", "submissionUnknown", "rewinding"].includes(row.state)) throw new Error("Reconnect and refresh this request before responding.")
+  if (requestOperations.has(key)) return
+  if (unconfirmedRequests.has(key)) throw new Error("Delivery was not confirmed. Check request status before responding again.")
+  requestOperations.add(key)
+  try {
+    await send()
+    await refreshAgentThread(id)
+  } catch (failure) {
+    unconfirmedRequests.add(key)
+    try { await refreshAgentThread(id) } catch {}
+    const message = failure && typeof failure === "object" && "message" in failure ? String(failure.message) : String(failure)
+    throw new Error(message)
+  } finally { requestOperations.delete(key) }
+}
+export async function reconcileAgentRequest(id: string, kind: "question" | "permission", requestId: string | number) {
+  await refreshAgentThread(id)
+  const row = rows.get(id)
+  if (!row || ["error", "submissionUnknown", "saved"].includes(row.state)) throw new Error("The agent is unavailable. Reconnect before retrying this request.")
+  unconfirmedRequests.delete(JSON.stringify([id, kind, requestId]))
 }
 export function cancelAgentTurn(id: string) { return nativeBridge.agentCancel(id) }
 export async function startRemoteAgent(nativeId: string, localId: string, agentId: string, options?: AgentLaunchOptions, owner?: Session, onCreated?: (row: AgentThreadRow) => void) {
@@ -310,6 +364,9 @@ export async function changeAgentHistory(id: string, messageId: string, retry: b
 export async function setAgentConfig(id: string, configId: string, value: string | boolean) {
   const row = rows.get(id)
   if (!row || row.turnActive || historyOperations.has(id) || !["working", "complete", "cancelled"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
-  await nativeBridge.agentSetConfig(id, configId, value)
-  await refreshAgentThread(id)
+  if (configOperations.has(id)) throw new Error("Wait for the previous setting update.")
+  configOperations.add(id)
+  try { await nativeBridge.agentSetConfig(id, configId, value); await refreshAgentThread(id) }
+  finally { configOperations.delete(id) }
 }
+const configOperations = new Set<string>()

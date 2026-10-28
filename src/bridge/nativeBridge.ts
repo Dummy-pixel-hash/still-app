@@ -171,6 +171,7 @@ export interface NativeBridge extends OrbBridge {
   agentRevert(executionId:string,messageId:string,expectedSequence:number):Promise<AgentThreadSnapshot>
   agentSetConfig(executionId:string,configId:string,value:string|boolean):Promise<void>
   agentRespondPermission(executionId:string,requestId:string|number,optionId:string):Promise<void>
+  agentAttach(nativeSessionId:string,executionId:string,conversationId:string):Promise<AgentThreadSnapshot>
   agentCancel(executionId:string):Promise<void>
   agentClose(executionId:string):Promise<void>
   agentRespondInput(executionId:string,requestId:string|number,answers:Record<string,unknown>|null):Promise<void>

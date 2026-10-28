@@ -8,6 +8,7 @@ export type AgentThreadState =
   | "submissionUnknown"
   | "rewinding"
   | "saved"
+  | "detached"
 
 export type AgentEventType =
   | "userMessage"
@@ -29,6 +30,8 @@ export type AgentEventType =
   | "messageCheckpoint"
   | "historyReverted"
   | "historyCapabilities"
+  | "agentRequest"
+  | "requestOutcome"
 
 export interface AgentHistoryCapabilities { revert: boolean; retry: boolean }
 
@@ -48,6 +51,21 @@ export interface AgentPermissionRequest {
   rawInput?: Record<string, unknown>
   content?: AgentToolContent[]
   options: AgentPermissionOption[]
+}
+
+export type AgentRequestKind = "question" | "permission"
+export type AgentRequestOutcomeKind = "answered" | "dismissed" | "approved" | "rejected" | "cancelled" | "uncertain"
+export interface AgentRequestSummary {
+  requestId: string | number
+  kind: AgentRequestKind
+  title: string
+}
+export interface AgentRequestOutcome {
+  requestId: string | number
+  kind: AgentRequestKind
+  title: string
+  outcome: AgentRequestOutcomeKind
+  responseLabel?: string
 }
 
 export interface AgentConfigOptionValue { value: string; name: string; description?: string }
@@ -86,16 +104,34 @@ export interface AgentThreadEvent {
   outputDelta?: string
   checkpoint?: Record<string, unknown>
   historyCapabilities?: AgentHistoryCapabilities
+  request?: AgentRequestSummary
+  requestOutcome?: AgentRequestOutcome
+  remoteCursor?: number
+  turnActive?: boolean
 }
 
+export interface AgentInputField {
+  title?: string
+  description?: string
+  type?: string
+  enum?: string[]
+  oneOf?: Array<{ const: string; title?: string; description?: string }>
+  items?: { enum?: string[]; oneOf?: Array<{ const: string; title?: string; description?: string }> }
+  minimum?: number
+  maximum?: number
+  minLength?: number
+  maxLength?: number
+  minItems?: number
+  maxItems?: number
+}
 export interface AgentInputRequest {
   requestId: string | number
   title: string
-  schema: { properties?: Record<string, { title?: string; description?: string; type?: string; enum?: string[]; oneOf?: Array<{ const: string; title?: string }>; items?: { enum?: string[] } }>; required?: string[] }
+  schema: { properties?: Record<string, AgentInputField>; required?: string[] }
 }
 
 export interface AgentPlanEntry { content: string; status: string; priority?: string }
-export interface AgentCommand { name: string; aliases?: string[]; description: string; input?: { hint: string }; source?: string; route?: "command" | "skill" | "client"; unavailable?: string }
+export interface AgentCommand { name: string; aliases?: string[]; description: string; input?: { hint: string }; source?: string; route?: "command" | "skill" | "client"; unavailable?: string; configId?: string }
 export type AgentToolContent =
   | { type: "content"; content: { type: string; text?: string } }
   | { type: "diff"; path: string; oldText?: string | null; newText: string }
@@ -125,6 +161,9 @@ export interface AgentThreadSnapshot {
   historyCapabilities?: AgentHistoryCapabilities
   /** Full active message identities supplied by a live native snapshot. */
   activeMessageIds?: string[]
+  persistent?: boolean
+  remoteCursor?: number
+  promptId?: string | number
 }
 
 export interface AgentLibrary {

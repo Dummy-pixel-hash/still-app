@@ -63,6 +63,14 @@ return to Still. Turn it on in **Settings → Orb companion**. Agent-specific
 approval and completion detection isn't wired yet, so silence never means
 “done.” See [orb behavior and verification](ORB.md).
 
+**Agents that aren't tied to your laptop's SSH channel.** The Agents panel
+starts new executions in private server-side workers. Closing the lid or powering
+off the client detaches the connection; reconnecting catches up with the same
+execution instead of resending its prompt. The remote server must stay running,
+and Node.js 20+ is required there. Model and reasoning controls share one menu;
+questions and approvals have explicit, keyboard-accessible response panels.
+See [agent controls, persistence, and limitations](docs/agents-ui-and-persistence.md).
+
 **Security that doesn't take shortcuts.** Passwords and keys live in the OS
 keyring, never app storage. Unknown hosts need an explicit trust decision;
 changed host keys are refused, never silently overwritten.

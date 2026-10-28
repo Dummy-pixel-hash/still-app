@@ -332,7 +332,7 @@ export class CodexDriver extends Driver {
           const decision = await this.permission(p.itemId, p.command || p.reason || "Approve agent operation", p, ["accept", "decline"])
           result = { decision }
         } else if (method === "item/tool/requestUserInput") {
-          const properties = Object.fromEntries((p.questions || []).map(q => [q.id, { type: "string", title: q.header, description: q.question, ...(q.options?.length ? { enum: q.options.map(o => o.label) } : {}) }]))
+          const properties = Object.fromEntries((p.questions || []).map(q => [q.id, { type: "string", title: q.header, description: q.question, ...(q.options?.length ? { oneOf: q.options.map(o => ({ const:o.label,title:o.label,description:o.description })) } : {}) }]))
           const answers = await this.form("Codex needs your input", properties)
           result = { answers: Object.fromEntries((p.questions || []).map(q => [q.id, { answers: answers?.[q.id] ? [answers[q.id]] : [] }])) }
         } else throw new Error(`Unsupported Codex request: ${method}`)
@@ -399,7 +399,7 @@ export class ClaudeDriver extends Driver {
         if (p.subtype !== "can_use_tool") throw new Error(`Unsupported Claude request: ${p.subtype}`)
         let result
         if (p.tool_name === "AskUserQuestion") {
-          const props = Object.fromEntries((p.input?.questions || []).map((q, i) => [String(i), { type: q.multiSelect ? "array" : "string", title: q.header, description: q.question, ...(q.options ? q.multiSelect ? { items: { enum: q.options.map(o => o.label) } } : { enum: q.options.map(o => o.label) } : {}) }]))
+          const props = Object.fromEntries((p.input?.questions || []).map((q, i) => [String(i), { type: q.multiSelect ? "array" : "string", title: q.header, description: q.question, ...(q.options ? q.multiSelect ? { items: { oneOf: q.options.map(o => ({const:o.label,title:o.label,description:o.description})) } } : { oneOf: q.options.map(o => ({const:o.label,title:o.label,description:o.description})) } : {}) }]))
           const answers = await this.form(p.title || "Claude needs your input", props)
           result = answers ? { behavior: "allow", updatedInput: { ...p.input, answers: Object.fromEntries(p.input.questions.map((q, i) => [q.question, Array.isArray(answers[String(i)]) ? answers[String(i)].join(", ") : answers[String(i)]])) } } : { behavior: "deny", message: "User dismissed the question" }
         } else {
@@ -632,7 +632,7 @@ export class OpenCodeDriver extends Driver {
       const properties = Object.fromEntries((form.fields || []).filter(field => !field.hidden).map(field => [field.key, {
         title: field.title || field.key, description: field.description,
         type: field.type === "multiselect" ? "array" : field.type,
-        ...(field.options?.length ? field.type === "multiselect" ? { items: { enum: field.options.map(option => option.value) } } : { oneOf: field.options.map(option => ({ const: option.value, title: option.label })) } : {}),
+        ...(field.options?.length ? field.type === "multiselect" ? { items: { oneOf: field.options.map(option => ({ const:option.value,title:option.label,description:option.description })) } } : { oneOf: field.options.map(option => ({ const: option.value, title: option.label, description:option.description })) } : {}),
       }]))
       const answer = await this.form(form.title, properties, (form.fields || []).filter(field => field.required && !field.hidden).map(field => field.key))
       if (answer) await this.http("POST", `/api/session/${this.id}/form/${encodeURIComponent(form.id)}/reply`, { answer })

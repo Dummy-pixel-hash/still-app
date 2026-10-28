@@ -5,7 +5,7 @@ import AgentWorkspace from "../src/components/AgentWorkspace"
 import { AGENTS, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
 import { nativeBridge, registerNativeBridge } from "../src/bridge/nativeBridge"
 import { mockBridge } from "../src/bridge/mockBridge"
-import { startRemoteAgent } from "../src/session/agentThreads"
+import { reattachAgentThread, startRemoteAgent } from "../src/session/agentThreads"
 import Workspace from "../src/screens/Workspace"
 import { hostKey } from "../src/agents/workspace"
 import { flushAgentSaves } from "../src/session/agentStorage"
@@ -16,12 +16,13 @@ import "./demo.css"
 const snapshots = new Map<string, AgentThreadSnapshot>()
 const sinks = new Map<string, (event: AgentThreadEvent) => void>()
 const preview = new URLSearchParams(location.search).has("demo") && !new URLSearchParams(location.search).has("workspace")
-const libraryKey = preview ? "still.test.agent-demo-library.v1" : "still.test.agent-library"
+const scenario = preview ? new URLSearchParams(location.search).get("scenario") : null
+const libraryKey = preview ? `still.test.agent-demo-library.v2${scenario ? `.${scenario}` : ""}` : "still.test.agent-library"
 const library = () => JSON.parse(localStorage.getItem(libraryKey) || '{"rows":[],"workspaces":{},"deleted":[]}')
 const saveLibrary = (value: unknown) => { if (h.failSave) throw new Error("Local disk is unavailable"); localStorage.setItem(libraryKey, JSON.stringify(value)) }
 const modelOptions = [
   { id: "model", name: "Model", category: "model", type: "select", currentValue: "a", options: [{ value: "a", name: "Model A" }, { name: "Other", options: [{ value: "b", name: "Model B" }] }] },
-  { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "ask", options: [{ value: "ask", name: "Ask" }, { value: "code", name: "Code" }] },
+  { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "ask", options: [{ value: "ask", name: "Ask", description: "Answer questions before making changes." }, { value: "code", name: "Code", description: "Make changes directly." }] },
   { id: "effort", name: "Reasoning", category: "thought_level", type: "select", currentValue: "medium", options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }] },
 ]
 const projectCommands = [{ name: "review", description: "Review the current changes" }, { name: "compact", description: "Compact this conversation" }, ...Array.from({ length: 25 }, (_, i) => ({ name: `team/command-${i}`, description: `Project command ${i}` })), { name: "skill:security-review", description: "Audit security boundaries", route: "skill" as const, source: "Skill" }]
@@ -31,11 +32,14 @@ const h = {
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
   external: [] as string[],
+  attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   flush: flushAgentSaves,
   saved: library,
   trimSnapshot: (count: number) => { const row = snapshots.get(h.current)!; row.transcript = row.transcript.slice(-count) },
-  rejectConfig: false, rejectSend: false, closed: false, resumable: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
+  rejectConfig: false, rejectSend: false, rejectResponse: false, deferResponse: false, deferConfig: false, unknownResponse: false, failSnapshot: false,
+  releaseResponse: () => {}, releaseConfig: () => {},
+  closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   trustCalls: 0, forgetCalls: 0, deferStartup: false, startupFail: false,
   releaseStartup: () => {},
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
@@ -48,17 +52,24 @@ const h = {
     apply(row.transcript)
     row.transcript.push(value)
     if (event.type === "userMessage") { row.turnActive = true; row.state = "working" }
-    if (event.type === "threadComplete") { row.turnActive = false; row.state = event.state || "working"; row.pendingPermission = undefined; row.lastError = undefined }
-    if (event.type === "threadState" && event.state) row.state = event.state
-    if (event.type === "threadError") { row.state = event.state || "error"; row.lastError = event.text; row.turnActive = false }
+    if (event.type === "threadComplete") { row.turnActive = false; row.state = event.state || "working"; row.pendingPermission = undefined; row.pendingInput = undefined; row.lastError = undefined }
+    if (event.type === "threadState" && event.state) { row.state = event.state; if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined } }
+    if (event.type === "threadError") { row.state = event.state || "error"; row.lastError = event.text; row.turnActive = false; row.pendingInput = undefined; row.pendingPermission = undefined }
     if (event.type === "historyReverted") { row.state = "working"; row.lastError = undefined }
     if (event.type === "permission") { row.pendingPermission = event.permission; row.state = "inputRequired" }
+    if (event.type === "input") { row.pendingInput = event.input; row.state = "inputRequired" }
+    if (event.type === "requestOutcome") { if (event.requestOutcome?.kind === "question") row.pendingInput = undefined; else row.pendingPermission = undefined }
     if (event.type === "configOptions") row.configOptions = event.configOptions!
     if (event.type === "commands") row.commands = event.commands
+    value.turnActive = row.turnActive
     const data = library(), saved = data.rows.find((item: any) => item.conversationId === row.conversationId)
     if (saved) {
       const transcript = saved.transcript; apply(transcript)
-      const next = [...transcript, value]
+      const stored = value.type === "input" || value.type === "permission" ? {
+        sequence: value.sequence, attemptId: value.attemptId, type: "agentRequest",
+        request: { requestId: (value.input || value.permission)!.requestId, title: (value.input || value.permission)!.title, kind: value.type === "input" ? "question" : "permission" },
+      } : value
+      const next = [...transcript, stored]
       row.activeMessageIds = next.filter((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId).map((event: AgentThreadEvent) => event.messageId!)
       Object.assign(saved, structuredClone(row), { transcript: next, pendingInput: null, pendingPermission: null }); saveLibrary(data)
     }
@@ -84,7 +95,7 @@ const h = {
 Object.assign(window, { agentFixture: h })
 registerNativeBridge({
   ...mockBridge,
-  agentLibrary: async () => ({ ...library(), storagePath: "Fixture native-store boundary", warnings: [] }),
+  agentLibrary: async () => ({ ...library(), storagePath: "Fixture native-store boundary", warnings: [], liveExecutions: preview && scenario ? [...snapshots.keys()] : [] }),
   agentMigrate: async (rows, deleted, workspaces) => {
     const data = library(); data.deleted.push(...deleted)
     for (const value of rows) { const row = value as any; const id = row.meta.id; if (!data.deleted.includes(id) && !data.rows.some((item: any) => item.meta.id === id)) data.rows.push({ ...row, conversationId: id }) }
@@ -104,7 +115,7 @@ registerNativeBridge({
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
     const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
-      configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
+      configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, persistent:h.persistent, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
     row.conversationId = options?.conversationId || row.executionId
     row.hostKey = hostKey(session)
     snapshots.set(row.executionId, row)
@@ -122,7 +133,8 @@ registerNativeBridge({
     h.releaseStartups.set(row.executionId, h.releaseStartup)
     return structuredClone(row)
   },
-  agentSnapshot: async id => structuredClone(snapshots.get(id)!),
+  agentSnapshot: async id => { if (h.failSnapshot) throw new Error("Agent connection unavailable"); return structuredClone(snapshots.get(id)!) },
+  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id); if (!row) throw new Error("Persistent worker unavailable"); h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
     if (h.rejectSend) throw new Error("SSH disconnected. Submission is uncertain.")
@@ -154,17 +166,33 @@ registerNativeBridge({
   agentSetConfig: async (id, configId, value) => {
     if (h.rejectConfig) throw new Error("The agent rejected that setting.")
     h.configs.push({ configId, value })
+    if (h.deferConfig) await new Promise<void>(resolve => { h.releaseConfig = resolve })
     const row = snapshots.get(id)!
     row.configOptions.find(option => option.id === configId)!.currentValue = value
     h.emit(id, { type: "configOptions", configOptions: structuredClone(row.configOptions) })
   },
   agentRespondPermission: async (id, requestId, optionId) => {
-    h.approvals.push({ requestId, optionId }); snapshots.get(id)!.pendingPermission = undefined
+    const row = snapshots.get(id)!, request = row.pendingPermission, option = request?.options.find(value => value.optionId === optionId)
+    if (!request || request.requestId !== requestId || !option) throw new Error("This permission is no longer pending")
+    if (h.rejectResponse) throw new Error("Response could not be sent. Check the connection and retry.")
+    if (h.deferResponse) await new Promise<void>(resolve => { h.releaseResponse = resolve })
+    h.approvals.push({ requestId, optionId }); row.pendingPermission = undefined
+    if (request) h.emit(id, { type: "requestOutcome", requestOutcome: { requestId, kind: "permission", title: request.title, outcome: /reject|deny|decline/i.test(`${option?.kind} ${option?.name}`) ? "rejected" : "approved", responseLabel: option?.name } })
     h.emit(id, { type: "threadState", state: "working" })
+    if (h.unknownResponse) throw new Error("Response acknowledgement was lost")
   },
   agentCancel: async id => { h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); h.finish() },
   agentClose: async id => { h.closes.push(id); snapshots.delete(id); sinks.delete(id) },
-  agentRespondInput: async (id, requestId, answers) => { h.inputs.push({ requestId, answers }); snapshots.get(id)!.pendingInput = undefined; h.emit(id, { type: "threadState", state: "working" }) },
+  agentRespondInput: async (id, requestId, answers) => {
+    const row = snapshots.get(id)!, request = row.pendingInput
+    if (!request || request.requestId !== requestId) throw new Error("This question is no longer pending")
+    if (h.rejectResponse) throw new Error("Response could not be sent. Check the connection and retry.")
+    if (h.deferResponse) await new Promise<void>(resolve => { h.releaseResponse = resolve })
+    h.inputs.push({ requestId, answers }); row.pendingInput = undefined
+    if (request) h.emit(id, { type: "requestOutcome", requestOutcome: { requestId, kind: "question", title: request.title, outcome: answers ? "answered" : "dismissed" } })
+    h.emit(id, { type: "threadState", state: "working" })
+    if (h.unknownResponse) throw new Error("Response acknowledgement was lost")
+  },
   hasCredential: async () => !h.requireAuth,
   connect: async args => {
     h.connects.push(args)
@@ -181,9 +209,40 @@ registerNativeBridge({
 
 const session = { id: "agent-fixture", name: "Development", host: "dev.example.test", port: 22, username: "dev", projectId: "still", workingDirectory: "/srv/still", authMethod: "ask" as const, remember: false, tmuxSession: "still-dev", createdAt: 0, updatedAt: 0 }
 if (preview && !localStorage.getItem(libraryKey)) saveLibrary(createAgentDemo(session))
+if (preview && scenario) {
+  const demo = createAgentDemo(session), row = demo.rows[0]
+  row.configOptions = [
+    { id:"model",name:"Model",type:"select",category:"model",currentValue:"anthropic/claude-sonnet-4",options:[{name:"Anthropic",options:[{value:"anthropic/claude-sonnet-4",name:"Claude Sonnet 4",description:"Everyday coding and collaboration"},{value:"anthropic/claude-opus-4",name:"Claude Opus 4",description:"Complex reasoning and architecture"}]},{name:"OpenAI",options:[{value:"openai/gpt-5",name:"GPT-5"}]},{name:"Google",options:[{value:"google/gemini-2.5-pro",name:"Gemini 2.5 Pro"}]}] },
+    { id:"mode",name:"Agent",type:"select",category:"mode",currentValue:"build",options:[{value:"build",name:"Build",description:"Implement changes in your project"},{value:"plan",name:"Plan",description:"Explore and plan before making changes"}] },
+    { id:"effort",name:"Reasoning",type:"select",category:"thought_level",currentValue:"medium",options:[{value:"low",name:"Low"},{value:"medium",name:"Medium"},{value:"high",name:"High"}] },
+  ]
+  row.state = "working"; row.turnActive = false
+  if (scenario === "question") {
+    row.meta.title = "Choose the implementation approach"
+    const input = { requestId:"demo-question",title:"A couple of choices before I start",schema:{ properties:{ approach:{type:"string",title:"How should authentication work?",description:"I found an existing session layer. Which direction should I take?",oneOf:[{const:"existing",title:"Extend the existing session",description:"Keep the current sign-in flow and add token refresh."},{const:"oauth",title:"Add an OAuth provider",description:"Use a hosted identity provider instead."}]},checks:{type:"array",title:"What should I include?",items:{enum:["Unit tests","Integration tests","Setup documentation"]}},note:{type:"string",title:"Anything else I should know?"}},required:["approach"]} }
+    row.pendingInput = input; row.state = "inputRequired"; row.turnActive = true
+    row.transcript.push({type:"input",input,sequence:++row.lastSequence,attemptId:row.executionId})
+  }
+  if (scenario === "approval") {
+    row.meta.title = "Review the requested operation"
+    const permission = {requestId:"demo-permission",sessionId:row.agentSessionId!,toolCallId:"demo-checks",title:"Run the project’s checks",description:"The implementation is ready. I’d like to run the build and tests to check for regressions.",command:"npm run build\nnpm test",rawInput:{command:"npm run build && npm test",cwd:"/srv/still"},options:[{optionId:"reject",name:"Reject",kind:"reject_once"},{optionId:"allow",name:"Allow once",kind:"allow_once"}]}
+    row.pendingPermission = permission; row.state = "inputRequired"; row.turnActive = true
+    row.transcript.push({type:"permission",permission,sequence:++row.lastSequence,attemptId:row.executionId})
+  }
+  snapshots.set(row.executionId,structuredClone(row)); saveLibrary(demo)
+}
 const fullWorkspace = new URLSearchParams(location.search).has("workspace")
 if (fullWorkspace) localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{id:"still",name:"Still",note:"",order:0}],sessions: new URLSearchParams(location.search).has("empty") ? [] : [session],order:{still:[session.id]},keys:[],settings:{confirmRemove:true,terminal:{fontSize:14,cursorStyle:"block",scrollback:5000}} }))
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic conversations · no server connection</span><a href="/tests-agents/fixture.html">Blank workspace</a></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} transportId="ssh-fixture" onReattach={row => reattachAgentThread(row.executionId,"ssh-fixture")} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
+if (preview && scenario) {
+  const observer = new MutationObserver(() => {
+    const row = document.querySelector<HTMLButtonElement>('.agent-thread-open')
+    if (!row) return
+    observer.disconnect(); row.click()
+    if (scenario === "models") requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.agent-model-trigger')?.click())
+  })
+  observer.observe(document.getElementById("root")!,{childList:true,subtree:true})
+}
 async function mockCheck(id?: string, path?: string) {
   const { nativeBridge } = await import("../src/bridge/nativeBridge")
   return nativeBridge.agentCheck("ssh-fixture", id, path)
