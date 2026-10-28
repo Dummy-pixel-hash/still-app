@@ -1,4 +1,4 @@
-import { memo, useState } from "react"
+import { memo, useId, useState } from "react"
 import { toolLabel, type TranscriptItem } from "../agents/transcript"
 import type { AgentHistoryCapabilities, AgentInputRequest, AgentPermissionRequest, AgentPlanEntry } from "../agents/types"
 import AgentIcon from "./AgentIcon"
@@ -57,24 +57,26 @@ function ToolGroup({ items }: { items: TranscriptItem[] }) {
   return <AgentDisclosure id={items[0].id} className={`agent-work-group ${failed ? "is-failed" : ""}`} summary={<><AgentIcon name={done === items.length ? "check" : "terminal"} size={15} /><span className="agent-tool-label">{label?.action || `${items.length} operations`}{label?.detail && <code>{label.detail}</code>}</span><small>{failed ? "Needs attention" : active ? "Working" : stopped ? "Stopped" : done === items.length ? "Completed" : "Pending"}</small><AgentIcon name="chevron" size={12} /></>}><div className="agent-work-group-body">{items.map(item => <ToolRow key={item.id} item={item} />)}</div></AgentDisclosure>
 }
 export function PermissionCard({ request, busy, respond }: { request: AgentPermissionRequest; busy: boolean; respond: (option: string) => void }) {
-  return <section className="agent-permission" aria-label="Pending approval"><div><span className="agent-status-dot attention" /><strong>Approval needed</strong></div><h2>{request.title}</h2>
+  return <section className="agent-permission" aria-label="Pending approval"><div className="agent-request-body" tabIndex={0} role="region" aria-label="Requested operation"><div><span className="agent-status-dot attention" /><strong>Approval needed</strong></div><h2>{request.title}</h2>
     {request.description && <p>{request.description}</p>}{request.command && <pre>{request.command}</pre>}
     {!!request.content?.length && <AgentToolResult content={request.content} />}
     {request.rawInput && <details className="agent-tool-input"><summary>Operation details</summary><pre>{JSON.stringify(request.rawInput, null, 2)}</pre></details>}
-    <div className="agent-inline-actions">{request.options.map(option => <button type="button" key={option.optionId} disabled={busy} className={option.kind === "allow_once" ? "agent-primary" : "agent-button"} onClick={() => respond(option.optionId)}>{option.name}</button>)}</div>
+    </div><div className="agent-inline-actions">{request.options.map(option => <button type="button" key={option.optionId} disabled={busy} className={option.kind === "allow_once" ? "agent-primary" : "agent-button"} onClick={() => respond(option.optionId)}>{option.name}</button>)}</div>
   </section>
 }
 export function InputCard({ request, busy, respond }: { request: AgentInputRequest; busy: boolean; respond: (answers: Record<string, unknown> | null) => void }) {
   const [answers, setAnswers] = useState<Record<string, unknown>>(() => Object.fromEntries(Object.entries(request.schema.properties || {}).filter(([, field]) => field.type === "boolean").map(([key]) => [key, false])))
-  return <form className="agent-question" aria-label="Agent question" onSubmit={e => { e.preventDefault(); respond(answers) }}><h2>{request.title}</h2>
+  const descriptionId = useId()
+  return <form className="agent-question" aria-label="Agent question" onSubmit={e => { e.preventDefault(); respond(answers) }}><div className="agent-request-body"><h2>{request.title}</h2>
     {Object.entries(request.schema.properties || {}).map(([id, field]) => {
       const choices = field.oneOf?.map(option => ({ value: option.const, name: option.title || option.const })) || field.enum?.map(value => ({ value, name: value }))
-      return <label className="agent-field" key={id}>{field.title || id}{field.description && <span>{field.description}</span>}
-        {field.type === "array" && field.items?.enum ? <select multiple aria-label={field.title || id} required={request.schema.required?.includes(id)} value={Array.isArray(answers[id]) ? answers[id] as string[] : []} onChange={e => setAnswers(all => ({ ...all, [id]: [...e.target.selectedOptions].map(option => option.value) }))}>{field.items.enum.map(value => <option value={value} key={value}>{value}</option>)}</select>
-          : field.type === "boolean" ? <input type="checkbox" aria-label={field.title || id} checked={answers[id] === true} onChange={e => setAnswers(all => ({ ...all, [id]: e.target.checked }))} />
-          : choices ? <select aria-label={field.title || id} required={request.schema.required?.includes(id)} value={String(answers[id] || "")} onChange={e => setAnswers(all => ({ ...all, [id]: e.target.value }))}><option value="">Choose…</option>{choices.map(option => <option value={option.value} key={option.value}>{option.name}</option>)}</select>
-          : <input type={field.type === "number" || field.type === "integer" ? "number" : "text"} aria-label={field.title || id} required={request.schema.required?.includes(id)} value={String(answers[id] ?? "")} onChange={e => setAnswers(all => ({ ...all, [id]: field.type === "number" || field.type === "integer" ? e.target.valueAsNumber : e.target.value }))} />}</label>
+      const describedBy = field.description ? `${descriptionId}-${id}` : undefined
+      return <label className="agent-field" key={id}>{field.title || id}{field.description && <span id={describedBy}>{field.description}</span>}
+        {field.type === "array" && field.items?.enum ? <select multiple aria-label={field.title || id} aria-describedby={describedBy} required={request.schema.required?.includes(id)} value={Array.isArray(answers[id]) ? answers[id] as string[] : []} onChange={e => setAnswers(all => ({ ...all, [id]: [...e.target.selectedOptions].map(option => option.value) }))}>{field.items.enum.map(value => <option value={value} key={value}>{value}</option>)}</select>
+          : field.type === "boolean" ? <input type="checkbox" aria-label={field.title || id} aria-describedby={describedBy} checked={answers[id] === true} onChange={e => setAnswers(all => ({ ...all, [id]: e.target.checked }))} />
+          : choices ? <select aria-label={field.title || id} aria-describedby={describedBy} required={request.schema.required?.includes(id)} value={String(answers[id] || "")} onChange={e => setAnswers(all => ({ ...all, [id]: e.target.value }))}><option value="">Choose…</option>{choices.map(option => <option value={option.value} key={option.value}>{option.name}</option>)}</select>
+          : <input type={field.type === "number" || field.type === "integer" ? "number" : "text"} aria-label={field.title || id} aria-describedby={describedBy} required={request.schema.required?.includes(id)} value={String(answers[id] ?? "")} onChange={e => setAnswers(all => ({ ...all, [id]: field.type === "number" || field.type === "integer" ? e.target.valueAsNumber : e.target.value }))} />}</label>
     })}
-    <div className="agent-inline-actions"><button className="agent-primary" disabled={busy} type="submit">Continue</button><button className="agent-button" disabled={busy} type="button" onClick={() => respond(null)}>Dismiss</button></div>
+    </div><div className="agent-inline-actions"><button className="agent-primary" disabled={busy} type="submit">Continue</button><button className="agent-button" disabled={busy} type="button" onClick={() => respond(null)}>Dismiss</button></div>
   </form>
 }

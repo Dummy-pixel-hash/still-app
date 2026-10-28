@@ -22,7 +22,7 @@ export function AgentChangeSummary({ changes, open }: { changes: AgentChange[]; 
 export default function AgentChanges({ changes, close }: { changes: AgentChange[]; close: () => void }) {
   const root = useRef<HTMLElement>(null), [selected, setSelected] = useState("")
   const returnFocus = useRef(document.activeElement as HTMLElement | null)
-  const [overlay, setOverlay] = useState(() => matchMedia("(max-width: 1100px)").matches)
+  const [overlay, setOverlay] = useState(() => matchMedia("(max-width: 1000px)").matches)
   const files = useMemo(() => [...new Set(changes.map(change => change.path))], [changes])
   const path = files.includes(selected) ? selected : files[0]
   const total = changeTotals(changes)
@@ -34,7 +34,7 @@ export default function AgentChanges({ changes, close }: { changes: AgentChange[
     }) }
   }, [])
   useEffect(() => {
-    const query = matchMedia("(max-width: 1100px)")
+    const query = matchMedia("(max-width: 1000px)")
     const update = () => setOverlay(query.matches)
     update()
     query.addEventListener("change", update)

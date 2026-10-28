@@ -1,7 +1,21 @@
 import { useLayoutEffect, type RefObject } from "react"
 
 /** Keep composer popovers reachable when the writing area consumes a short window. */
-export function useAgentPopover(ref: RefObject<HTMLDivElement | null>, open: boolean, align: "start" | "end" = "start") {
+export function useAgentPopover(ref: RefObject<HTMLDivElement | null>, open: boolean, align: "start" | "end" = "start", manageFocus = false) {
+  useLayoutEffect(() => {
+    const popup = ref.current
+    if (!open || !popup || !manageFocus) return
+    const previous = document.activeElement as HTMLElement | null
+    const workspace = popup.closest(".agent-workspace")
+    popup.querySelector<HTMLElement>('input:not(:disabled),select:not(:disabled),button:not(:disabled)')?.focus({ preventScroll: true })
+    return () => {
+      requestAnimationFrame(() => {
+        if (document.activeElement !== document.body && !popup.contains(document.activeElement)) return
+        const target = previous?.isConnected && previous !== document.body && !previous.closest("[inert]") ? previous : workspace?.querySelector<HTMLElement>('.agent-composer textarea')
+        target?.focus({ preventScroll: true })
+      })
+    }
+  }, [open, ref, manageFocus])
   useLayoutEffect(() => {
     const popup = ref.current
     if (!open || !popup) return
