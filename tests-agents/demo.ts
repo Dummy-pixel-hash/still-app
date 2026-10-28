@@ -17,8 +17,10 @@ export function createAgentDemo(session: Session) {
   ]
   const rows = examples.map((example, index): AgentThreadSnapshot & { meta: ConversationMeta } => {
     const id = `demo-conversation-${index + 1}`
+    const historySupported = ["opencode", "pi", "codex"].includes(example.agent)
+    const messageId = `${id}:example-message`
     const events: Omit<AgentThreadEvent, "sequence">[] = [
-      { type: "userMessage", text: index === 0 ? "Make the sidebar easier to scan. Keep related conversations together and make the keyboard shortcuts work on both platforms." : example.title },
+      { type: "userMessage", messageId, ...(historySupported ? { checkpoint: { provider: example.agent, id: messageId, synthetic: true } } : {}), text: index === 0 ? "Make the sidebar easier to scan. Keep related conversations together and make the keyboard shortcuts work on both platforms." : example.title },
     ]
     if (index === 0) {
       events.push(
@@ -48,6 +50,7 @@ export function createAgentDemo(session: Session) {
       agentSessionId: `synthetic-provider-${index + 1}`, cwd: example.folder, state: "saved", turnActive: false,
       transcript: events.map((event, sequence) => ({ ...event, sequence: sequence + 1, attemptId: id })),
       lastSequence: events.length, configOptions: [], resumable: true,
+      historyCapabilities: { revert: historySupported, retry: historySupported },
       meta: { id, hostKey: host, folder: example.folder, title: example.title, pinned: false, createdAt: at, activityAt: at, order: at, draft: "" },
     }
   })

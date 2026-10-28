@@ -22,7 +22,9 @@ The agent workspace is a project-and-conversation surface for existing coding ag
 
 The global Agents entry opens a device-owned conversation library with no implicit server or project. A project is an explicitly chosen server/account and canonical remote folder. New servers can be added for agents without creating terminal cards. Saved conversations can be read offline; connecting to resume is a deliberate action. Still stores its conversation history, drafts, project organization, and provider-session references under the native application-data directory. The remote provider remains the authority for executing and resuming its own session.
 
-For a new conversation, sending the first message starts the selected coding agent and submits that message once startup is ready. Choosing a provider, browsing its catalog, or opening conversation settings does not start an agent session. The composer has no manual Connect-agent action.
+For a new conversation, selecting a coding agent for a deliberately chosen project automatically connects it and loads its models before sending. The user can choose the first message's model and supported settings while the draft remains unsent. Switching providers retires the unused connection and preserves the project draft. The composer has no manual Connect-agent action.
+
+Supported providers expose message-level Revert and Retry after a real provider checkpoint is available. Revert returns the active conversation to before the chosen message; Retry performs that revert and submits the same message once with the selected model. These are conversation-history actions and keep project files as they are. Native persistence records provider acknowledgements and keeps uncertain operations blocked until reconciled. Unsupported integrations do not display functioning history actions.
 
 ## Capabilities and Constraints
 

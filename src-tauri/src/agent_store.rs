@@ -65,7 +65,7 @@ fn append(path: &Path, record: &Record) -> Result<(), String> {
     // Maintenance is never an acknowledgement failure: the appended record is
     // already durable, and a failed checkpoint leaves that journal authoritative.
     let boundary = matches!(record, Record::Metadata { .. } | Record::Workspace { .. })
-        || matches!(record, Record::Event { event, .. } if matches!(event.kind.as_str(), "threadComplete" | "threadError"));
+        || matches!(record, Record::Event { event, .. } if matches!(event.kind.as_str(), "threadComplete" | "threadError" | "historyReverted"));
     if boundary {
         let length = before + bytes.len() as u64;
         if let Ok(mut sizes) = CHECKPOINT_SIZES.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock() {
@@ -155,6 +155,11 @@ fn replay(records: Vec<Record>) -> Result<Value, String> {
                     row["meta"]["title"] = json!(event.text.as_deref().unwrap_or("").lines().next().unwrap_or("").chars().take(160).collect::<String>());
                 }
                 let events = row["transcript"].as_array_mut().ok_or("History has no transcript")?;
+                if event.kind == "messageCheckpoint" {
+                    if let Some(message) = events.iter_mut().find(|value| value["type"] == "userMessage" && event.message_id.as_deref().is_some_and(|id| value["messageId"] == id)) { message["checkpoint"] = json!(event.checkpoint); }
+                } else if event.kind == "historyReverted" {
+                    if let Some(index) = events.iter().position(|value| value["type"] == "userMessage" && event.message_id.as_deref().is_some_and(|id| value["messageId"] == id)) { events.truncate(index); }
+                }
                 let mut value = serde_json::to_value(&event).map_err(|e| e.to_string())?;
                 if matches!(event.kind.as_str(), "permission" | "input") {
                     value["type"] = json!("notice");
@@ -190,7 +195,7 @@ fn fields(snapshot: &Snapshot) -> Value {
         "agentId": snapshot.agent_id, "agentName": snapshot.agent_name,
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
-        "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence})
+        "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities})
 }
 
 async fn disk<T: Send + 'static>(app: &AppHandle, operation: impl FnOnce(&Path) -> Result<T, String> + Send + 'static) -> Result<T, StillError> {
@@ -234,6 +239,14 @@ pub async fn lease(app: &AppHandle, id: String) -> Result<fs::File, StillError> 
         let file = OpenOptions::new().create(true).truncate(false).write(true).open(file(root, &id, "lease")?).map_err(|e| e.to_string())?;
         file.try_lock().map_err(|_| "This conversation is already attached in another Still window. Close that connection before continuing here.".to_string())?;
         Ok(file)
+    }).await
+}
+
+pub async fn history_messages(app: &AppHandle, id: String) -> Result<Vec<Event>, StillError> {
+    disk(app, move |root| {
+        let row = replay(records(&file(root, &id, "jsonl")?, &mut Vec::new())?)?;
+        row["transcript"].as_array().ok_or("History has no transcript")?.iter().filter(|event| event["type"] == "userMessage")
+            .map(|event| serde_json::from_value(event.clone()).map_err(|error| error.to_string())).collect()
     }).await
 }
 
@@ -466,6 +479,45 @@ mod tests {
         let saved = records(&workspace, &mut Vec::new()).unwrap(); assert_eq!(saved.len(), 1);
         assert!(matches!(&saved[0], Record::Workspace { value, .. } if value["draft"] == "latest"));
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn provider_revert_is_durable_across_resume_and_checkpoint_compaction() {
+        let root = root(); let path = file(&root, "revert-history", "jsonl").unwrap();
+        append(&path, &Record::Create { row: json!({"executionId":"first-run","lastSequence":0,"transcript":[],"meta":{"id":"revert-history","title":"Kept title","draft":"Unsent idea"}}) }).unwrap();
+        for (sequence, kind, id, text) in [(1,"userMessage","m1","First prompt"),(2,"assistantChunk","a1","First reply"),(3,"userMessage","m2","Later prompt"),(4,"assistantChunk","a2","Later reply")] {
+            let event = serde_json::from_value(json!({"sequence":sequence,"attemptId":"first-run","type":kind,"messageId":id,"text":text})).unwrap();
+            append(&path, &Record::Event { fields:json!({"executionId":"first-run","lastSequence":sequence}), event }).unwrap();
+        }
+        let event = serde_json::from_value(json!({"sequence":5,"attemptId":"first-run","type":"messageCheckpoint","messageId":"m2","checkpoint":{"provider":"pi","entryId":"pi-entry"}})).unwrap();
+        append(&path, &Record::Event { fields:json!({"executionId":"first-run","lastSequence":5}), event }).unwrap();
+        checkpoint(&path).unwrap();
+        let saved = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        assert_eq!(saved["transcript"][2]["checkpoint"]["entryId"], "pi-entry");
+        append(&path, &Record::Update { fields: json!({"executionId":"second-run","lastSequence":0}) }).unwrap();
+        let event = serde_json::from_value(json!({"sequence":1,"attemptId":"second-run","type":"threadState","state":"rewinding"})).unwrap();
+        append(&path, &Record::Event { fields:json!({"executionId":"second-run","lastSequence":1,"state":"rewinding"}), event }).unwrap();
+        let event = serde_json::from_value(json!({"sequence":2,"attemptId":"second-run","type":"historyReverted","messageId":"m2","text":"Later prompt"})).unwrap();
+        append(&path, &Record::Event { fields:json!({"executionId":"second-run","lastSequence":2,"agentSessionId":"forked-provider-session","state":"working"}), event }).unwrap();
+        let after = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        assert_eq!(after["transcript"].as_array().unwrap().len(), 3);
+        assert_eq!(after["transcript"][0]["text"], "First prompt");
+        assert_eq!(after["transcript"][1]["text"], "First reply");
+        assert_eq!(after["agentSessionId"], "forked-provider-session");
+        assert_eq!(after["meta"]["draft"], "Unsent idea");
+        checkpoint(&path).unwrap();
+        assert_eq!(replay(records(&path, &mut Vec::new()).unwrap()).unwrap(), after);
+        let retry = serde_json::from_value(json!({"sequence":3,"attemptId":"second-run","type":"userMessage","messageId":"retry","text":"Later prompt"})).unwrap();
+        append(&path, &Record::Event { fields:json!({"executionId":"second-run","lastSequence":3}), event:retry }).unwrap();
+        assert_eq!(replay(records(&path, &mut Vec::new()).unwrap()).unwrap()["transcript"].as_array().unwrap().len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn unacknowledged_history_change_keeps_original_transcript_and_recovery_state() {
+        let original = json!({"executionId":"attempt","lastSequence":1,"transcript":[{"sequence":1,"attemptId":"attempt","type":"userMessage","messageId":"one","text":"Keep me"}],"meta":{"id":"conversation"}});
+        let event = serde_json::from_value(json!({"sequence":2,"attemptId":"attempt","type":"threadState","state":"rewinding"})).unwrap();
+        let recovered = replay(vec![Record::Create { row: original }, Record::Event { fields:json!({"executionId":"attempt","lastSequence":2,"state":"rewinding"}), event }]).unwrap();
+        assert_eq!(recovered["state"], "rewinding");
+        assert_eq!(recovered["transcript"][0]["text"], "Keep me");
     }
     #[test]
     fn migration_is_partial_idempotent_and_resumed_legacy_identity_survives() {

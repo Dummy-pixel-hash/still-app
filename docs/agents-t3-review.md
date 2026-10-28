@@ -1,5 +1,26 @@
 # Agent workspace: T3 Code review and revision plan
 
+## Agent preconnection and message history actions
+
+The user's follow-up supersedes first-message startup: selecting an agent now prepares its native connection for the selected project so models can be chosen before any prompt is submitted. Empty preparations stay out of the conversation list, are retired on provider/project changes, and preserve the project-owned draft. A retryable preparation error has a scoped Retry connection action. Command and settings buttons remain removed from the composer.
+
+History support is derived from the connected provider rather than the display name:
+
+| Integration | Revert / Retry | Provider operation |
+| --- | --- | --- |
+| OpenCode V2 | When the running server exposes the required revert API | Stage the known user-message boundary with `files: false`, then commit; Retry submits the original text once afterward |
+| Codex App Server | Paginated threads exposing the current history protocol | `thread/revert` with the original `beforeTurnId`, followed by `turn/start` for Retry |
+| Pi RPC | When `get_fork_messages` exposes stable entry identities | `fork` before the selected user entry, preserving the original provider branch and updating Still's resume identity |
+| Claude stream-json / Gemini ACP | Not exposed by the integrated history protocol | Controls are omitted; file-only checkpoint APIs are not misrepresented as conversation rewind |
+
+The host emits real provider checkpoints associated with Still's stable user-message ID. Rust validates the checkpoint, execution state, and expected event sequence before requesting a history change. It journals the in-flight state before dispatch and updates the active transcript only after provider acknowledgement. Failed or unknown outcomes keep the transcript; acknowledgement loss blocks further sends. Reverted boundaries survive journal compaction, process resume, and snapshots with trimmed recent history. Existing drafts, conversation titles, and project files remain intact.
+
+Evidence: [OpenCode V2 API](https://opencode.ai/v2/docs/api) and its [published OpenAPI](https://opencode.ai/v2/openapi.json); the installed Codex `0.160.1` generated `ThreadRevertParams` schema and [App Server reference](https://developers.openai.com/codex/app-server/); installed Pi RPC command definitions and fork implementation. These describe conversation history; Claude's documented `rewindFiles` is file-only and is not used here.
+
+Actual installed-provider preconnection was checked in an isolated folder without submitting prompts: Pi returned 1,271 model options, Claude 5, Codex 8, and OpenCode 1,996. All four also acknowledged changing the selected model before any prompt. Counts reflect the current local installations, not bundled defaults. Native Pi fork-before-entry was exercised against an authored test session, including an earlier checkpoint after a fork and resume of an empty reverted conversation. Native OpenCode stage/commit was exercised against an imported two-message test session with `files: false`; the earlier message and a project-file sentinel remained intact. Native Codex `thread/revert` was exercised on a paginated thread containing two explicit no-op shell-command turns; the earlier turn and a project-file sentinel remained intact. These checks made no inference calls. Authenticated model turns and packaged target-device behavior still require runtime verification.
+
+Verification for this revision: production build/typecheck, **15 protocol tests**, **56 browser regressions**, and **45 Rust library tests** passed. The native Tauri app-data persistence check passed separately under Xvfb, and the real verified-SSH provider startup/catalog check passed without opening tmux or sending model prompts. Public-preview checks exercised model choice before sending, retry with the selected model, and revert/draft restoration at desktop and narrow sizes. Message history tests cover provider rejection, uncertain acknowledgement followed by process failure/reload, duplicate actions while pending, resumed checkpoints, trimmed snapshots, and retry submission failure.
+
 ## 28 October 2026 — T3/Codex visual rebuild
 
 The user rejected the muted agent interface, then explicitly rejected the split-rail sidebar. The revised source follows the actual [T3 Code desktop workspace](https://t3.codes) and [Codex desktop app](https://openai.com/index/introducing-the-codex-app/):

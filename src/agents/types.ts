@@ -6,6 +6,7 @@ export type AgentThreadState =
   | "cancelled"
   | "error"
   | "submissionUnknown"
+  | "rewinding"
   | "saved"
 
 export type AgentEventType =
@@ -25,6 +26,11 @@ export type AgentEventType =
   | "commands"
   | "input"
   | "notice"
+  | "messageCheckpoint"
+  | "historyReverted"
+  | "historyCapabilities"
+
+export interface AgentHistoryCapabilities { revert: boolean; retry: boolean }
 
 export interface AgentPermissionOption {
   optionId: string
@@ -78,6 +84,8 @@ export interface AgentThreadEvent {
   locations?: Array<{ path: string; line?: number }>
   input?: AgentInputRequest
   outputDelta?: string
+  checkpoint?: Record<string, unknown>
+  historyCapabilities?: AgentHistoryCapabilities
 }
 
 export interface AgentInputRequest {
@@ -114,6 +122,9 @@ export interface AgentThreadSnapshot {
   configOptions: AgentConfigOption[]
   commands?: AgentCommand[]
   resumable?: boolean
+  historyCapabilities?: AgentHistoryCapabilities
+  /** Full active message identities supplied by a live native snapshot. */
+  activeMessageIds?: string[]
 }
 
 export interface AgentLibrary {

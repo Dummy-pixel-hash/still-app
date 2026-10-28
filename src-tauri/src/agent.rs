@@ -75,6 +75,10 @@ pub struct Event {
     pub input: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_delta: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_capabilities: Option<Value>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -101,6 +105,8 @@ impl Event {
             locations: None,
             input: None,
             output_delta: None,
+            checkpoint: None,
+            history_capabilities: None,
         }
     }
 }
@@ -127,6 +133,10 @@ pub struct Snapshot {
     pub commands: Vec<Value>,
     pub pending_input: Option<Value>,
     pub resumable: bool,
+    #[serde(default)]
+    pub history_capabilities: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_message_ids: Option<Vec<String>>,
 }
 impl Snapshot {
     fn history_header(&self) -> Self {
@@ -137,6 +147,8 @@ impl Snapshot {
             cwd: self.cwd.clone(), state: self.state.clone(), last_error: self.last_error.clone(),
             last_sequence: self.last_sequence, turn_active: self.turn_active, resumable: self.resumable,
             transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
+            history_capabilities: self.history_capabilities.clone(),
+            active_message_ids: None,
         }
     }
 }
@@ -159,6 +171,14 @@ struct Thread {
     cleanup_error: Option<String>,
     unsaved: VecDeque<(Snapshot, Event)>,
     history_lease: Option<std::fs::File>,
+    messages: Vec<Event>,
+    history_request: Option<PendingHistory>,
+}
+struct PendingHistory {
+    request_id: u64,
+    message: Event,
+    previous_state: String,
+    reply: oneshot::Sender<Result<(), String>>,
 }
 struct PendingConfig {
     id: String,
@@ -186,6 +206,13 @@ pub struct IdArgs {
 pub struct SendArgs {
     execution_id: String,
     message: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertArgs {
+    execution_id: String,
+    message_id: String,
+    expected_sequence: u64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -375,6 +402,7 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         .collect())
 }
 fn append_history(history: &mut Vec<Event>, event: Event) {
+    apply_history_event(history, &event);
     if matches!(event.kind.as_str(), "assistantChunk" | "reasoningChunk") {
         if let Some(last) = history
             .last_mut()
@@ -392,10 +420,28 @@ fn append_history(history: &mut Vec<Event>, event: Event) {
     }
     history.push(event);
 }
+/// Apply provider-acknowledged boundaries; the journal records the boundary durably.
+pub(super) fn apply_history_event(history: &mut Vec<Event>, event: &Event) {
+    if event.kind == "messageCheckpoint" {
+        if let Some(message) = history.iter_mut().find(|message| message.kind == "userMessage" && message.message_id.is_some() && message.message_id == event.message_id) {
+            message.checkpoint = event.checkpoint.clone();
+        }
+    } else if event.kind == "historyReverted" {
+        if let Some(index) = history.iter().position(|message| message.kind == "userMessage" && message.message_id.is_some() && message.message_id == event.message_id) {
+            history.truncate(index);
+        } else if let Some(sequence) = event.checkpoint.as_ref().and_then(|value| value["sequence"].as_u64()) {
+            let attempt = event.checkpoint.as_ref().and_then(|value| value["attemptId"].as_str());
+            if attempt == event.attempt_id.as_deref() { history.retain(|message| message.sequence < sequence); }
+            else { history.clear(); }
+        }
+    }
+}
 async fn emit(thread: &mut Thread, mut e: Event) {
     thread.snapshot.last_sequence = thread.snapshot.last_sequence.saturating_add(1);
     e.sequence = thread.snapshot.last_sequence;
     e.attempt_id = Some(thread.snapshot.execution_id.clone());
+    if e.kind == "userMessage" { thread.messages.push(e.clone()); }
+    else { apply_history_event(&mut thread.messages, &e); }
     append_history(&mut thread.snapshot.transcript, e.clone());
     let mut result = Ok(());
     while let Some((snapshot, event)) = thread.unsaved.front() {
@@ -614,12 +660,20 @@ pub async fn still_agent_start(
         commands: Vec::new(),
         pending_input: None,
         resumable: args.resume_session_id.is_some(),
+        history_capabilities: json!({"revert":false,"retry":false}),
+        active_message_ids: None,
     };
     if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
         let _ = channel.eof().await;
         let _ = channel.close().await;
         return Err(error);
     }
+    let messages = if args.conversation_id.is_some() {
+        match agent_store::history_messages(&app, snapshot.conversation_id.clone()).await {
+            Ok(messages) => messages,
+            Err(error) => { let _ = channel.eof().await; let _ = channel.close().await; return Err(error); }
+        }
+    } else { Vec::new() };
     let row = Arc::new(Mutex::new(Thread {
         snapshot: snapshot.clone(),
         app,
@@ -635,6 +689,8 @@ pub async fn still_agent_start(
         cleanup_error: None,
         unsaved: VecDeque::new(),
         history_lease: Some(history_lease),
+        messages,
+        history_request: None,
     }));
     registry().lock().await.insert(execution_id, row.clone());
     tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd));
@@ -844,6 +900,16 @@ async fn handle(
             .unwrap_or("Remote ACP request failed.");
         if let Some(id) = id {
             if let Some(number) = id.as_u64() {
+                let mut thread = row.lock().await;
+                if thread.history_request.as_ref().is_some_and(|pending| pending.request_id == number) {
+                    let pending = thread.history_request.take().unwrap();
+                    thread.snapshot.state = if error.pointer("/data/historyUncertain").and_then(Value::as_bool) == Some(true) { "submissionUnknown".into() } else { pending.previous_state };
+                    thread.snapshot.last_error = Some(message.to_owned());
+                    let mut event = Event::new("threadError"); event.state = Some(thread.snapshot.state.clone()); event.text = Some(message.to_owned()); emit(&mut thread, event).await;
+                    let _ = pending.reply.send(Err(message.to_owned()));
+                    return Ok(());
+                }
+                drop(thread);
                 if let Some(pending) = row.lock().await.config_requests.remove(&number) {
                     let _ = pending.reply.send(Err(message.to_owned()));
                     return Ok(());
@@ -924,6 +990,11 @@ async fn handle(
             .pointer("/_meta/resumable")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let capabilities = result.pointer("/_meta/historyCapabilities");
+        t.snapshot.history_capabilities = json!({"revert":capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),"retry":capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false)});
+        let mut capability_event = Event::new("historyCapabilities");
+        capability_event.history_capabilities = Some(t.snapshot.history_capabilities.clone());
+        emit(&mut t, capability_event).await;
         t.snapshot.config_options = configs.clone();
         t.snapshot.state = "working".into();
         if !configs.is_empty() {
@@ -943,6 +1014,37 @@ async fn handle(
     }
     if let Some(request_id) = id.as_ref().and_then(Value::as_u64) {
         let mut thread = row.lock().await;
+        if thread.history_request.as_ref().is_some_and(|pending| pending.request_id == request_id) {
+            let pending = thread.history_request.take().unwrap();
+            let sid = result["sessionId"].as_str().filter(|id| !id.is_empty());
+            if result["reverted"] != true || sid.is_none() {
+                thread.snapshot.state = "submissionUnknown".into();
+                thread.snapshot.last_error = Some("The provider did not confirm the history change. Inspect its session before continuing.".into());
+                let mut event = Event::new("threadError"); event.state = Some(thread.snapshot.state.clone()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread, event).await;
+                let _ = pending.reply.send(Err(thread.snapshot.last_error.clone().unwrap()));
+                return Ok(());
+            }
+            thread.snapshot.agent_session_id = sid.map(str::to_owned);
+            *session_id = thread.snapshot.agent_session_id.clone();
+            thread.snapshot.state = "working".into(); thread.snapshot.last_error = None;
+            let mut event = Event::new("historyReverted");
+            event.message_id = pending.message.message_id;
+            event.text = pending.message.text;
+            event.checkpoint = Some(json!({"sequence":pending.message.sequence,"attemptId":pending.message.attempt_id}));
+            emit(&mut thread, event).await;
+            if let Some(options) = result["configOptions"].as_array() {
+                thread.snapshot.config_options = options.clone();
+                let mut event = Event::new("configOptions"); event.config_options = Some(options.clone()); emit(&mut thread, event).await;
+            }
+            let saved = flush_history(&mut thread).await.map_err(|error| error.message);
+            if let Err(message) = &saved {
+                thread.snapshot.state = "submissionUnknown".into();
+                thread.snapshot.last_error = Some(format!("The provider reverted this conversation, but its local checkpoint could not be saved: {message}"));
+                let mut event = Event::new("threadError"); event.state = Some(thread.snapshot.state.clone()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread, event).await;
+            }
+            let _ = pending.reply.send(saved);
+            return Ok(());
+        }
         if let Some(pending) = thread.config_requests.remove(&request_id) {
             if let Some(options) = result.get("configOptions").and_then(Value::as_array) {
                 thread.snapshot.config_options = options.clone();
@@ -1048,6 +1150,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             | "usage_update"
             | "notice"
             | "session_error"
+            | "still_message_checkpoint"
     ) {
         return;
     }
@@ -1062,6 +1165,15 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             let mut event = Event::new("configOptions");
             event.config_options = Some(options);
             emit(&mut t, event).await;
+        }
+        return;
+    }
+    if kind == "still_message_checkpoint" {
+        let message_id = u["messageId"].as_str();
+        if let Some(message) = t.messages.iter().find(|event| event.message_id.as_deref() == message_id && message_id.is_some()) {
+            if message.attempt_id.as_deref() == Some(t.snapshot.execution_id.as_str()) && u["checkpoint"].is_object() {
+                let mut event = Event::new("messageCheckpoint"); event.message_id = message_id.map(str::to_owned); event.checkpoint = Some(u["checkpoint"].clone()); emit(&mut t, event).await;
+            }
         }
         return;
     }
@@ -1152,7 +1264,8 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             e.kind = "threadError".into();
             e.text = u.get("message").and_then(Value::as_str).map(str::to_owned);
             t.snapshot.last_error = e.text.clone();
-            t.snapshot.state = "error".into();
+            t.snapshot.state = failure_state(&t).into();
+            e.state = Some(t.snapshot.state.clone());
             t.snapshot.turn_active = false;
         }
         "notice" => {
@@ -1166,7 +1279,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
 }
 async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     let mut t = row.lock().await;
-    t.snapshot.state = "error".into();
+    t.snapshot.state = failure_state(&t).into();
     t.snapshot.last_error = Some(message.into());
     t.permission = None;
     t.snapshot.pending_permission = None;
@@ -1175,11 +1288,15 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     for (_, pending) in t.config_requests.drain() {
         let _ = pending.reply.send(Err(message.into()));
     }
+    if let Some(pending) = t.history_request.take() { let _ = pending.reply.send(Err(message.into())); }
     t.snapshot.turn_active = false;
     let mut e = Event::new("threadError");
-    e.state = Some("error".into());
+    e.state = Some(t.snapshot.state.clone());
     e.text = Some(message.into());
     emit(&mut t, e).await
+}
+fn failure_state(thread: &Thread) -> &'static str {
+    if thread.history_request.is_some() || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
 }
 
 #[tauri::command]
@@ -1197,6 +1314,7 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
         "working" | "complete" | "cancelled"
     ) || thread.snapshot.turn_active
         || !thread.config_requests.is_empty()
+        || thread.history_request.is_some()
     {
         return Err(StillError::friendly(
             "agent_not_ready",
@@ -1213,14 +1331,59 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     thread.snapshot.last_error = None;
     let mut event = Event::new("userMessage");
     event.text = Some(args.message.clone());
+    let message_id = format!("{}-{id}", thread.snapshot.execution_id);
+    event.message_id = Some(message_id.clone());
     emit(&mut thread, event).await;
-    if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}]}})).is_err() {
+    if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id}}})).is_err() {
         thread.prompt=None;thread.snapshot.turn_active=false;thread.snapshot.state="submissionUnknown".into();
         thread.snapshot.last_error = Some("The SSH stream closed while queuing the prompt. Inspect the remote process before retrying.".into());
         let mut event = Event::new("threadError"); event.state = Some("submissionUnknown".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread, event).await;
         return Err(StillError::friendly("agent_submission_unknown","The SSH stream closed while queuing the prompt. Inspect the remote process before retrying."));
     }
     Ok(())
+}
+#[tauri::command]
+pub async fn still_agent_revert(args: RevertArgs) -> Result<Snapshot, StillError> {
+    let row = find_thread(&args.execution_id).await?;
+    let mut thread = row.lock().await;
+    if thread.snapshot.history_capabilities["revert"] != true { return Err(StillError::friendly("agent_history_unsupported", "This agent does not support reverting conversation messages.")); }
+    if thread.snapshot.last_sequence != args.expected_sequence || thread.snapshot.turn_active || thread.prompt.is_some() || thread.permission.is_some() || thread.pending_input_id.is_some() || !thread.config_requests.is_empty() || thread.history_request.is_some() || !matches!(thread.snapshot.state.as_str(), "working" | "complete" | "cancelled" | "error") {
+        return Err(StillError::friendly("agent_history_busy", "The conversation changed or is busy. Wait until it is idle before reverting."));
+    }
+    if thread.outbound.is_closed() { return Err(StillError::friendly("agent_process_lost", "Resume this conversation before changing its history.")); }
+    let message = thread.messages.iter().find(|message| message.message_id.as_deref() == Some(args.message_id.as_str()) && message.checkpoint.is_some()).cloned().ok_or_else(|| StillError::friendly("agent_history_stale", "This message has no current provider checkpoint."))?;
+    flush_history(&mut thread).await?;
+    let request_id = IDS.fetch_add(1, Ordering::Relaxed) + 1200;
+    let request = json!({"jsonrpc":"2.0","id":request_id,"method":"_still/session/revert","params":{"sessionId":thread.snapshot.agent_session_id,"checkpoint":message.checkpoint}});
+    let (reply, response) = oneshot::channel();
+    let previous_state = thread.snapshot.state.clone();
+    thread.snapshot.state = "rewinding".into();
+    thread.history_request = Some(PendingHistory { request_id, message, previous_state:previous_state.clone(), reply });
+    let mut event = Event::new("threadState"); event.state = Some("rewinding".into()); emit(&mut thread, event).await;
+    if let Err(error) = flush_history(&mut thread).await {
+        thread.history_request = None; thread.snapshot.state = previous_state.clone();
+        let mut event = Event::new("threadState"); event.state = Some(previous_state); emit(&mut thread, event).await;
+        return Err(error);
+    }
+    if thread.outbound.send(request).is_err() {
+        thread.history_request = None; thread.snapshot.state = previous_state;
+        let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
+        return Err(StillError::friendly("agent_process_lost", "The connection closed before the history request was sent."));
+    }
+    drop(thread);
+    match tokio::time::timeout(Duration::from_secs(65), response).await {
+        Ok(Ok(Ok(()))) => Ok(row.lock().await.snapshot.clone()),
+        Ok(Ok(Err(message))) => Err(StillError::friendly("agent_history_failed", message)),
+        _ => {
+            let mut thread = row.lock().await;
+            if thread.history_request.is_some() {
+                thread.snapshot.state = "submissionUnknown".into();
+                thread.snapshot.last_error = Some("The history change was not acknowledged. Inspect the provider session before continuing.".into());
+                let mut event = Event::new("threadError"); event.state = Some("submissionUnknown".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread, event).await;
+            }
+            Err(StillError::friendly("agent_history_unknown", "The history change was not acknowledged. Inspect the provider session before continuing."))
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1242,6 +1405,7 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
             "working" | "complete" | "cancelled"
         )
         || !thread.config_requests.is_empty()
+        || thread.history_request.is_some()
     {
         return Err(StillError::friendly(
             "agent_config_busy",
@@ -1310,12 +1474,11 @@ async fn find_thread(id: &str) -> Result<Arc<Mutex<Thread>>, StillError> {
 }
 #[tauri::command]
 pub async fn still_agent_snapshot(args: IdArgs) -> Result<Snapshot, StillError> {
-    Ok(find_thread(&args.execution_id)
-        .await?
-        .lock()
-        .await
-        .snapshot
-        .clone())
+    let row = find_thread(&args.execution_id).await?;
+    let thread = row.lock().await;
+    let mut snapshot = thread.snapshot.clone();
+    snapshot.active_message_ids = Some(thread.messages.iter().filter_map(|message| message.message_id.clone()).collect());
+    Ok(snapshot)
 }
 #[tauri::command]
 pub async fn still_agent_cancel(args: IdArgs) -> Result<(), StillError> {
@@ -1344,7 +1507,7 @@ pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
     if let Some(error) = &thread.cleanup_error {
         return Err(StillError::friendly("agent_close_unknown", error));
     }
-    if thread.snapshot.turn_active {
+    if thread.snapshot.turn_active || thread.history_request.is_some() {
         return Err(StillError::friendly(
             "agent_busy",
             "Stop the agent before deleting this conversation.",
@@ -1582,6 +1745,29 @@ mod tests {
         append_history(&mut history, Event::new("toolStart"));
         append_history(&mut history, Event::new("assistantChunk"));
         assert_eq!(history.len(), 4);
+    }
+    #[test]
+    fn acknowledged_revert_clears_trimmed_and_resumed_snapshots_at_the_requested_boundary() {
+        let event = |value| serde_json::from_value::<Event>(value).unwrap();
+        let mut full = vec![
+            event(json!({"sequence":1,"attemptId":"old","type":"userMessage","messageId":"first","text":"Keep"})),
+            event(json!({"sequence":2,"attemptId":"old","type":"assistantChunk","text":"Kept reply"})),
+            event(json!({"sequence":3,"attemptId":"old","type":"userMessage","messageId":"second","text":"Revert"})),
+            event(json!({"sequence":4,"attemptId":"old","type":"assistantChunk","text":"Removed reply"})),
+        ];
+        apply_history_event(&mut full, &event(json!({"sequence":5,"attemptId":"old","type":"messageCheckpoint","messageId":"second","checkpoint":{"provider":"codex","turnId":"turn-two"}})));
+        assert_eq!(full[2].checkpoint.as_ref().unwrap()["turnId"], "turn-two");
+        let boundary = event(json!({"sequence":6,"attemptId":"old","type":"historyReverted","messageId":"second","checkpoint":{"sequence":3,"attemptId":"old"}}));
+        let mut trimmed = full[3..].to_vec();
+        apply_history_event(&mut trimmed, &boundary);
+        assert!(trimmed.is_empty());
+        apply_history_event(&mut full, &boundary);
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].message_id.as_deref(), Some("first"));
+        let mut resumed = vec![event(json!({"sequence":1,"attemptId":"new","type":"assistantChunk","text":"Later process output"}))];
+        let resumed_boundary = event(json!({"sequence":3,"attemptId":"new","type":"historyReverted","messageId":"second","checkpoint":{"sequence":3,"attemptId":"old"}}));
+        apply_history_event(&mut resumed, &resumed_boundary);
+        assert!(resumed.is_empty());
     }
     #[test]
     fn legacy_controls_only_fill_missing_categories() {

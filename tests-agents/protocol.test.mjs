@@ -72,6 +72,7 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
     await host.handle({ id: 2, method: "session/new" })
     const ready = frames.find(frame => frame.id === 2)
     assert.equal(ready.error, undefined); assert.ok(ready.result.sessionId); assert.ok(ready.result.configOptions.length)
+    assert.deepEqual(ready.result._meta.historyCapabilities, { revert: provider !== "claude", retry: provider !== "claude" })
     const commands = frames.filter(frame => frame.params?.update?.sessionUpdate === "available_commands_update").at(-1).params.update.availableCommands
     if (provider === "opencode") {
       assert.equal(commands.filter(command => command.route === "command").length, 24)
@@ -118,5 +119,62 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
       await host.handle({ id: 11, method: "session/prompt", params: { prompt: [{ type: "text", text: "/reload" }] } })
       assert.equal(frames.find(frame => frame.id === 11).result?.stopReason, "end_turn")
     }
+  } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+for (const provider of ["pi", "codex", "opencode"]) test(`${provider} history uses provider checkpoints and rejects stale or declined boundaries`, async () => {
+  if (process.platform === "win32") return
+  const dir = await mkdtemp("/tmp/opencode/still-history-protocol-")
+  const executable = `${dir}/${provider}`
+  await writeFile(executable, `#!/bin/sh\nexec env STILL_TEST_PEER=${provider} ${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(new URL("./protocol-peer.mjs", import.meta.url)))} "$@"\n`, { mode: 0o700 })
+  const frames = []
+  let host
+  host = createHost(frame => {
+    frames.push(frame)
+    if (frame.method === "session/request_permission") queueMicrotask(() => void host.handle({ id: frame.id, result: { outcome: { outcome: "selected", optionId: "accept" } } }))
+  }, provider, executable)
+  try {
+    await host.handle({ id: 1, method: "initialize" })
+    await host.handle({ id: 2, method: "session/new" })
+    let sessionId = frames.find(frame => frame.id === 2).result.sessionId
+    for (const [id, text] of [[3, "First request"], [4, "Second request"]]) {
+      await host.handle({ id, method: "session/prompt", params: { sessionId, prompt: [{ type: "text", text }], _meta: { messageId: `local-${id}` } } })
+      assert.equal(frames.find(frame => frame.id === id).result.stopReason, "end_turn")
+    }
+    const checkpoints = frames.flatMap(frame => frame.params?.update?.sessionUpdate === "still_message_checkpoint" ? [frame.params.update] : [])
+    assert.equal(checkpoints.length, 2)
+    assert.equal(checkpoints[1].messageId, "local-4")
+    await host.handle({ id: 5, method: "_still/session/revert", params: { sessionId, checkpoint: checkpoints[1].checkpoint } })
+    const reverted = frames.find(frame => frame.id === 5)
+    assert.equal(reverted.error, undefined)
+    assert.equal(reverted.result.reverted, true)
+    sessionId = reverted.result.sessionId
+    await host.handle({ id: 6, method: "_still/session/revert", params: { sessionId, checkpoint: checkpoints[1].checkpoint } })
+    assert.ok(frames.find(frame => frame.id === 6).error, "removed messages cannot be reverted again")
+    await host.handle({ id: 7, method: "session/prompt", params: { sessionId, prompt: [{ type: "text", text: "Second request" }], _meta: { messageId: "local-retry" } } })
+    assert.equal(frames.find(frame => frame.id === 7).result.stopReason, "end_turn")
+    await host.handle({ id: 8, method: "session/prompt", params: { sessionId, prompt: [{ type: "text", text: "REJECT_REVERT" }], _meta: { messageId: "local-rejected" } } })
+    const rejectedCheckpoint = frames.find(frame => frame.params?.update?.messageId === "local-rejected").params.update.checkpoint
+    await host.handle({ id: 9, method: "_still/session/revert", params: { sessionId, checkpoint: rejectedCheckpoint } })
+    assert.ok(frames.find(frame => frame.id === 9).error)
+    assert.notEqual(frames.find(frame => frame.id === 9).error.data?.historyUncertain, true)
+    await host.handle({ id: 10, method: "_still/session/revert", params: { sessionId, checkpoint: checkpoints[0].checkpoint } })
+    assert.equal(frames.find(frame => frame.id === 10).result?.reverted, true, "earlier provider checkpoints remain usable after the retry")
+  } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+for (const provider of ["pi", "codex", "opencode"]) test(`${provider} keeps history actions unavailable when the required protocol is absent`, async () => {
+  if (process.platform === "win32") return
+  const dir = await mkdtemp("/tmp/opencode/still-no-history-")
+  const executable = `${dir}/${provider}`
+  await writeFile(executable, `#!/bin/sh\nexec env STILL_TEST_PEER=${provider} STILL_TEST_NO_HISTORY=1 ${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(new URL("./protocol-peer.mjs", import.meta.url)))} "$@"\n`, { mode: 0o700 })
+  const frames = [], host = createHost(frame => frames.push(frame), provider, executable)
+  try {
+    await host.handle({ id: 1, method: "initialize" })
+    await host.handle({ id: 2, method: "session/new" })
+    const result = frames.find(frame => frame.id === 2).result
+    assert.deepEqual(result._meta.historyCapabilities, { revert: false, retry: false })
+    await host.handle({ id: 3, method: "_still/session/revert", params: { sessionId: result.sessionId, checkpoint: {} } })
+    assert.match(frames.find(frame => frame.id === 3).error.message, /does not support/)
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 })

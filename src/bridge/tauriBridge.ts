@@ -43,6 +43,7 @@ export const tauriBridge: NativeBridge = {
   agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId,...options}})},
   agentCheck(nativeSessionId:string,agentId?:string,executable?:string){return invoke<AgentAvailability[]>("still_agent_check",{args:{nativeSessionId,agentId,executable}})},
   agentSend(executionId:string,message:string){return invoke<void>("still_agent_send",{args:{executionId,message}})},
+  agentRevert(executionId:string,messageId:string,expectedSequence:number){return invoke<AgentThreadSnapshot>("still_agent_revert",{args:{executionId,messageId,expectedSequence}})},
   agentSetConfig(executionId:string,configId:string,value:string|boolean){return invoke<void>("still_agent_set_config",{args:{executionId,configId,value}})},
   agentRespondPermission(executionId:string,requestId:string|number,optionId:string){return invoke<void>("still_agent_respond",{args:{executionId,requestId,optionId}})},
   agentCancel(executionId:string){return invoke<void>("still_agent_cancel",{args:{executionId}})},

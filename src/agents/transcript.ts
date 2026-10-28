@@ -11,6 +11,8 @@ export interface TranscriptItem {
   input?: Record<string, unknown>
   output?: unknown
   locations?: Array<{ path: string; line?: number }>
+  messageId?: string
+  checkpoint?: Record<string, unknown>
 }
 
 /** Project ACP events into readable messages; protocol sequence remains untouched. */
@@ -26,7 +28,7 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
     if (event.type === "userMessage") {
       stream = undefined
       tools.clear()
-      items.push({ id: `user-${key}`, kind: "user", text: event.text || "" })
+      items.push({ id: `user-${key}`, kind: "user", text: event.text || "", messageId: event.messageId, checkpoint: event.checkpoint })
     } else if (event.type === "assistantChunk" || event.type === "reasoningChunk") {
       const kind = event.type === "assistantChunk" ? "assistant" : "reasoning"
       if (!stream || stream.kind !== kind || event.messageId && event.messageId !== messageId) {

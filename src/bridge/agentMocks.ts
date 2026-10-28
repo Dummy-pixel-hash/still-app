@@ -14,6 +14,7 @@ export const unavailableAgentBridge={
  agentStart:async(_nativeId:string,_localId:string,_agentId:string):Promise<AgentThreadSnapshot>=>{throw unavailable()},
  agentCheck:async():Promise<never>=>{throw unavailable()},
  agentSend:async(_id:string,_message:string):Promise<void>=>{throw unavailable()},
+ agentRevert:async():Promise<AgentThreadSnapshot>=>{throw unavailable()},
  agentSetConfig:async(_id:string,_configId:string,_value:string|boolean):Promise<void>=>{throw unavailable()},
  agentRespondPermission:async(_id:string,_requestId:string|number,_optionId:string):Promise<void>=>{throw unavailable()},
  agentCancel:async(_id:string):Promise<void>=>{throw unavailable()},

@@ -17,6 +17,7 @@ export interface ConversationMeta {
   order: number
   draft: string
   submissionUnknown?: boolean
+  prepared?: boolean
 }
 export interface AgentWorkspacePreferences {
   selectedId?: string

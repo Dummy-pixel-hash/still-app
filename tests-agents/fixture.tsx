@@ -28,6 +28,8 @@ const projectCommands = [{ name: "review", description: "Review the current chan
 let counter = 0
 const h = {
   checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], inputs: [] as unknown[],
+  sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
+  releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
   external: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   flush: flushAgentSaves,
@@ -39,14 +41,27 @@ const h = {
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
     const value = { ...event, attemptId: row.executionId, sequence: ++row.lastSequence }
+    const apply = (events: AgentThreadEvent[]) => {
+      if (event.type === "historyReverted") { const index = events.findIndex(message => message.type === "userMessage" && message.messageId === event.messageId); if (index >= 0) events.splice(index) }
+      if (event.type === "messageCheckpoint") { const message = events.find(message => message.type === "userMessage" && message.messageId === event.messageId); if (message) message.checkpoint = event.checkpoint }
+    }
+    apply(row.transcript)
     row.transcript.push(value)
     if (event.type === "userMessage") { row.turnActive = true; row.state = "working" }
-    if (event.type === "threadComplete") { row.turnActive = false; row.state = "working"; row.pendingPermission = undefined }
+    if (event.type === "threadComplete") { row.turnActive = false; row.state = event.state || "working"; row.pendingPermission = undefined; row.lastError = undefined }
+    if (event.type === "threadState" && event.state) row.state = event.state
+    if (event.type === "threadError") { row.state = event.state || "error"; row.lastError = event.text; row.turnActive = false }
+    if (event.type === "historyReverted") { row.state = "working"; row.lastError = undefined }
     if (event.type === "permission") { row.pendingPermission = event.permission; row.state = "inputRequired" }
     if (event.type === "configOptions") row.configOptions = event.configOptions!
     if (event.type === "commands") row.commands = event.commands
     const data = library(), saved = data.rows.find((item: any) => item.conversationId === row.conversationId)
-    if (saved) { const transcript = saved.transcript; Object.assign(saved, structuredClone(row), { transcript: [...transcript, value], pendingInput: null, pendingPermission: null }); saveLibrary(data) }
+    if (saved) {
+      const transcript = saved.transcript; apply(transcript)
+      const next = [...transcript, value]
+      row.activeMessageIds = next.filter((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId).map((event: AgentThreadEvent) => event.messageId!)
+      Object.assign(saved, structuredClone(row), { transcript: next, pendingInput: null, pendingPermission: null }); saveLibrary(data)
+    }
     sinks.get(id)?.(structuredClone(value))
   },
   get current() { return [...snapshots.keys()].at(-1)! },
@@ -89,29 +104,52 @@ registerNativeBridge({
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
     const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
-      configOptions: structuredClone(modelOptions), commands: projectCommands }
+      configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
     row.conversationId = options?.conversationId || row.executionId
     row.hostKey = hostKey(session)
     snapshots.set(row.executionId, row)
     const data = library(), prior = data.rows.find((item: any) => item.conversationId === row.conversationId)
-    if (prior) Object.assign(prior, row, { meta: prior.meta, transcript: prior.transcript })
+    if (prior) { row.activeMessageIds = prior.transcript.filter((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId).map((event: AgentThreadEvent) => event.messageId!); Object.assign(prior, row, { meta: prior.meta, transcript: prior.transcript }) }
     else data.rows.push({ ...row, meta: { id: row.conversationId, hostKey: row.hostKey, folder: row.cwd, title: "", pinned: false, createdAt: Date.now(), activityAt: Date.now(), order: Date.now(), draft: "" }, touchedAt: Date.now() })
     saveLibrary(data)
     h.releaseStartup = () => {
       const current = snapshots.get(row.executionId)!
       current.state = h.startupFail ? "error" : "working"
       if (h.startupFail) current.lastError = "Agent startup was rejected"
+      else { h.emit(current.executionId, { type: "configOptions", configOptions: structuredClone(modelOptions) }); h.emit(current.executionId, { type: "commands", commands: projectCommands }) }
       h.emit(current.executionId, h.startupFail ? { type: "threadError", text: "Agent startup was rejected" } : { type: "threadState", state: "working" })
     }
+    h.releaseStartups.set(row.executionId, h.releaseStartup)
     return structuredClone(row)
   },
   agentSnapshot: async id => structuredClone(snapshots.get(id)!),
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
     if (h.rejectSend) throw new Error("SSH disconnected. Submission is uncertain.")
+    const row = snapshots.get(id)!
     h.sends.push(message)
-    h.emit(id, { type: "userMessage", text: message })
+    h.sentConfigs.push({ agent: row.agentId, model: row.configOptions.find(option => option.category === "model")?.currentValue })
+    const messageId = `${id}:message:${row.lastSequence + 1}`
+    h.emit(id, { type: "userMessage", text: message, messageId })
     h.emit(id, { type: "assistantChunk", text: "First " }); h.emit(id, { type: "assistantChunk", text: "second " }); h.emit(id, { type: "assistantChunk", text: "third." })
+    if (row.historyCapabilities?.revert) h.emit(id, { type: "messageCheckpoint", messageId, checkpoint: { provider: row.agentId, id: messageId } })
+  },
+  agentRevert: async (id, messageId, expectedSequence) => {
+    const row = snapshots.get(id)!
+    if (!row.historyCapabilities?.revert || row.turnActive || row.lastSequence !== expectedSequence) throw new Error("History is not ready to change")
+    const saved = library().rows.find((row: any) => row.executionId === id)
+    const message = saved?.transcript.find((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId === messageId)
+    if (!message?.checkpoint) throw new Error("The provider checkpoint is missing")
+    h.reverts.push({ id, messageId })
+    const previous = row.state
+    h.emit(id, { type: "threadState", state: "rewinding" })
+    if (h.deferRevert) await new Promise<void>(resolve => { h.releaseRevert = resolve })
+    if (h.rejectRevert || h.unknownRevert) {
+      h.emit(id, { type: "threadError", state: h.unknownRevert ? "submissionUnknown" : previous, text: h.unknownRevert ? "History acknowledgement was lost" : "Provider rejected the history change" })
+      throw new Error(h.unknownRevert ? "History acknowledgement was lost" : "Provider rejected the history change")
+    }
+    h.emit(id, { type: "historyReverted", messageId, text: message.text })
+    return structuredClone(row)
   },
   agentSetConfig: async (id, configId, value) => {
     if (h.rejectConfig) throw new Error("The agent rejected that setting.")

@@ -111,6 +111,7 @@ pub fn run() {
             agent::still_agent_catalog,
             agent::still_agent_resolve_folder,
             agent::still_agent_send,
+            agent::still_agent_revert,
             agent::still_agent_set_config,
             agent::still_agent_respond,
             agent::still_agent_cancel,

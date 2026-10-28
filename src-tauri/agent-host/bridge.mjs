@@ -68,7 +68,7 @@ export class Peer {
     if (response && this.pending.has(String(id))) {
       const pending = this.pending.get(String(id)); this.pending.delete(String(id))
       const error = value.error || (value.success === false ? "Agent rejected the request" : undefined) || (value.response?.subtype === "error" ? value.response.error : undefined)
-      if (error) pending.reject(new Error(errorText(error)))
+      if (error) { const failure = new Error(errorText(error)); failure.rpcResponse = true; failure.rpcCode = error.code; pending.reject(failure) }
       else pending.resolve(value.type === "control_response" ? value.response?.response || {} : value.type === "response" ? value.data : value.result)
     } else Promise.resolve(this.onEvent(value)).catch(error => this.onFailure(error))
   }
@@ -101,7 +101,7 @@ export class Peer {
 }
 
 export class Driver {
-  constructor(host, executable) { this.host = host; this.executable = executable; this.configs = []; this.commands = []; this.id = ""; this.turn = null; this.message = 0; this.askQueue = Promise.resolve(); this.questionCount = 0 }
+  constructor(host, executable) { this.host = host; this.executable = executable; this.configs = []; this.commands = []; this.id = ""; this.turn = null; this.message = 0; this.askQueue = Promise.resolve(); this.questionCount = 0; this.historyCapabilities = { revert: false, retry: false } }
   update(update) { this.host.update(update) }
   text(text, reasoning = false, messageId) { if (text) this.update({ sessionUpdate: reasoning ? "agent_thought_chunk" : "agent_message_chunk", content: { type: "text", text }, _meta: { messageId } }) }
   tool(id, name, status, input, content, output) {
@@ -109,6 +109,8 @@ export class Driver {
   }
   configUpdate() { this.update({ sessionUpdate: "config_option_update", configOptions: this.configs }) }
   commandUpdate() { this.update({ sessionUpdate: "available_commands_update", availableCommands: this.commands }) }
+  checkpoint(messageId, checkpoint) { if (messageId) this.update({ sessionUpdate: "still_message_checkpoint", messageId, checkpoint }) }
+  async revert() { throw new Error("This agent does not expose a supported conversation revert operation") }
   begin() {
     if (this.turn) throw new Error("The agent is already working")
     const done = new Promise((resolve, reject) => { this.turn = { resolve, reject } })
@@ -147,6 +149,8 @@ export class PiDriver extends Driver {
     if (!this.id) throw new Error("Pi did not return a session identity")
     this.resumable = !!state.sessionFile
     await this.catalog(state)
+    const fork = await this.call("get_fork_messages").catch(() => null)
+    this.historyCapabilities = { revert: !!state.sessionFile && Array.isArray(fork?.messages), retry: !!state.sessionFile && Array.isArray(fork?.messages) }
   }
   async catalog(state) {
     const [models, commands, thinking] = await Promise.all([
@@ -159,9 +163,10 @@ export class PiDriver extends Driver {
     if (!this.commands.some(command => command.name === "compact")) this.commands.push({ name: "compact", description: "Compact the Pi conversation", source: "native", input: { hint: "Optional summary instructions" } })
     this.configUpdate(); this.commandUpdate()
   }
-  async prompt(text) {
+  async prompt(text, messageId) {
     const done = this.begin()
     this.operationType = /^\/compact(?:\s|$)/.test(text) ? "compact" : "prompt"
+    let previous
     try {
       const compact = text.match(/^\/compact(?:\s+([\s\S]*))?$/)
       if (compact && this.commands.find(command => command.name === "compact")?.source === "native") {
@@ -169,13 +174,39 @@ export class PiDriver extends Driver {
         this.finish(); return done
       }
       await this.catalog(await this.call("get_state"))
+      if (messageId && this.historyCapabilities.revert && !text.startsWith("/")) previous = (await this.call("get_fork_messages")).messages
       const response = await this.call("prompt", { message: text })
       if (response?.disposition === "handled") {
         const state = await this.call("get_state")
         if (!state.isStreaming && !state.isCompacting && !state.pendingMessageCount) this.finish()
       }
     } catch (error) { this.fail(error) }
-    return done
+    try { return await done } finally {
+      if (previous) {
+        try {
+          const next = (await this.call("get_fork_messages")).messages
+          const candidates = next.filter(entry => entry.text === text && !previous.some(old => old.entryId === entry.entryId))
+          if (candidates.length === 1) this.checkpoint(messageId, { provider: "pi", entryId: candidates[0].entryId, text })
+        } catch { /* Missing provider identity means this message has no history actions. */ }
+      }
+    }
+  }
+  async revert(checkpoint) {
+    if (checkpoint?.provider !== "pi" || typeof checkpoint.entryId !== "string") throw new Error("This message has no Pi history checkpoint")
+    const messages = (await this.call("get_fork_messages")).messages
+    if (!messages.some(entry => entry.entryId === checkpoint.entryId && entry.text === checkpoint.text)) throw new Error("The Pi message is no longer on the active branch")
+    const settings = this.configs.map(config => ({ id: config.id, value: config.currentValue }))
+    let fork
+    try { fork = await this.call("fork", { entryId: checkpoint.entryId }) }
+    catch (error) { error.historyUncertain = true; throw error }
+    if (fork?.cancelled) throw new Error("Pi cancelled the history change; the conversation was kept")
+    try {
+      const state = await this.call("get_state")
+      if (!state.sessionFile) throw new Error("Pi did not return the new session identity")
+      this.id = state.sessionFile
+      await this.catalog(state)
+      for (const setting of settings) if (this.configs.some(config => config.id === setting.id && config.options.some(option => option.value === setting.value))) await this.setConfig(setting.id, setting.value)
+    } catch (error) { error.historyUncertain = true; throw error }
   }
   async setConfig(id, value) {
     if (id === "model") { const [provider, ...model] = value.split("/"); await this.call("set_model", { provider, modelId: model.join("/") }) }
@@ -233,6 +264,7 @@ export class CodexDriver extends Driver {
     this.id = result.thread?.id
     if (!this.id) throw new Error("Codex did not return a thread identity")
     this.resumable = true; this.model = result.model; this.effort = result.reasoningEffort
+    this.historyCapabilities = { revert: result.thread.historyMode === "paginated", retry: result.thread.historyMode === "paginated" }
     this.models = []; let cursor
     do { const page = await this.peer.request("model/list", { ...(cursor ? { cursor } : {}) }); this.models.push(...page.data || []); cursor = page.nextCursor } while (cursor)
     this.catalog()
@@ -250,7 +282,7 @@ export class CodexDriver extends Driver {
     if (efforts?.length) this.configs.push(option("effort", "Reasoning", "thought_level", this.effort || model.defaultReasoningEffort || efforts[0], values(efforts)))
     this.configUpdate()
   }
-  async prompt(text) {
+  async prompt(text, messageId) {
     const done = this.begin()
     try {
       const command = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
@@ -266,8 +298,17 @@ export class CodexDriver extends Driver {
       if (command && !this.commands.some(entry => entry.name === command[1])) throw new Error(`/${command[1]} is a Codex terminal action, not a command supported in this chat. Use the conversation controls or terminal.`)
       const result = await this.peer.request("turn/start", { threadId: this.id, input: [{ type: "text", text }], ...(this.model ? { model: this.model } : {}), ...(this.effort ? { effort: this.effort } : {}) })
       this.turnId = result.turn?.id
+      if (this.turnId && this.historyCapabilities.revert) this.checkpoint(messageId, { provider: "codex", threadId: this.id, turnId: this.turnId })
     } catch (error) { this.fail(error) }
     return done
+  }
+  async revert(checkpoint) {
+    if (checkpoint?.provider !== "codex" || checkpoint.threadId !== this.id || typeof checkpoint.turnId !== "string") throw new Error("This message has no checkpoint in the current Codex thread")
+    let result
+    try { result = await this.peer.request("thread/revert", { threadId: this.id, beforeTurnId: checkpoint.turnId }) }
+    catch (error) { if (![-32601, -32602].includes(error.rpcCode)) error.historyUncertain = true; throw error }
+    if (result.thread?.id !== this.id) { const error = new Error("Codex did not confirm the reverted thread identity"); error.historyUncertain = true; throw error }
+    this.turnId = undefined
   }
   async setConfig(id, value) {
     // App Server accepts model/effort on each turn. These are next-turn choices,
@@ -436,12 +477,17 @@ export class OpenCodeDriver extends Driver {
     this.session = result.data || result; this.id = this.session.id; this.resumable = true
     if (!this.id) throw new Error("OpenCode did not return a session identity")
     await this.catalog(true)
+    const schema = await this.http("GET", "/openapi.json").catch(() => null)
+    const stage = schema?.paths?.["/api/session/{sessionID}/revert/stage"]?.post
+    const supported = !!stage && !!schema?.paths?.["/api/session/{sessionID}/revert/commit"]?.post
+      && stage.requestBody?.content?.["application/json"]?.schema?.properties?.files !== undefined
+    this.historyCapabilities = { revert: supported, retry: supported }
   }
   async http(method, path, body) {
     const response = await fetch(this.url + path, { method, headers: { Authorization: `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`, "Content-Type": "application/json" }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(45000) })
     const text = await response.text(); let value
     try { value = text ? JSON.parse(text) : {} } catch { throw new Error("OpenCode returned an unsupported API response") }
-    if (!response.ok) throw new Error(value.message || value.error?.message || `OpenCode request failed (${response.status})`)
+    if (!response.ok) { const error = new Error(value.message || value.error?.message || `OpenCode request failed (${response.status})`); error.status = response.status; throw error }
     return value
   }
   async catalog(waitForScan = false) {
@@ -483,7 +529,7 @@ export class OpenCodeDriver extends Driver {
     if (model?.variants?.length) this.configs.push(option("effort", "Reasoning", "thought_level", this.session.model?.variant || "", [{ value: "", name: "Default" }, ...model.variants.map(v => ({ value: v.id, name: v.name || v.id }))]))
     this.configUpdate(); this.commandUpdate()
   }
-  async prompt(text) {
+  async prompt(text, messageId) {
     const done = this.begin()
     this.commandIdleCheck = false
     try {
@@ -493,7 +539,8 @@ export class OpenCodeDriver extends Driver {
       const skill = mention && this.skills.find(skill => skill.id === mention[1])
       if (mention && !skill) throw new Error(`The skill @${mention[1]} is not available in this project's current inventory`)
       if (skill) {
-        await this.http("POST", `/api/session/${this.id}/prompt`, { text, skills: [{ id: skill.id, mention: { start: 0, end: skill.id.length + 1, text: `@${skill.id}` } }] })
+        const admitted = await this.http("POST", `/api/session/${this.id}/prompt`, { text, skills: [{ id: skill.id, mention: { start: 0, end: skill.id.length + 1, text: `@${skill.id}` } }] })
+        this.promptCheckpoint(messageId, admitted, text)
       }
       else if (command?.[1] === "reload" && !this.commands.some(entry => entry.name === "reload" && entry.route === "command")) {
         this.scanPending = new Set(["command.updated", "skill.updated"]); this.scanned = new Promise(resolve => { this.finishScan = resolve })
@@ -508,9 +555,39 @@ export class OpenCodeDriver extends Driver {
         // A command can open a form or change settings without starting a turn.
         this.commandIdleCheck = true
         await this.checkCommandIdle()
-      } else await this.http("POST", `/api/session/${this.id}/prompt`, { text })
+      } else { const admitted = await this.http("POST", `/api/session/${this.id}/prompt`, { text }); this.promptCheckpoint(messageId, admitted, text) }
     } catch (error) { this.fail(error) }
     return done
+  }
+  promptCheckpoint(messageId, admitted, text) {
+    const entry = admitted?.data || admitted
+    if (this.historyCapabilities.revert && typeof entry?.id === "string") this.checkpoint(messageId, { provider: "opencode", sessionId: this.id, messageId: entry.id, text })
+  }
+  async revert(checkpoint) {
+    if (checkpoint?.provider !== "opencode" || checkpoint.sessionId !== this.id || typeof checkpoint.messageId !== "string") throw new Error("This message has no checkpoint in the current OpenCode session")
+    const current = await this.http("GET", `/api/session/${this.id}/message/${encodeURIComponent(checkpoint.messageId)}`)
+    const message = current.data || current
+    if (message.type !== "user" || message.text !== checkpoint.text) throw new Error("The OpenCode message changed; refresh before reverting")
+    const session = await this.http("GET", `/api/session/${this.id}`)
+    if ((session.data || session).revert) throw new Error("This OpenCode session already has a staged revert. Resolve it in the provider before continuing.")
+    let stagedByUs = false
+    try {
+      const staged = await this.http("POST", `/api/session/${this.id}/revert/stage`, { messageID: checkpoint.messageId, files: false })
+      if ((staged.data || staged).messageID !== checkpoint.messageId) throw new Error("OpenCode did not confirm the requested history boundary")
+      stagedByUs = true
+      await this.http("POST", `/api/session/${this.id}/revert/commit`)
+    } catch (error) {
+      if (error.status && error.status < 500) {
+        if (stagedByUs) {
+          try {
+            const latest = await this.http("GET", `/api/session/${this.id}`)
+            if ((latest.data || latest).revert?.messageID !== checkpoint.messageId) throw new Error("The provider history boundary changed")
+            await this.http("DELETE", `/api/session/${this.id}/revert`)
+          } catch { error.historyUncertain = true }
+        }
+      } else error.historyUncertain = true
+      throw error
+    }
   }
   async checkCommandIdle() {
     if (!this.commandIdleCheck || !this.turn || this.questionCount) return
@@ -610,7 +687,7 @@ export function createHost(write, driverId, executable) {
   const classes = { pi: PiDriver, codex: CodexDriver, claude: ClaudeDriver, opencode: OpenCodeDriver }
   const DriverClass = classes[driverId]
   if (!DriverClass) throw new Error("Unsupported native agent")
-  let driver, ready = false, closing = false, serial = 0, queue = [], cancelling = false
+  let driver, ready = false, closing = false, serial = 0, queue = [], cancelling = false, prompting = false, reverting = false
   const requests = new Map()
   const host = {
     questionGeneration: 0,
@@ -625,11 +702,19 @@ export function createHost(write, driverId, executable) {
         if (message.method === "initialize") result = { protocolVersion: 1, agentInfo: { name: { pi: "Pi", codex: "Codex", claude: "Claude Code", opencode: "OpenCode" }[driverId], version: "native" }, agentCapabilities: { loadSession: true }, authMethods: [] }
         else if (["session/new", "session/load"].includes(message.method)) {
           driver = new DriverClass(host, executable); await driver.start(message.params?.sessionId)
-          result = { sessionId: driver.id, configOptions: driver.configs, _meta: { resumable: driver.resumable === true } }
+          result = { sessionId: driver.id, configOptions: driver.configs, _meta: { resumable: driver.resumable === true, historyCapabilities: driver.historyCapabilities } }
         } else if (message.method === "session/prompt") {
-          if (!ready || closing || cancelling) throw new Error("Agent session is not ready")
-          result = await driver.prompt((message.params.prompt || []).map(part => part.text || "").join("\n"))
+          if (!ready || closing || cancelling || prompting || reverting) throw new Error("Agent session is not ready")
+          prompting = true
+          try { result = await driver.prompt((message.params.prompt || []).map(part => part.text || "").join("\n"), message.params?._meta?.messageId) } finally { prompting = false }
+        } else if (message.method === "_still/session/revert") {
+          if (!ready || closing || cancelling || prompting || reverting || driver.turn || driver.questionCount) throw new Error("Wait until the agent is idle before changing history")
+          if (!driver.historyCapabilities.revert) throw new Error("This agent does not support conversation revert")
+          if (message.params?.sessionId !== driver.id) throw new Error("History request belongs to another provider session")
+          reverting = true
+          try { await driver.revert(message.params.checkpoint); result = { reverted: true, sessionId: driver.id, configOptions: driver.configs } } finally { reverting = false }
         } else if (message.method === "session/set_config_option") {
+          if (reverting || prompting) throw new Error("Wait until the agent is idle before changing settings")
           const { configId, value } = message.params
           const config = driver.configs.find(option => option.id === configId)
           if (!config?.options?.some(option => option.value === value)) throw new Error("Choose a value offered by this agent")
@@ -646,7 +731,7 @@ export function createHost(write, driverId, executable) {
         if (["session/new", "session/load"].includes(message.method)) { ready = true; const pending = queue; queue = []; pending.forEach(host.update); driver.commandUpdate() }
       } catch (error) {
         if (["session/new", "session/load"].includes(message.method)) await host.close()
-        if (message.id !== undefined) write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: errorText(error) } }); else host.update({ sessionUpdate: "session_error", message: errorText(error) })
+        if (message.id !== undefined) write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: errorText(error), ...(error.historyUncertain ? { data: { historyUncertain: true } } : {}) } }); else host.update({ sessionUpdate: "session_error", message: errorText(error) })
       }
     },
   }

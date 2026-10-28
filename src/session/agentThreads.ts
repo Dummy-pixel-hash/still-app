@@ -12,6 +12,7 @@ const subscriptions = new Map<string, Unsubscribe>()
 const subscribing = new Map<string, Promise<void>>()
 const restored = new Set<string>()
 const tombstones = new Set<string>()
+const historyOperations = new Set<string>()
 const INDEX_KEY = "still.agents.index.v2"
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
   const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
@@ -42,7 +43,7 @@ export function loadAgentThreads() {
     const data = JSON.parse(localStorage.getItem(INDEX_KEY) || localStorage.getItem("still.agents.index.v1") || "[]")
     const deleted = JSON.parse(localStorage.getItem("still.agents.deleted.v2") || "[]")
     return { rows: Array.isArray(data) ? data.map(row => row && typeof row === "object" && typeof row.cwd === "string" ? { ...row, meta: metadata(row) } : row) : [], deleted: Array.isArray(deleted) ? deleted.filter(id => typeof id === "string") : [], workspaces: JSON.parse(localStorage.getItem("still.agents.workspace.v2") || "{}") }
-  }).then(library => {
+  }).then(async library => {
     for (const value of library.rows) {
       const row = value as AgentThreadRow & { previousEventCount?: number }
       if (!row || typeof row.executionId !== "string" || typeof row.localSessionId !== "string" || !Array.isArray(row.transcript)) continue
@@ -51,11 +52,15 @@ export function loadAgentThreads() {
       const previousCount = firstCurrent > 0 ? firstCurrent : row.previousEventCount || (firstCurrent < 0 && row.transcript.some(event => event.attemptId) ? row.transcript.length : 0)
       rows.set(row.executionId, { ...row, meta: metadata(row), configOptions: Array.isArray(row.configOptions) ? row.configOptions : [],
         previousTranscript: previousCount ? row.transcript.slice(0, previousCount) : undefined,
-        state: row.state === "submissionUnknown" || row.meta?.submissionUnknown ? "submissionUnknown" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.meta?.submissionUnknown ? row.lastError || "The last prompt's delivery was not confirmed. Inspect the provider session before continuing." : undefined })
+        state: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? "submissionUnknown" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? row.lastError || "The last operation was not confirmed. Inspect the provider session before continuing." : undefined })
       if (!library.liveExecutions?.includes(row.executionId)) restored.add(row.executionId)
     }
     emit()
-    for (const id of library.liveExecutions || []) if (rows.has(id)) void subscribeRemoteAgent(id)
+    await Promise.all((library.liveExecutions || []).filter(id => rows.has(id)).map(id => subscribeRemoteAgent(id)))
+    // A WebView reload can leave an unused pre-message connection behind.
+    // Keep anything with a draft or prompt; retire only the empty preparation.
+    await Promise.all([...rows.values()].filter(row => row.meta.prepared && !row.meta.draft && !row.transcript.some(event => event.type === "userMessage"))
+      .map(row => discardPreparedAgent(row.executionId).catch(() => {})))
   }).catch(error => { loading = undefined; throw error })
   return loading
 }
@@ -73,16 +78,49 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "threadComplete") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "complete"; row.lastError = undefined; row.meta = { ...row.meta, submissionUnknown: false } }
   if (event.type === "threadStopped") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = true; row.state = "working"; row.lastError = event.text || "Waiting for remote cancellation confirmation." }
   if (event.type === "configOptions" && event.configOptions) row.configOptions = event.configOptions
+  if (event.type === "historyCapabilities" && event.historyCapabilities) row.historyCapabilities = event.historyCapabilities
+  if (event.type === "messageCheckpoint") row.transcript = row.transcript.map(message => message.type === "userMessage" && message.messageId === event.messageId ? { ...message, checkpoint: event.checkpoint } : message)
+  if (event.type === "historyReverted") {
+    row.transcript = revertHistory(row.transcript, event.messageId)
+    if (row.previousTranscript) row.previousTranscript = revertHistory(row.previousTranscript, event.messageId)
+    row.state = "working"; row.lastError = undefined; row.meta = { ...row.meta, submissionUnknown: false }
+  }
   if (event.type === "commands" && event.commands) row.commands = event.commands
-  if (event.type === "threadError") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false; row.state = event.state || "error"; row.lastError = event.text || "Remote agent error." }
+  if (event.type === "threadError") {
+    row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false
+    row.state = row.meta.submissionUnknown ? "submissionUnknown" : event.state || "error"; row.lastError = event.text || "Remote agent error."
+    if (row.state === "submissionUnknown") row.meta = { ...row.meta, submissionUnknown: true }
+  }
   const last = row.transcript[row.transcript.length - 1]
   if ((event.type === "assistantChunk" || event.type === "reasoningChunk") && last?.type === event.type && last.messageId === event.messageId && last.attemptId === event.attemptId) {
     row.transcript = [...row.transcript.slice(0, -1), { ...last, endSequence: event.sequence, text: (last.text || "") + (event.text || "") }]
   } else row.transcript = [...row.transcript, event]
   // Streaming chunks need not synchronously serialize the whole history every token.
-  if (["userMessage", "threadComplete", "permission", "threadError"].includes(event.type)) persist(row)
+  if (["userMessage", "threadComplete", "permission", "threadError", "historyReverted"].includes(event.type)) persist(row)
   if (["assistantChunk", "reasoningChunk", "toolUpdate"].includes(event.type)) scheduleRender()
   else emit()
+}
+function revertHistory(events: AgentThreadEvent[], messageId?: string) {
+  const index = messageId ? events.findIndex(event => event.type === "userMessage" && event.messageId === messageId) : -1
+  return index < 0 ? events : events.slice(0, index)
+}
+function reconcileHistory(events: AgentThreadEvent[]) {
+  let result: AgentThreadEvent[] = []
+  for (const event of events) {
+    if (event.type === "historyReverted") result = revertHistory(result, event.messageId)
+    if (event.type === "messageCheckpoint") result = result.map(message => message.type === "userMessage" && message.messageId === event.messageId ? { ...message, checkpoint: event.checkpoint } : message)
+    result.push(event)
+  }
+  return result
+}
+function activeHistory(events: AgentThreadEvent[], messageIds?: string[]) {
+  if (!messageIds) return events
+  const active = new Set(messageIds)
+  let keep = true
+  return events.filter(event => {
+    if (event.type === "userMessage") keep = !event.messageId || active.has(event.messageId)
+    return keep || ["configOptions", "commands", "historyCapabilities", "historyReverted"].includes(event.type)
+  })
 }
 let renderFrame = 0
 function scheduleRender() { if (!renderFrame) renderFrame = requestAnimationFrame(() => { renderFrame = 0; emit() }) }
@@ -97,8 +135,9 @@ export async function refreshAgentThread(id: string) {
     const live = old?.transcript.slice(previous.length) || []
     const first = current.transcript[0]?.sequence
     const prefix = first === undefined ? live : live.filter(event => (event.endSequence || event.sequence) < first)
-    const unresolved = old?.meta.submissionUnknown && !current.turnActive && current.lastSequence <= old.lastSequence
-    rows.set(id, { ...current, ...(unresolved ? { state: "submissionUnknown" as const, lastError: old.lastError } : {}), previousTranscript: old?.previousTranscript, transcript: [...previous, ...prefix, ...current.transcript], meta: old?.meta ? { ...old.meta, submissionUnknown: !!unresolved } : metadata(current), touchedAt: old?.touchedAt || Date.now() })
+    const unresolved = current.state === "submissionUnknown" || old?.meta.submissionUnknown && !current.turnActive && current.lastSequence <= old.lastSequence
+    const transcript = activeHistory(reconcileHistory([...previous, ...prefix, ...current.transcript]), current.activeMessageIds)
+    rows.set(id, { ...current, ...(unresolved ? { state: "submissionUnknown" as const, lastError: current.lastError || old?.lastError } : {}), previousTranscript: old?.previousTranscript ? transcript.filter(event => event.attemptId !== id) : undefined, transcript, meta: old?.meta ? { ...old.meta, submissionUnknown: !!unresolved } : metadata(current), touchedAt: old?.touchedAt || Date.now() })
   }
   restored.delete(id)
   emit()
@@ -130,9 +169,9 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
   subscribing.set(id, task)
   return task
 }
-export async function sendAgentMessage(id: string, message: string) {
+export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false) {
   const row = rows.get(id)
-  if (!row || !["working", "complete", "cancelled"].includes(row.state) || row.turnActive) throw new Error("Agent is not ready for another prompt.")
+  if (!row || !["working", "complete", "cancelled"].includes(row.state) || row.turnActive || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
   // Sequence numbers and the user message come from the native runner, not an optimistic counter.
   row.turnActive = true; row.lastError = undefined; emit()
   try { await nativeBridge.agentSend(id, message) }
@@ -204,7 +243,7 @@ export function clearAgentDraft(id: string, submitted: string) {
 export async function deleteAgentThread(id: string) {
   const row = rows.get(id)
   if (!row) return
-  if (row.turnActive) throw new Error("Stop this conversation before deleting it.")
+  if (row.turnActive || row.state === "rewinding" || historyOperations.has(id)) throw new Error("Wait for the current operation before deleting this conversation.")
   if (!restored.has(id)) await nativeBridge.agentClose(id)
   await flushAgentSaves()
   await nativeBridge.agentDeleteSaved(row.meta.id)
@@ -213,8 +252,15 @@ export async function deleteAgentThread(id: string) {
   subscriptions.get(id)?.(); subscriptions.delete(id)
   emit()
 }
+export async function discardPreparedAgent(id: string) {
+  const row = rows.get(id)
+  if (row?.meta.prepared && !row.meta.draft && !row.transcript.some(event => event.type === "userMessage")) {
+    try { await deleteAgentThread(id) }
+    catch (error) { updateThreadMeta(id, { prepared: false }); throw error }
+  }
+}
 export function canResumeAgentThread(row: AgentThreadRow) {
-  return row.state !== "submissionUnknown" && !row.meta.submissionUnknown && !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
+  return row.state !== "submissionUnknown" && row.state !== "rewinding" && !historyOperations.has(row.executionId) && !row.meta.submissionUnknown && !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
 }
 export async function resumeAgentThread(id: string, start: (agent: string, options: AgentLaunchOptions) => Promise<AgentThreadRow>, executable?: string) {
   const row = rows.get(id)
@@ -229,9 +275,41 @@ export async function resumeAgentThread(id: string, start: (agent: string, optio
   persist(next); emit(); return next
 }
 const idleState = (row: AgentThreadRow) => ["working", "complete", "cancelled"].includes(row.state) && !row.turnActive
+export function canChangeAgentHistory(row: AgentThreadRow, messageId: string, retry = false) {
+  return !!row.historyCapabilities?.[retry ? "retry" : "revert"] && !restored.has(row.executionId) && !historyOperations.has(row.executionId)
+    && !row.turnActive && !row.pendingInput && !row.pendingPermission && !row.meta.submissionUnknown && !row.meta.archivedAt
+    && ["working", "complete", "cancelled", "error"].includes(row.state)
+    && row.transcript.some(event => event.type === "userMessage" && event.messageId === messageId && !!event.checkpoint)
+}
+export async function changeAgentHistory(id: string, messageId: string, retry: boolean) {
+  const row = rows.get(id)
+  if (!row || !canChangeAgentHistory(row, messageId, retry)) throw new Error("Resume this conversation and wait until it is idle before changing its messages.")
+  const message = row.transcript.find(event => event.type === "userMessage" && event.messageId === messageId)!
+  const existingDraft = row.meta.draft
+  historyOperations.add(id)
+  const sequence = row.lastSequence
+  row.state = "rewinding"; emit()
+  try {
+    await nativeBridge.agentRevert(id, messageId, sequence)
+    await refreshAgentThread(id)
+    const current = rows.get(id)
+    const restoredDraft = current && !existingDraft.trim() && !current.meta.draft.trim()
+    if (restoredDraft) updateThreadMeta(id, { draft: message.text || "" })
+    if (retry) {
+      await sendAgentMessage(id, message.text || "", true)
+      if (restoredDraft) clearAgentDraft(id, message.text || "")
+    }
+  } catch (error) {
+    try { await refreshAgentThread(id) } catch {
+      const current = rows.get(id)
+      if (current) { current.state = "submissionUnknown"; current.lastError = "The history change was not confirmed. Inspect the provider session before continuing."; current.meta = { ...current.meta, submissionUnknown: true }; persist(current) }
+    }
+    throw error
+  } finally { historyOperations.delete(id); emit() }
+}
 export async function setAgentConfig(id: string, configId: string, value: string | boolean) {
   const row = rows.get(id)
-  if (!row || row.turnActive || !["working", "complete", "cancelled"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
+  if (!row || row.turnActive || historyOperations.has(id) || !["working", "complete", "cancelled"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
   await nativeBridge.agentSetConfig(id, configId, value)
   await refreshAgentThread(id)
 }

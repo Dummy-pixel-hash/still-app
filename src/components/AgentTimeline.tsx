@@ -1,6 +1,6 @@
 import { memo, useState } from "react"
 import { toolLabel, type TranscriptItem } from "../agents/transcript"
-import type { AgentInputRequest, AgentPermissionRequest, AgentPlanEntry } from "../agents/types"
+import type { AgentHistoryCapabilities, AgentInputRequest, AgentPermissionRequest, AgentPlanEntry } from "../agents/types"
 import AgentIcon from "./AgentIcon"
 import { AgentMessage, AgentToolResult } from "./AgentMessage"
 import AgentDisclosure from "./AgentDisclosure"
@@ -22,7 +22,8 @@ function ToolRow({ item }: { item: TranscriptItem }) {
     </div>
     </AgentDisclosure>
 }
-export const AgentTimeline = memo(function AgentTimeline({ items, agentName, agentId, plan }: { items: TranscriptItem[]; agentName: string; agentId?: string; plan?: AgentPlanEntry[] }) {
+type MessageActions = { capabilities?: AgentHistoryCapabilities; enabled: boolean; act: (message: TranscriptItem, retry: boolean) => void }
+export const AgentTimeline = memo(function AgentTimeline({ items, agentName, agentId, plan, actions }: { items: TranscriptItem[]; agentName: string; agentId?: string; plan?: AgentPlanEntry[]; actions?: MessageActions }) {
   const groups: Array<TranscriptItem | TranscriptItem[]> = []
   for (const item of items) {
     const last = groups[groups.length - 1]
@@ -33,13 +34,20 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
   return <>{groups.map(item => Array.isArray(item) ? <ToolGroup key={item[0].id} items={item} />
     : item.kind === "notice" ? <p className={`agent-notice ${item.status === "error" ? "is-error" : ""}`} data-timeline-id={item.id} key={item.id}>{item.title && <strong>{item.title}: </strong>}{item.text}</p> : item.kind === "tool" ? <ToolRow key={item.id} item={item} />
       : item.kind === "reasoning" ? <AgentDisclosure key={item.id} id={item.id} className="agent-reasoning" summary={<>Reasoning <AgentIcon name="chevron" size={12} /></>}><AgentMessage text={item.text} /></AgentDisclosure>
-        : <Message key={item.id} id={item.id} kind={item.kind} text={item.text} author={item.kind === "user" ? "You" : agentName} agentId={agentId || agentName} />)}
+        : <Message key={item.id} item={item} author={item.kind === "user" ? "You" : agentName} agentId={agentId || agentName} actions={actions} />)}
     {!!plan?.length && <AgentDisclosure className="agent-plan" summary={<><AgentIcon name="check" size={14} /><span>Plan</span><small>{plan.filter(entry => entry.status === "completed").length} of {plan.length} complete</small><AgentIcon name="chevron" size={12} /></>}><ol>{plan.map((entry, index) => <li key={index} className={entry.status}><span>{entry.status === "completed" ? "✓" : entry.status === "in_progress" ? "•" : "○"}</span>{entry.content}</li>)}</ol></AgentDisclosure>}
   </>
 })
-const Message = memo(function Message({ id, kind, text, author, agentId }: { id: string; kind: string; text: string; author: string; agentId: string }) {
-  return <article data-timeline-id={id} className={`agent-message agent-message-${kind}`}><div className="agent-message-author">{kind !== "user" && <AgentProviderMark id={agentId} size={19} />}{author}</div>{kind === "user" ? <p className="agent-user-text">{text}</p> : <AgentMessage text={text} />}</article>
-})
+const Message = memo(function Message({ item, author, agentId, actions }: { item: TranscriptItem; author: string; agentId: string; actions?: MessageActions }) {
+  const { id, kind, text } = item
+  const canAct = kind === "user" && item.messageId && item.checkpoint && actions
+  return <article data-timeline-id={id} className={`agent-message agent-message-${kind}`}><div className="agent-message-author">{kind !== "user" && <AgentProviderMark id={agentId} size={19} />}{author}</div>{kind === "user" ? <p className="agent-user-text">{text}</p> : <AgentMessage text={text} />}
+    {canAct && (actions.capabilities?.revert || actions.capabilities?.retry) && <div className="agent-message-actions" aria-label="Message actions">
+      {actions.capabilities?.revert && <button type="button" disabled={!actions.enabled} title="Return to before this message; files stay as they are" onClick={() => actions.act(item, false)}><AgentIcon name="back" size={13} />Revert</button>}
+      {actions.capabilities?.retry && <button type="button" disabled={!actions.enabled} title="Revert this message and later replies, then send it again with the selected model" onClick={() => actions.act(item, true)}><AgentIcon name="refresh" size={13} />Retry</button>}
+    </div>}
+  </article>
+}, (before, after) => before.item.id === after.item.id && before.item.kind === after.item.kind && before.item.text === after.item.text && before.item.messageId === after.item.messageId && before.item.checkpoint === after.item.checkpoint && before.author === after.author && before.agentId === after.agentId && before.actions === after.actions)
 function ToolGroup({ items }: { items: TranscriptItem[] }) {
   const done = items.filter(item => item.status === "completed").length
   const failed = items.some(item => item.status === "failed" || item.status === "error")
