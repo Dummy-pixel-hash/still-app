@@ -9,11 +9,14 @@ import { startRemoteAgent } from "../src/session/agentThreads"
 import Workspace from "../src/screens/Workspace"
 import { hostKey } from "../src/agents/workspace"
 import { flushAgentSaves } from "../src/session/agentStorage"
+import { createAgentDemo } from "./demo"
+import "./demo.css"
 
 // This bridge is installed only by this test entrypoint, never by production code.
 const snapshots = new Map<string, AgentThreadSnapshot>()
 const sinks = new Map<string, (event: AgentThreadEvent) => void>()
-const libraryKey = "still.test.agent-library"
+const preview = new URLSearchParams(location.search).has("demo") && !new URLSearchParams(location.search).has("workspace")
+const libraryKey = preview ? "still.test.agent-demo-library.v1" : "still.test.agent-library"
 const library = () => JSON.parse(localStorage.getItem(libraryKey) || '{"rows":[],"workspaces":{},"deleted":[]}')
 const saveLibrary = (value: unknown) => { if (h.failSave) throw new Error("Local disk is unavailable"); localStorage.setItem(libraryKey, JSON.stringify(value)) }
 const modelOptions = [
@@ -139,9 +142,10 @@ registerNativeBridge({
 })
 
 const session = { id: "agent-fixture", name: "Development", host: "dev.example.test", port: 22, username: "dev", projectId: "still", workingDirectory: "/srv/still", authMethod: "ask" as const, remember: false, tmuxSession: "still-dev", createdAt: 0, updatedAt: 0 }
+if (preview && !localStorage.getItem(libraryKey)) saveLibrary(createAgentDemo(session))
 const fullWorkspace = new URLSearchParams(location.search).has("workspace")
 if (fullWorkspace) localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{id:"still",name:"Still",note:"",order:0}],sessions: new URLSearchParams(location.search).has("empty") ? [] : [session],order:{still:[session.id]},keys:[],settings:{confirmRemove:true,terminal:{fontSize:14,cursorStyle:"block",scrollback:5000}} }))
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic conversations · no server connection</span><a href="/tests-agents/fixture.html">Blank workspace</a></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
 async function mockCheck(id?: string, path?: string) {
   const { nativeBridge } = await import("../src/bridge/nativeBridge")
   return nativeBridge.agentCheck("ssh-fixture", id, path)

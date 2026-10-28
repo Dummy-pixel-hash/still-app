@@ -1123,17 +1123,38 @@ export default function Workspace() {
         inert={open ? true : undefined}
       >
         <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-16 sm:px-6">
-          <section className="rise flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-faint">
-                Persistent remote terminal
-              </p>
-              <h1 className="mt-1 font-serif text-4xl leading-tight sm:text-5xl">
-                Still <span className="italic text-dim">workspace</span>
-              </h1>
+          <header className="rise">
+            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+              <div className="min-w-0">
+                <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-faint">
+                  Persistent remote terminal
+                </p>
+                <h1 className="mt-1 font-serif text-4xl leading-tight sm:text-5xl">
+                  Still <span className="italic text-dim">workspace</span>
+                </h1>
+              </div>
+              <div className="flex shrink-0 items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  title="Open your projects and conversations"
+                  onClick={() => { setAgentFor(null); setAgentsOpen(true) }}
+                  className="flex h-8 items-center rounded-full border border-white/10 px-3.5 text-[12px] text-dim transition hover:border-white/25 hover:text-fg"
+                >
+                  Agents
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowSettings(true)}
+                  aria-label="Settings"
+                  className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 text-dim transition hover:border-white/25 hover:text-fg"
+                >
+                  ⚙
+                </button>
+              </div>
             </div>
-            <div className="flex w-full min-w-0 flex-wrap items-center gap-2 lg:w-auto">
-              <div className="relative">
+
+            <div className="mt-6 flex flex-wrap items-center gap-2.5 sm:gap-3">
+              <div className="relative min-w-0 flex-1 md:max-w-xl">
                 <input
                   ref={searchRef}
                   value={q}
@@ -1148,7 +1169,7 @@ export default function Workspace() {
                   placeholder="Search sessions…"
                   aria-label="Search sessions"
                   enterKeyHint="search"
-                  className="w-44 rounded-full border border-white/10 bg-black/40 py-1.5 pl-3 pr-12 text-[12px] text-fg outline-none transition focus:w-56 focus:border-[#ff4a4a]/50 sm:w-52"
+                  className="h-9 w-full rounded-full border border-white/10 bg-black/40 pl-4 pr-12 text-[12px] text-fg outline-none transition focus:border-[#ff4a4a]/50"
                 />
                 <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10px] text-faint">
                   ⌃K
@@ -1158,41 +1179,33 @@ export default function Workspace() {
                 value={sort}
                 onChange={(e) => setSort(e.target.value as Sort)}
                 aria-label="Sort sessions"
-                className="rounded-full border border-white/10 bg-black/40 px-3 py-1.5 text-[12px] text-dim outline-none"
+                className="h-9 rounded-full border border-white/10 bg-black/40 px-3 text-[12px] text-faint outline-none transition hover:text-fg focus:border-[#ff4a4a]/50"
               >
                 <option value="manual" className="bg-[#121214]">Manual</option>
                 <option value="recent" className="bg-[#121214]">Recent</option>
                 <option value="name" className="bg-[#121214]">Name</option>
               </select>
-              <button
-                type="button"
-                onClick={() => setShowNewProject(true)}
-                className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg"
-              >
-                + Project
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const p = store.projects[0] ?? createProject("Default", "")
-                  setShowNew(p.id)
-                }}
-                className="rounded-full bg-[#e8e2e6] px-4 py-1.5 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
-              >
-                New Session
-              </button>
-              <button type="button" title="Open your projects and conversations" onClick={() => { setAgentFor(null); setAgentsOpen(true) }} className="rounded-full border border-white/10 px-4 py-1.5 text-[13px] text-dim transition hover:border-white/25 hover:text-fg">Agents</button>
-
-              <button
-                type="button"
-                onClick={() => setShowSettings(true)}
-                aria-label="Settings"
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 text-dim transition hover:border-white/25 hover:text-fg"
-              >
-                ⚙
-              </button>
+              <div className="flex w-full flex-wrap items-center justify-end gap-2 md:ml-auto md:w-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowNewProject(true)}
+                  className="h-9 rounded-full border border-white/10 px-4 text-[13px] text-dim transition hover:border-white/25 hover:text-fg"
+                >
+                  + Project
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const p = store.projects[0] ?? createProject("Default", "")
+                    setShowNew(p.id)
+                  }}
+                  className="h-9 rounded-full bg-[#e8e2e6] px-4 text-[13px] font-medium text-[#17171a] transition hover:bg-white"
+                >
+                  New Session
+                </button>
+              </div>
             </div>
-          </section>
+          </header>
 
           {empty ? (
             <section className="rise mt-10 rounded-[20px] border border-dashed border-white/15 bg-white/[0.02] p-10 text-center">

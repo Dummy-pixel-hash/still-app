@@ -60,6 +60,7 @@ export function sessionForHost(key: string, sessions: Session[]): Session | null
 }
 export interface AgentLibraryPreferences {
   projects: AgentProject[]
+  sidebarCollapsed: boolean
   sort: "recent" | "name" | "manual"
   collapsed: string[]
   drafts: Record<string, string>
@@ -68,11 +69,11 @@ export interface AgentLibraryPreferences {
   servers: Session[]
 }
 export function readLibraryPreferences(): AgentLibraryPreferences {
-  const defaults: AgentLibraryPreferences = { projects: [], sort: "recent", collapsed: [], drafts: {}, agent: "opencode", executables: {}, servers: [] }
+  const defaults: AgentLibraryPreferences = { projects: [], sidebarCollapsed: false, sort: "recent", collapsed: [], drafts: {}, agent: "opencode", executables: {}, servers: [] }
   const saved = storedWorkspace("library") as Partial<AgentLibraryPreferences> | undefined
   if (saved) {
     const strings = (value: unknown): Record<string, string> => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([, text]) => typeof text === "string")) : {}
-    return { ...defaults, projects: Array.isArray(saved.projects) ? saved.projects.filter(p => p && typeof p.host === "string" && typeof p.folder === "string").map(p => ({ ...p, name: typeof p.name === "string" ? p.name : undefined })) : [],
+    return { ...defaults, sidebarCollapsed: saved.sidebarCollapsed === true, projects: Array.isArray(saved.projects) ? saved.projects.filter(p => p && typeof p.host === "string" && typeof p.folder === "string").map(p => ({ ...p, name: typeof p.name === "string" ? p.name : undefined })) : [],
       sort: ["recent", "name", "manual"].includes(saved.sort || "") ? saved.sort! : "recent", collapsed: Array.isArray(saved.collapsed) ? saved.collapsed.filter(value => typeof value === "string") : [],
       agent: typeof saved.agent === "string" ? saved.agent : "opencode", drafts: strings(saved.drafts), executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).map(([key, paths]) => [key, strings(paths)])) : {}, servers: Array.isArray(saved.servers) ? saved.servers.filter(server => server && typeof server.host === "string" && typeof server.username === "string" && typeof server.port === "number").map(agentServerProfile) : [] }
   }

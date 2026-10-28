@@ -1,0 +1,5 @@
+.agent-demo-banner { position: fixed; top: 0; left: 0; right: 0; height: 30px; display: flex; align-items: center; gap: 12px; padding: 0 18px; background: #1d2735; color: #c0cde1; font: 11px/1.4 var(--font-sans); z-index: 70; }
+.agent-demo-banner strong { font-weight: 500; color: #e2ebfa; }
+.agent-demo-banner a { margin-left: auto; color: #c1d8fb; text-decoration: underline; text-underline-offset: 3px; }
+.agent-demo-banner + .agent-workspace { top: 30px; }
+@media (max-width: 640px) { .agent-demo-banner { padding: 0 10px; font-size: 10px; gap: 8px; } .agent-demo-banner strong { display: none; } }

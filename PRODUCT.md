@@ -22,6 +22,8 @@ The agent workspace is a project-and-conversation surface for existing coding ag
 
 The global Agents entry opens a device-owned conversation library with no implicit server or project. A project is an explicitly chosen server/account and canonical remote folder. New servers can be added for agents without creating terminal cards. Saved conversations can be read offline; connecting to resume is a deliberate action. Still stores its conversation history, drafts, project organization, and provider-session references under the native application-data directory. The remote provider remains the authority for executing and resuming its own session.
 
+For a new conversation, sending the first message starts the selected coding agent and submits that message once startup is ready. Choosing a provider, browsing its catalog, or opening conversation settings does not start an agent session. The composer has no manual Connect-agent action.
+
 ## Capabilities and Constraints
 
 - Preserve session identity, tmux persistence, terminal rendering, authentication, and host-key checks.
@@ -32,6 +34,8 @@ The global Agents entry opens a device-owned conversation library with no implic
 ## Brand Commitments
 
 The name is Still. The existing workspace identity is retained. The user selected **B · Smoked glass** from the standalone orb studies: a dark shell with a restrained folded ribbon of light, not a full-rainbow voice visualizer.
+
+For Agents, the user explicitly wants the craft and interaction of **T3 Code or Codex**. Their actual desktop interfaces are the visual authority: project/conversation navigation, a focused start screen, an integrated coding conversation, and inspectable file changes. The October 28 request supersedes the muted sage visual treatment, while local history, deliberate project selection, and collapsible navigation remain product requirements.
 
 ## Evidence on Hand
 

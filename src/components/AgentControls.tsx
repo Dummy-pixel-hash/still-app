@@ -1,13 +1,16 @@
-import { useEffect, useId, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import type { AgentConfigOption, AgentConfigOptionValue, AgentCommand } from "../agents/types"
 import AgentIcon from "./AgentIcon"
+import { useAgentPopover } from "../agents/useAgentPopover"
 
 export function configValues(option: AgentConfigOption): AgentConfigOptionValue[] {
   return (option.options || []).flatMap(value => "value" in value ? [value] : value.options)
 }
-export function ConfigPicker({ option, disabled, change }: { option: AgentConfigOption; disabled: boolean; change: (id: string, value: string | boolean) => void }) {
+export function ConfigPicker({ option, disabled, change, icon }: { option: AgentConfigOption; disabled: boolean; change: (id: string, value: string | boolean) => void; icon?: ReactNode }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(""), [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
+  useAgentPopover(popup, open)
   const listId = useId()
   const all = configValues(option)
   const selected = all.find(value => value.value === option.currentValue)
@@ -25,8 +28,8 @@ export function ConfigPicker({ option, disabled, change }: { option: AgentConfig
   if (option.type !== "select") return <span className="agent-muted">{option.name}: {String(option.currentValue)}</span>
   return <div className="agent-picker" ref={root} data-config-id={option.id}>
     <button type="button" className="agent-control" aria-label={`${option.name}: ${selected?.name || option.currentValue || "Default"}`} aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen(!open); setQuery(""); setActive(0) }} title={option.description || option.name}>
-      <span>{selected?.name || String(option.currentValue || "Default")}</span><AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>
-    {open && <div className="agent-picker-popup" onKeyDown={e => {
+      {icon}<span>{selected?.name || String(option.currentValue || "Default")}</span><AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>
+    {open && <div ref={popup} className="agent-picker-popup" onKeyDown={e => {
       e.stopPropagation()
       if (e.key === "Escape") { e.stopPropagation(); setOpen(false); root.current?.querySelector("button")?.focus() }
       if (e.key === "ArrowDown") { e.preventDefault(); setActive(index => Math.min(filtered.length - 1, index + 1)) }
@@ -54,6 +57,7 @@ export function CommandPicker({ commands, query, onQuery, onSelect, onClose, loa
   const [active, setActive] = useState(0)
   const input = useRef<HTMLInputElement>(null)
   const root = useRef<HTMLDivElement>(null)
+  useAgentPopover(root, true)
   const listId = useId()
   const list = commands.filter(command => `${command.name} ${command.aliases?.join(" ") || ""} ${command.description} ${command.source || ""}`.toLowerCase().includes(query.replace(/^\//, "").toLowerCase()))
   useEffect(() => { input.current?.focus() }, [])

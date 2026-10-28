@@ -1,5 +1,19 @@
 # Agent workspace: T3 Code review and revision plan
 
+## 28 October 2026 — T3/Codex visual rebuild
+
+The user rejected the muted agent interface, then explicitly rejected the split-rail sidebar. The revised source follows the actual [T3 Code desktop workspace](https://t3.codes) and [Codex desktop app](https://openai.com/index/introducing-the-codex-app/):
+
+- **Navigation:** one 272px project column, 35px single-line conversations, provider marks, relative activity, labelled new/search/archive controls, and bottom settings. The 48px icon rail appears when collapsed. Row actions replace the timestamp on hover/focus; touch layouts expose the actions directly. Folder grouping, search/order, rename, pin, archive, confirmed deletion, and locally remembered collapse remain functional.
+- **Start and conversation:** a centered real composer and draft-only prompt starters; the composer docks beneath active conversations. The agent starts when its first message is sent, with startup readiness and draft retention covered by browser regressions. Send/Stop is the sole trailing composer action; command search and secondary settings remain keyboard-accessible. An inset graphite main surface, crisper typography, and restrained blue interactions replace the rejected sage treatment.
+- **Code and review:** language-aware highlighting with escaped source and exact code copying. A Changes inspector derives unified hunks and counts from supplied before/after text or patches. Multi-file patches are separated, unsupported patches retain their raw text without invented line totals, and repeated edits remain separate reports. Failed, pending, and unconfirmed patches retain visible outcomes and are excluded from completed-change totals. This is conversation evidence, not a remote Git working-tree snapshot.
+- **Responsive behavior:** the review pane is side-by-side above 1100px and modal below that width, with inert background controls and restored focus. Project navigation below 800px also owns focus while open and restores its toggle on dismissal. Composer pickers fit the chat viewport. Navigation collapse, disclosures, and motion respect reduced-motion preferences.
+- **Preview:** `/tests-agents/fixture.html?demo` provides eight explicitly synthetic conversations in three projects and two example file changes. Demo storage has a separate browser key from the blank regression fixture. This is an interactive UI simulation, not authenticated inference.
+
+Verification: the **46-case agent browser suite passed**, including code-copy escaping, multi-file/invalid patches, failed/pending edit accounting, Changes focus restoration, mobile navigation focus ownership, explicit project choice, history recovery, and compact-window controls. Production `npm run build`, typecheck, and `git diff --check` passed. Populated 1440×900 and 620×700 browser checks confirmed 272px/48px navigation, 35px rows, accessible mobile row actions, and no document overflow. The public ngrok demo was exercised through a real browser: eight conversations, two review files, reload persistence, isolated fixture storage, and no page errors. A finishing review identified outcome accounting, mobile focus, and a Pi-mark flex-sizing issue; all three were corrected before delivery.
+
+These refinements are integrated in the shared production agent components. Pre-publish checks passed the production build, all 9 protocol tests, all 46 agent browser tests, and `git diff --check`. Packaged target-device and authenticated provider verification remain as recorded below.
+
 ## Revision 3 — issue-by-issue remediation plan
 
 **27 October 2026 · Approved by “Start!” · Implemented; target-device acceptance remains**
