@@ -13,7 +13,7 @@
   --ag-blue: #dedede;
   --ag-green: #7ddcb0;
   --ag-red: #ed7780;
-  --ag-chrome: rgba(9, 9, 9, .78);
+  --ag-chrome: rgba(28, 28, 31, .6);
   --ag-chrome-edge: rgba(255, 255, 255, .075);
   --ag-ease: cubic-bezier(.16, 1, .3, 1);
   position: fixed;
@@ -732,7 +732,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 
 /* Minimal index: black foundations with real glass over the red particle horizon. */
 .agent-workspace .agent-sidebar {
-  background: var(--ag-chrome);
+  background: var(--ag-glass-sheen), var(--ag-chrome);
   border-right: 1px solid var(--ag-chrome-edge);
   backdrop-filter: blur(24px) saturate(110%);
   -webkit-backdrop-filter: blur(24px) saturate(110%);
@@ -754,7 +754,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-workspace .agent-rail-bottom > button { border-radius: 9px; }
 .agent-workspace .agent-sidebar-rail > .agent-rail-new { color: #e5a1a9; }
 .agent-workspace .agent-main {
-  background: rgba(5, 5, 5, .62);
+  background: transparent;
   border: 0;
   border-radius: 0;
   margin: 0;
@@ -763,7 +763,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   height: 44px;
   margin: 10px 14px 0;
   padding: 0 13px;
-  background: var(--ag-chrome);
+  background: var(--ag-glass-sheen), var(--ag-chrome);
   border: 1px solid var(--ag-chrome-edge);
   border-top-color: rgba(255, 255, 255, .12);
   border-radius: 12px;
@@ -780,15 +780,15 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-workspace .agent-review-toggle small { color: #c0baba; }
 .agent-workspace .agent-composer {
   z-index: 3;
-  background: rgba(9, 9, 9, .72);
+  background: transparent;
   border: 1px solid rgba(255, 255, 255, .09);
   border-top-color: rgba(255, 255, 255, .13);
   border-radius: 14px;
-  backdrop-filter: blur(24px) saturate(112%);
-  -webkit-backdrop-filter: blur(24px) saturate(112%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
 }
-.agent-workspace .agent-composer:focus-within { border-color: #7c4d56; background: rgba(12, 11, 12, .78); }
+.agent-workspace .agent-composer:focus-within { border-color: #7c4d56; }
 .agent-workspace .agent-sidebar-search {
   background: rgba(255, 255, 255, .02);
   border: 1px solid rgba(255, 255, 255, .065);
@@ -836,7 +836,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-chat.is-launch.has-recents .agent-recents {
   align-self: start;
   padding: 18px 20px;
-  background: rgba(8, 8, 8, .62);
+  background: var(--ag-glass-sheen), var(--ag-chrome);
   border: 1px solid rgba(255, 255, 255, .075);
   border-top-color: rgba(255, 255, 255, .11);
   border-radius: 14px;
@@ -848,6 +848,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   .agent-chat.is-launch.has-recents .agent-recents { padding: 16px; }
 }
 @media (max-width: 800px) {
-  .agent-workspace .agent-sidebar { background-color: rgba(13, 13, 13, .86); }
+  .agent-workspace .agent-sidebar { background-color: var(--ag-sheet-deep); }
   .agent-workspace .agent-topbar { height: 46px; margin: 8px 10px 0; padding-inline: 10px; border-radius: 11px; }
 }

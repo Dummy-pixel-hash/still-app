@@ -110,11 +110,12 @@ test("the particle horizon sits behind genuinely frosted writing and history sur
   await expect(welcomePane).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(welcomePane).toHaveCSS("box-shadow", "none")
   await expect(welcomePane).toHaveCSS("backdrop-filter", "none")
-  await expect(recentPane).toHaveCSS("background-color", "rgba(8, 8, 8, 0.62)")
+  await expect(recentPane).toHaveCSS("background-color", "rgba(28, 28, 31, 0.6)")
   await expect(recentPane).toHaveCSS("border-radius", "14px")
   await expect(recentPane).toHaveCSS("backdrop-filter", "blur(20px) saturate(1.1)")
-  await expect(chat.locator(".agent-composer")).toHaveCSS("backdrop-filter", "blur(24px) saturate(1.12)")
-  await expect(chat.locator(".agent-composer")).toHaveCSS("background-color", "rgba(9, 9, 9, 0.72)")
+  await expect(chat.locator(".agent-composer")).toHaveCSS("backdrop-filter", "none")
+  expect(await chat.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("blur(24px) saturate(1.12)")
+  await expect(chat.locator(".agent-composer")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(chat.locator(".agent-starters button").first()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(recentPane.locator(".agent-section-label > span")).toHaveText("Recent conversations")
   await expect(recentPane.locator(".agent-recent > img")).toHaveCount(0)
@@ -139,7 +140,6 @@ test("Agents keeps a black foundation and a horizontal particle aurora behind ac
     const style = getComputedStyle(el)
     const sidebar = getComputedStyle(el.querySelector(".agent-sidebar")!)
     const main = getComputedStyle(el.querySelector(".agent-main")!)
-    const composer = getComputedStyle(el.querySelector(".agent-composer")!)
     const dust = getComputedStyle(el.querySelector(".agent-aurora")!)
     return {
       bg: style.getPropertyValue("--ag-bg").trim(),
@@ -154,7 +154,7 @@ test("Agents keeps a black foundation and a horizontal particle aurora behind ac
       mainBackground: main.backgroundColor,
       mainRadius: main.borderRadius,
       mainFilter: main.backdropFilter,
-      composerFilter: composer.backdropFilter,
+      composerFilter: getComputedStyle(el.querySelector(".agent-composer")!, "::before").backdropFilter,
       composerText: getComputedStyle(el.querySelector(".agent-welcome h1")!).color,
     }
   })
@@ -167,7 +167,7 @@ test("Agents keeps a black foundation and a horizontal particle aurora behind ac
   expect(palette.dustPointerEvents).toBe("none")
   expect(palette.dustZIndex).toBe("-1")
   expect(palette.sidebarFilter).toBe("blur(24px) saturate(1.1)")
-  expect(palette.mainBackground).toBe("rgba(5, 5, 5, 0.62)")
+  expect(palette.mainBackground).toBe("rgba(0, 0, 0, 0)")
   expect(palette.mainRadius).toBe("0px")
   expect(palette.mainFilter).toBe("none")
   expect(palette.composerFilter).toBe("blur(24px) saturate(1.12)")

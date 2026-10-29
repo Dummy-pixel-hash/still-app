@@ -16,7 +16,8 @@
         "height": 720,
         "decorations": false,
         "shadow": false,
-        "transparent": true
+        "transparent": false,
+        "backgroundColor": "#050505"
       }
     ],
     "security": {

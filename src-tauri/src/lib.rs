@@ -41,11 +41,12 @@ fn still_ping(state: tauri::State<'_, AppState>) -> PingResponse {
 /// Ask Win11 DWM for round window corners.
 ///
 /// `decorations: false` drops the titlebar; `shadow: false` drops the drop
-/// shadow. The window itself is transparent, so the visible shape comes
-/// from the web content: the Workspace root and the full-window terminal
-/// overlay both clip to the same 8px radius (see `rounded-lg`), which
-/// matches `DWMWCP_ROUND` exactly — a larger CSS radius would be sliced
-/// by the window shape and look broken at the corner tips.
+/// shadow. DWM clips the opaque main window to its rounded shape; the
+/// Workspace and terminal overlay keep the matching 8px CSS radius.
+/// The main WebView must have an opaque native background for WebView2 to
+/// composite CSS backdrop blur correctly. The separately built orb window
+/// stays transparent.
+/// See https://github.com/MicrosoftEdge/WebView2Feedback/issues/4945.
 ///
 /// The second call kills the persistent 1px native frame: frameless
 /// windows keep `WS_THICKFRAME` for resizing, and DWM draws its edge as
