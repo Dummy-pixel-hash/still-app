@@ -187,7 +187,7 @@
 /* A single vertical reading surface. Code overflows horizontally. */
 .agent-conversation { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 30px 32px 22px; overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #404550 transparent; }
 .agent-conversation:focus-visible { outline: 2px solid var(--ag-accent); outline-offset: -3px; }
-.agent-message-list { width: 100%; max-width: 740px; margin: 0 auto; }
+.agent-message-list { width: 100%; max-width: 960px; margin: 0 auto; }
 .agent-history-page { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 28px; padding: 0 0 17px; border-bottom: 1px solid var(--ag-line); }
 .agent-history-page > button:first-child { color: #d3dcc2; background: none; padding: 5px 0; font-size: 12px; }
 .agent-history-page span { font-size: 10px; color: var(--ag-faint); margin-left: 8px; }
@@ -850,4 +850,62 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 @media (max-width: 800px) {
   .agent-workspace .agent-sidebar { background-color: var(--ag-sheet-deep); }
   .agent-workspace .agent-topbar { height: 46px; margin: 8px 10px 0; padding-inline: 10px; border-radius: 11px; }
+}
+
+/* The active composer floats over the reading surface instead of occupying a
+   black card row. The scroll viewport continues behind a soft bottom fade. */
+.agent-workspace .agent-chat:not(.is-launch) > .agent-conversation { padding-bottom: 220px; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: auto;
+  max-width: none;
+  padding: 30px clamp(16px, 4vw, 48px) max(12px, env(safe-area-inset-bottom));
+  background: none;
+  pointer-events: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area::before {
+  content: "";
+  position: absolute;
+  inset: -54px 0 -12px;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(5, 5, 5, 0), rgba(5, 5, 5, .035) 28%, rgba(5, 5, 5, .32));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  mask-image: linear-gradient(180deg, transparent, #000 45%);
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 45%);
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > * { pointer-events: auto; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer-footnote,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-model-error,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-error,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-saved-notice,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-connection-notice {
+  width: min(100%, 960px);
+  max-width: 960px;
+  margin-inline: auto;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer::before { content: none; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer:focus-within { border: 0; background: transparent; box-shadow: none; }
+.agent-workspace .agent-composer textarea:focus-visible {
+  outline: 2px solid rgba(220, 178, 187, .72) !important;
+  outline-offset: 5px;
+  border-radius: 4px;
+}
+@media (max-width: 540px) {
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area { padding: 24px 16px max(10px, env(safe-area-inset-bottom)); }
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-conversation { padding-bottom: 210px; }
 }

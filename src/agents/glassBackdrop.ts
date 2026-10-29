@@ -1,4 +1,4 @@
-const PANES = ".agent-sidebar,.agent-topbar,.agent-composer,.agent-chat.is-launch.has-recents .agent-recents,.agent-review,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-thread-menu,.agent-modal,.agent-toast"
+const PANES = ".agent-sidebar,.agent-topbar,.agent-chat.is-launch.has-recents .agent-recents,.agent-review,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-thread-menu,.agent-modal,.agent-toast"
 
 /** Three separable box passes approximate a Gaussian. The input is already
  * composited onto opaque black, so there are no transparent-color fringes.

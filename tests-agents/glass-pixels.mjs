@@ -21,7 +21,7 @@ export async function pixelContrast(page, image) {
 
 /** Probe the actual aurora canvas at its production depth, without inserting a
  * higher-z-index backdrop that could accidentally bypass a compositing defect. */
-export async function probeAuroraGlass(page, capture) {
+export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar", ".agent-sidebar"], ["recents", ".agent-recents"]]) {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.locator('.agent-aurora[data-rendered="true"][data-paused="true"]').waitFor()
   await page.waitForFunction(() => {
@@ -44,11 +44,11 @@ export async function probeAuroraGlass(page, capture) {
     return previous
   })
   if (previousFrame !== undefined) await page.waitForFunction(previous => document.querySelector(".agent-aurora canvas").dataset.frostFrame !== previous, previousFrame)
-  const hide = await page.addStyleTag({ content: ".agent-composer > *, .agent-sidebar > * { visibility: hidden !important; }" })
+  const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > * { visibility: hidden !important; }" })
   const source = await page.locator(".agent-aurora").boundingBox()
   if (!source) throw new Error("The production aurora is not visible")
   const panes = []
-  for (const [name, selector] of [["composer", ".agent-composer"], ["sidebar", ".agent-sidebar"]]) {
+  for (const [name, selector] of targetPanes) {
     const bounds = await page.locator(selector).boundingBox()
     if (!bounds) throw new Error(`${name} is not visible`)
     const x = Math.ceil(Math.max(bounds.x, source.x) + 20)
@@ -61,7 +61,7 @@ export async function probeAuroraGlass(page, capture) {
     await capture(`${name}-blurred`, image)
     panes.push({ name, clip, contrast: await pixelContrast(page, image) })
   }
-  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-composer::before, .agent-sidebar { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } [data-agent-frost] { background-image: none !important; } .agent-sidebar, .agent-recents { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = []
   try {
     for (const pane of panes) {

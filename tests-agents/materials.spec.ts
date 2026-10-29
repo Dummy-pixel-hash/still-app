@@ -110,23 +110,26 @@ test("native panes use a shared pre-blurred scene instead of an unsupported CSS 
   const workspace = page.locator(".agent-workspace")
   await expect(workspace).toHaveAttribute("data-native-shell", "true")
   await expect(workspace).toHaveAttribute("data-frost-rendered", "true")
-  const composer = page.locator(".agent-composer")
   const recents = page.locator(".agent-recents")
   const topbar = page.locator(".agent-topbar")
-  for (const [pane, pseudo] of [[composer, "::before"], [recents, null], [topbar, null]] as const) {
-    const background = await pane.evaluate((el, pseudo) => {
-      const style = getComputedStyle(el, pseudo)
-      return { image: style.backgroundImage, fill: style.getPropertyValue("--ag-chrome").trim(), radius: style.borderTopLeftRadius, filter: style.backdropFilter }
-    }, pseudo)
+  for (const pane of [page.locator(".agent-sidebar"), recents, topbar]) {
+    const background = await pane.evaluate(el => {
+      const style = getComputedStyle(el)
+      return { image: style.backgroundImage, radius: style.borderTopLeftRadius, filter: style.backdropFilter }
+    })
     expect(background.image).toContain("linear-gradient")
     expect(background.image).toContain("blob:")
-    expect(background.fill).toBe("rgba(18, 18, 21, .48)")
     expect(background.radius).not.toBe("0px")
     expect(background.filter).toBe("none")
   }
+  await page.locator(".agent-recent").first().click()
+  const composer = page.locator(".agent-composer")
+  await expect(page.locator(".agent-composer-area")).toHaveCSS("position", "absolute")
+  await expect(composer).not.toHaveAttribute("data-agent-frost", "")
+  await expect(composer).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(composer).toHaveCSS("border-top-width", "0px")
   await page.getByLabel("Message agent").focus()
-  await expect(composer).toHaveCSS("box-shadow", /rgba\(190, 92, 112,/)
+  await expect(page.getByLabel("Message agent")).toHaveCSS("outline-width", "2px")
   await page.getByLabel("Message agent").fill("Frosted glass remains usable")
   await expect(page.getByLabel("Message agent")).toHaveValue("Frosted glass remains usable")
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
