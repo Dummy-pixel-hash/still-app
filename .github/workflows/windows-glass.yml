@@ -1,12 +1,26 @@
 name: still-windows-glass
 
 on:
+  workflow_call:
+    inputs:
+      build_run:
+        description: Windows ARM64 build run containing the executable to test
+        required: true
+        type: string
+      diagnose:
+        description: Also measure isolated CSS and native frame variants
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       build_run:
         description: Successful Windows ARM64 build run containing the executable to test
         required: true
         type: string
+      diagnose:
+        description: Also measure isolated CSS and native frame variants
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +50,7 @@ jobs:
         env:
           STILL_BUILD_RUN: ${{ inputs.build_run }}
           STILL_GLASS_CDP_PORT: "9223"
+          STILL_GLASS_DIAGNOSE: ${{ inputs.diagnose && '1' || '0' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Get-ChildItem -Recurse native-glass-build -Filter 'still-app.exe' | Select-Object -First 1
@@ -53,9 +68,11 @@ jobs:
             node tests-agents/native-glass.mjs $exe.FullName
             $result = $LASTEXITCODE
           } finally {
-            $key = Get-Item -LiteralPath $policy
-            if ($null -eq $previous) { $key.DeleteValue('*', $false) }
-            else { $key.SetValue('*', $previous) }
+            $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments', $true)
+            try {
+              if ($null -eq $previous) { $key.DeleteValue('*', $false) }
+              else { $key.SetValue('*', $previous) }
+            } finally { $key.Dispose() }
           }
           exit $result
       - name: Preserve real WebView2 screenshots and measured contrast

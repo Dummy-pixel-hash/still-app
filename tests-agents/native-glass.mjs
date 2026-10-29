@@ -56,6 +56,44 @@ try {
   await page.getByRole("button", { name: "Agents", exact: true }).click()
   const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image))
   const report = { executable, buildRun: process.env.STILL_BUILD_RUN, userAgent: await page.evaluate(() => navigator.userAgent), results }
+  if (process.env.STILL_GLASS_DIAGNOSE === "1") {
+    report.variants = []
+    const variants = [
+      ["opaque-document", "html, body { background-color: #050505 !important; }"],
+      ["positive-layers", ".agent-aurora { z-index: 0 !important; } .agent-main, .agent-sidebar { z-index: 1 !important; }"],
+      ["no-isolation", ".agent-workspace { isolation: auto !important; }"],
+      ["opaque-source", ".agent-aurora { opacity: 1 !important; }"],
+      ["explicit-layers", ".agent-sidebar, .agent-composer::before { transform: translateZ(0) !important; }"],
+    ]
+    for (const [name, css] of variants) {
+      const style = await page.addStyleTag({ content: css })
+      try {
+        const measurements = await probeAuroraGlass(page, (imageName, image) => writeFile(join(output, `${name}-${imageName}.png`), image))
+        report.variants.push({ name, measurements })
+      } finally { await style.evaluate(el => el.remove()) }
+    }
+    const resetFrame = spawnSync("powershell.exe", ["-NoProfile", "-Command", `
+      Add-Type -TypeDefinition '
+        using System;
+        using System.Runtime.InteropServices;
+        public class GlassFrameProbe {
+          [StructLayout(LayoutKind.Sequential)] public struct Margins { public int left, right, top, bottom; }
+          [DllImport("dwmapi.dll")] public static extern int DwmExtendFrameIntoClientArea(IntPtr window, ref Margins margins);
+          [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref uint value, int size);
+        }';
+      $window = [Diagnostics.Process]::GetProcessById(${app.pid}).MainWindowHandle;
+      if ($window -eq [IntPtr]::Zero) { throw 'No native main-window handle'; }
+      $margins = New-Object GlassFrameProbe+Margins;
+      [GlassFrameProbe]::DwmExtendFrameIntoClientArea($window, [ref]$margins);
+      $color = [uint32]4294967294;
+      [GlassFrameProbe]::DwmSetWindowAttribute($window, 34, [ref]$color, 4);
+    `], { encoding: "utf8", timeout: 15_000 })
+    report.frameReset = { status: resetFrame.status, stdout: resetFrame.stdout, stderr: resetFrame.stderr }
+    if (resetFrame.status === 0) {
+      const measurements = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `no-dwm-glass-${name}.png`), image))
+      report.variants.push({ name: "no-dwm-glass", measurements })
+    }
+  }
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2))
   console.log(JSON.stringify(report, null, 2))
   for (const pane of results) {
