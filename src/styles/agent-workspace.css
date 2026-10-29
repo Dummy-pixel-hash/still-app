@@ -875,8 +875,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   z-index: -1;
   pointer-events: none;
   background: linear-gradient(180deg, rgba(5, 5, 5, 0), rgba(5, 5, 5, .02) 34%, rgba(5, 5, 5, .14));
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   mask-image: linear-gradient(180deg, transparent, #000 36%);
   -webkit-mask-image: linear-gradient(180deg, transparent, #000 36%);
 }

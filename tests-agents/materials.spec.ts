@@ -101,7 +101,7 @@ test("the real application entry opens the shared Agents UI, not a fixture-only 
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toBeVisible()
 })
 
-test("native panes use a shared pre-blurred scene instead of an unsupported CSS filter", async ({ page }) => {
+test("native glass surfaces use a shared pre-blurred scene while the active composer stays unboxed", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
   })

@@ -54,8 +54,7 @@ try {
   await page.setViewportSize({ width: 1100, height: 720 })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.getByRole("button", { name: "Agents", exact: true }).click()
-  await page.locator(".agent-chat").evaluate(chat => chat.classList.remove("is-launch"))
-  const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image), [["sidebar", ".agent-sidebar"], ["composer-veil", ".agent-composer-area"]])
+  const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image), [["sidebar", ".agent-sidebar"]])
   const report = { executable, buildRun: process.env.STILL_BUILD_RUN, userAgent: await page.evaluate(() => navigator.userAgent), results }
   if (process.env.STILL_GLASS_DIAGNOSE === "1") {
     report.variants = []
@@ -64,12 +63,12 @@ try {
       ["positive-layers", ".agent-aurora { z-index: 0 !important; } .agent-main, .agent-sidebar { z-index: 1 !important; }"],
       ["no-isolation", ".agent-workspace { isolation: auto !important; }"],
       ["opaque-source", ".agent-aurora { opacity: 1 !important; }"],
-      ["explicit-layers", ".agent-sidebar, .agent-composer::before { transform: translateZ(0) !important; }"],
+      ["explicit-layers", ".agent-sidebar { transform: translateZ(0) !important; }"],
     ]
     for (const [name, css] of variants) {
       const style = await page.addStyleTag({ content: css })
       try {
-        const measurements = await probeAuroraGlass(page, (imageName, image) => writeFile(join(output, `${name}-${imageName}.png`), image))
+      const measurements = await probeAuroraGlass(page, (imageName, image) => writeFile(join(output, `${name}-${imageName}.png`), image), [["sidebar", ".agent-sidebar"]])
         report.variants.push({ name, measurements })
       } finally { await style.evaluate(el => el.remove()) }
     }
@@ -91,7 +90,7 @@ try {
     `], { encoding: "utf8", timeout: 15_000 })
     report.frameReset = { status: resetFrame.status, stdout: resetFrame.stdout, stderr: resetFrame.stderr }
     if (resetFrame.status === 0) {
-      const measurements = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `no-dwm-glass-${name}.png`), image))
+      const measurements = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `no-dwm-glass-${name}.png`), image), [["sidebar", ".agent-sidebar"]])
       report.variants.push({ name: "no-dwm-glass", measurements })
     }
   }
