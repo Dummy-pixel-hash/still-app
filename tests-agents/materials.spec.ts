@@ -9,7 +9,7 @@ test("sidebar actions and conversation review use the same warm glass materials"
   await page.goto("/tests-agents/fixture.html?demo")
   const sidebar = page.locator(".agent-sidebar")
   const create = sidebar.getByRole("button", { name: "New conversation", exact: true })
-  await expect(create).toHaveCSS("border-top-width", "1px")
+  await expect(create).toHaveCSS("border-top-width", "0px")
   await expect(create).toHaveCSS("border-radius", "11px")
   await expect(create.locator("svg path")).toHaveAttribute("d", /^M12\.5 4\.5/)
   await sidebar.locator(".agent-thread-open").first().click()
@@ -72,4 +72,36 @@ test("the real application entry opens the shared Agents UI, not a fixture-only 
   await workspace.getByRole("button", { name: "Close agent workspace", exact: true }).click()
   await expect(workspace).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toBeVisible()
+})
+
+test("Tauri keeps visibly frosted surfaces when its WebView cannot composite backdrop filters", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
+  })
+  await page.setViewportSize({ width: 1456, height: 896 })
+  await page.goto("/tests-agents/fixture.html?demo")
+  const workspace = page.locator(".agent-workspace")
+  await expect(workspace).toHaveAttribute("data-native-shell", "true")
+  await page.addStyleTag({ content: '.agent-workspace[data-native-shell="true"] * { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' })
+
+  const composer = page.locator(".agent-composer")
+  const recents = page.locator(".agent-recents")
+  for (const pane of [composer, recents, page.locator(".agent-topbar")]) {
+    const background = await pane.evaluate(el => ({
+      image: getComputedStyle(el).backgroundImage,
+      fill: getComputedStyle(el).backgroundColor,
+      edge: getComputedStyle(el).borderTopColor,
+      radius: getComputedStyle(el).borderTopLeftRadius,
+    }))
+    expect(background.image).toContain("linear-gradient")
+    expect(background.fill).not.toBe("rgba(0, 0, 0, 0)")
+    expect(background.radius).not.toBe("0px")
+  }
+  await expect(composer).toHaveCSS("border-top-width", "0px")
+  await expect(recents).toHaveCSS("backdrop-filter", "none")
+  await page.getByLabel("Message agent").focus()
+  await expect(composer).toHaveCSS("box-shadow", /rgba\(232, 153, 166,/)
+  await page.getByLabel("Message agent").fill("Native frosted fallback remains usable")
+  await expect(page.getByLabel("Message agent")).toHaveValue("Native frosted fallback remains usable")
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })

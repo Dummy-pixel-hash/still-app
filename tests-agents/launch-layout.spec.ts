@@ -310,7 +310,7 @@ test("the sidebar is a rounded glass pane and keeps search, selection, collapse 
   await expect(sidebar).toHaveCSS("margin-left", "8px")
   await expect(sidebar).toHaveCSS("margin-top", "8px")
   await expect(sidebar).toHaveCSS("border-radius", "16px")
-  await expect(sidebar).toHaveCSS("border-top-width", "1px")
+  await expect(sidebar).toHaveCSS("border-top-width", "0px")
   await expect(sidebar).toHaveCSS("backdrop-filter", "blur(28px) saturate(1.1)")
   await expect(topbar).toHaveCSS("backdrop-filter", "blur(28px) saturate(1.1)")
   await expect(topbar).toHaveCSS("height", "44px")

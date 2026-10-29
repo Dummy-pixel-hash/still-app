@@ -70,12 +70,12 @@
   margin: 1px 0 7px;
   padding: 9px 12px;
   gap: 11px;
-  border-color: rgba(255, 255, 255, .12);
+  border: 0;
   background:
     linear-gradient(115deg, rgba(255, 255, 255, .07), transparent 65%),
     rgba(151, 53, 73, .13);
   color: #f1e9ed;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045), 0 7px 20px rgba(0, 0, 0, .12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07), 0 7px 20px rgba(0, 0, 0, .12);
 }
 .agent-workspace .agent-sidebar-new > svg { color: #edb5c0; }
 .agent-workspace .agent-sidebar-new > span { font-size: 13.5px; font-weight: 550; }
@@ -90,14 +90,15 @@
   margin: 0 0 3px;
   padding: 7px 11px;
   gap: 9px;
-  border: 1px solid rgba(255, 255, 255, .055);
+  border: 0;
   border-radius: 10px;
-  background: rgba(255, 255, 255, .018);
+  background: rgba(255, 255, 255, .028);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, .045);
   color: #91888e;
   transition: background-color 160ms var(--ag-ease), border-color 160ms var(--ag-ease);
 }
-.agent-workspace .agent-sidebar-search:hover { background: rgba(255, 255, 255, .035); border-color: rgba(255, 255, 255, .09); }
-.agent-workspace .agent-sidebar-search:focus-within { background: rgba(255, 255, 255, .045); border-color: rgba(232, 153, 166, .3); outline: 2px solid rgba(232, 153, 166, .22); outline-offset: 1px; }
+.agent-workspace .agent-sidebar-search:hover { background: rgba(255, 255, 255, .045); box-shadow: inset 0 -1px 0 rgba(255, 255, 255, .09); }
+.agent-workspace .agent-sidebar-search:focus-within { background: rgba(255, 255, 255, .055); box-shadow: inset 0 -1px 0 rgba(232, 153, 166, .68); outline: 2px solid rgba(232, 153, 166, .28); outline-offset: 2px; }
 .agent-workspace .agent-sidebar-search input { font-size: 12.5px; }
 .agent-workspace .agent-project-heading {
   min-height: 35px;
@@ -164,9 +165,9 @@
     width: 280px;
     flex-basis: 280px;
     margin: 8px 0 8px 8px;
-    border: 1px solid rgba(255, 255, 255, .11);
+    border: 0;
     border-radius: 16px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .055), 0 10px 32px rgba(0, 0, 0, .24);
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .28);
   }
   .agent-workspace .agent-sidebar.is-collapsed { width: 56px; flex-basis: 56px; }
 }
@@ -175,10 +176,10 @@
     inset: 54px auto 8px 8px;
     width: min(272px, calc(100vw - 32px));
     margin: 0;
-    border: 1px solid rgba(255, 255, 255, .15);
+    border: 0;
     border-radius: 16px;
     background-color: rgba(13, 11, 12, .88);
-    box-shadow: 0 16px 46px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .07);
+    box-shadow: 0 16px 46px rgba(0, 0, 0, .42);
     backdrop-filter: blur(30px) saturate(112%);
     -webkit-backdrop-filter: blur(30px) saturate(112%);
   }
@@ -276,6 +277,68 @@
 .agent-workspace .agent-review-edit { background: rgba(255, 255, 255, .025); }
 .agent-workspace .agent-review-empty { color: #ad94a4; }
 .agent-workspace .agent-review-empty h3 { color: #d8c7d2; }
+
+/* Accepted live direction: remove the composer stroke; keep a focus-only ring. */
+.agent-workspace .agent-chat .agent-composer-area .agent-composer { border: 0; padding: 18px 19px 13px; box-shadow: none; }
+.agent-workspace .agent-chat .agent-composer-area .agent-composer:focus-within {
+  border: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, .045), transparent 58%), rgba(30, 28, 29, .48);
+  box-shadow: 0 0 0 2px rgba(232, 153, 166, .48);
+}
+
+/* Windows WebView2 and some WebKitGTK builds parse backdrop-filter but do not
+   composite it reliably in a transparent Tauri window. Keep the native glass
+   visibly frosted with a local material veil, without changing browser output. */
+.agent-workspace[data-native-shell="true"] .agent-sidebar {
+  background:
+    radial-gradient(ellipse at 100% 28%, rgba(179, 60, 84, .16), transparent 58%),
+    linear-gradient(150deg, rgba(255, 255, 255, .07), transparent 45%),
+    rgba(17, 14, 15, .96);
+  border: 0;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .28);
+}
+.agent-workspace[data-native-shell="true"] .agent-topbar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, .085), rgba(255, 255, 255, .025)), rgba(21, 18, 19, .92);
+  border-color: rgba(255, 255, 255, .17);
+  border-top-color: rgba(255, 255, 255, .26);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .075), 0 6px 22px rgba(0, 0, 0, .16);
+}
+.agent-workspace[data-native-shell="true"] .agent-composer {
+  background:
+    radial-gradient(ellipse at 44% 112%, rgba(210, 64, 94, .21), transparent 73%),
+    linear-gradient(142deg, rgba(255, 255, 255, .105), rgba(255, 255, 255, .025) 48%, rgba(120, 57, 73, .1)),
+    rgba(27, 24, 25, .78);
+  border: 0;
+  padding: 18px 19px 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .12), inset 0 -16px 38px rgba(181, 54, 81, .075), 0 12px 32px rgba(0, 0, 0, .22);
+}
+.agent-workspace[data-native-shell="true"] .agent-composer:focus-within {
+  background:
+    radial-gradient(ellipse at 44% 112%, rgba(228, 76, 108, .24), transparent 73%),
+    linear-gradient(142deg, rgba(255, 255, 255, .12), rgba(255, 255, 255, .035) 48%, rgba(120, 57, 73, .13)),
+    rgba(31, 27, 29, .86);
+  border: 0;
+  box-shadow: 0 0 0 2px rgba(245, 193, 205, .58), inset 0 1px 0 rgba(255, 255, 255, .14), inset 0 -16px 38px rgba(181, 54, 81, .09), 0 12px 32px rgba(0, 0, 0, .22);
+}
+.agent-workspace[data-native-shell="true"] .agent-chat.is-launch.has-recents .agent-recents {
+  background:
+    radial-gradient(ellipse at 100% 0%, rgba(191, 63, 89, .14), transparent 64%),
+    linear-gradient(145deg, rgba(255, 255, 255, .075), rgba(255, 255, 255, .02) 54%),
+    rgba(23, 20, 21, .82);
+  border-color: rgba(255, 255, 255, .19);
+  border-top-color: rgba(255, 255, 255, .28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .09), 0 12px 28px rgba(0, 0, 0, .18);
+}
+.agent-workspace[data-native-shell="true"] .agent-review {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .075), transparent 52%), rgba(16, 14, 15, .97);
+  border-color: rgba(255, 255, 255, .2);
+  box-shadow: -10px 8px 35px rgba(0, 0, 0, .32), inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+.agent-workspace[data-native-shell="true"] :is(.agent-thread-menu, .agent-context-choices, .agent-picker-popup, .agent-model-menu, .agent-command-menu, .agent-modal, .agent-toast) {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .08), transparent 55%), rgba(19, 16, 17, .98);
+  border-color: rgba(255, 255, 255, .2);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .055);
+}
 
 /* Questions, approvals, settings and confirmations are part of the same app. */
 .agent-workspace :is(.agent-request-card, .agent-connection-notice) { background: var(--ag-sheet); border-color: var(--ag-edge-strong); border-radius: 13px; }
