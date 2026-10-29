@@ -19,17 +19,17 @@ test("sidebar actions and conversation review use the same warm glass materials"
   await expect(create.locator("svg path")).toHaveAttribute("d", /^M12\.5 4\.5/)
   await sidebar.locator(".agent-thread-open").first().click()
   await expect(page.locator(".agent-composer-hint")).toHaveCount(0)
-  await expect(page.locator(".agent-message-user").first()).toHaveCSS("background-color", "rgba(18, 17, 18, 0.46)")
+  await expect(page.locator(".agent-message-user").first()).toHaveCSS("background-color", "rgba(18, 17, 18, 0.64)")
   await expect(page.locator(".agent-conversation")).toHaveCSS("backdrop-filter", "blur(12px)")
   const summary = page.locator(".agent-change-summary")
-  await expect(summary).toHaveCSS("background-color", "rgba(12, 11, 12, 0.52)")
+  await expect(summary).toHaveCSS("background-color", "rgba(12, 11, 12, 0.68)")
   await expect(summary).toHaveCSS("border-radius", "13px")
   await expect(summary).toHaveCSS("border-top-width", "0px")
   await expect(summary.locator("svg path").first()).toHaveAttribute("d", /^M8 3\.5/)
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
   const review = page.locator(".agent-review")
   await expect(review).toHaveCSS("backdrop-filter", "blur(24px) saturate(1.12)")
-  await expect(review).toHaveCSS("background-color", "rgba(9, 8, 9, 0.72)")
+  await expect(review).toHaveCSS("background-color", "rgba(9, 8, 9, 0.82)")
   await expect(review).toHaveCSS("border-radius", "16px")
   await expect(review.locator(".agent-review-header h2")).toHaveCSS("font-size", "15px")
   await expect(review.locator(".agent-review-files > button.is-selected")).toHaveCSS("background-image", /linear-gradient\(105deg/)
@@ -55,7 +55,7 @@ test("provider and model selectors use deliberate glass surfaces and provider id
 
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
   const models = page.getByRole("dialog", { name: "Model and reasoning", exact: true })
-  await expect(models).toHaveCSS("background-color", "rgba(10, 9, 10, 0.76)")
+  await expect(models).toHaveCSS("background-color", "rgba(10, 9, 10, 0.88)")
   await expect(models).toHaveCSS("backdrop-filter", "blur(22px) saturate(1.12)")
   await expect(models.locator(".agent-model-menu-heading")).toHaveCSS("border-bottom-width", "0px")
   await expect(models.locator(".agent-picker-search")).toHaveCSS("border-bottom-width", "0px")
@@ -68,7 +68,7 @@ test("provider and model selectors use deliberate glass surfaces and provider id
   await page.getByRole("button", { name: "Done", exact: true }).click()
   await expect(models).toHaveCount(0)
   await page.goto("/tests-agents/fixture.html?demo&scenario=question")
-  await expect(page.locator(".agent-request-card")).toHaveCSS("background-color", "rgba(18, 17, 18, 0.46)")
+  await expect(page.locator(".agent-request-card")).toHaveCSS("background-color", "rgba(18, 17, 18, 0.64)")
   await expect(page.getByRole("radio", { name: "Extend the existing session", exact: true })).toBeVisible()
   await page.goto("/tests-agents/fixture.html?demo&scenario=approval")
   const allow = page.getByRole("button", { name: "Allow once", exact: true })
@@ -111,7 +111,7 @@ test("the native-shell CSS path retains dark translucent fills and enabled backd
   const composer = page.locator(".agent-composer")
   const recents = page.locator(".agent-recents")
   const topbar = page.locator(".agent-topbar")
-  for (const [pane, filter] of [[composer, "blur(24px) saturate(1.12)"], [recents, "blur(20px) saturate(1.1)"], [topbar, "blur(24px) saturate(1.1)"]] as const) {
+  for (const [pane, filter, fill] of [[composer, "blur(24px) saturate(1.12)", "rgba(9, 9, 9, 0.72)"], [recents, "blur(20px) saturate(1.1)", "rgba(8, 8, 8, 0.62)"], [topbar, "blur(24px) saturate(1.1)", "rgba(9, 9, 9, 0.78)"]] as const) {
     const background = await pane.evaluate(el => ({
       image: getComputedStyle(el).backgroundImage,
       fill: getComputedStyle(el).backgroundColor,
@@ -119,7 +119,7 @@ test("the native-shell CSS path retains dark translucent fills and enabled backd
       radius: getComputedStyle(el).borderTopLeftRadius,
     }))
     expect(background.image).toBe("none")
-    expect(background.fill).not.toBe("rgba(0, 0, 0, 0)")
+    expect(background.fill).toBe(fill)
     expect(background.radius).not.toBe("0px")
     await expect(pane).toHaveCSS("backdrop-filter", filter)
   }
