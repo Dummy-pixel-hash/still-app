@@ -1,0 +1,16 @@
+.lattice-loader { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--ag-dim); font-size: var(--ll-font, 12px); line-height: 1.4; }
+.lattice-loader__grid { position: relative; display: inline-grid; flex: 0 0 auto; grid-template-columns: repeat(var(--ll-n), var(--ll-cell)); grid-template-rows: repeat(var(--ll-n), var(--ll-cell)); gap: var(--ll-gap); width: max-content; height: max-content; }
+.lattice-loader__layer { display: grid; grid-template-columns: repeat(var(--ll-n), var(--ll-cell)); grid-template-rows: repeat(var(--ll-n), var(--ll-cell)); gap: var(--ll-gap); }
+.lattice-loader__layer + .lattice-loader__layer { position: absolute; inset: 0; }
+.lattice-loader__cell { display: block; width: var(--ll-cell); height: var(--ll-cell); border-radius: var(--ll-cell); background: var(--ll-color); opacity: var(--ll-idle); }
+.lattice-loader[data-shape="square"] .lattice-loader__cell { border-radius: 1px; }
+.lattice-loader__run .lattice-loader__cell:not([data-hole]) { animation: lattice-pulse var(--ll-cycle) linear infinite; }
+.lattice-loader[data-status="done"] .lattice-loader__run,
+.lattice-loader[data-status="error"] .lattice-loader__run { opacity: 0; animation: none; }
+.lattice-loader__mark .lattice-loader__cell { opacity: 0; }
+.lattice-loader__mark .lattice-loader__cell[data-on] { background: var(--ll-mark); opacity: 1; box-shadow: 0 0 8px color-mix(in srgb, var(--ll-mark-glow) 36%, transparent); }
+.lattice-loader[data-glow] .lattice-loader__run .lattice-loader__cell:not([data-hole]) { box-shadow: 0 0 8px color-mix(in srgb, var(--ll-glow) 32%, transparent); }
+.lattice-loader__text { white-space: nowrap; }
+.lattice-loader__timer { color: var(--ag-faint); font: 10px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; }
+@keyframes lattice-pulse { 0%, 100% { opacity: var(--ll-idle); transform: scale(.76); } 12% { opacity: 1; transform: scale(1); } 26% { opacity: .28; transform: scale(.9); } }
+@media (prefers-reduced-motion: reduce) { .lattice-loader__run .lattice-loader__cell { animation: none !important; transform: none; opacity: .64; } }

@@ -227,6 +227,7 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .055), 0 8px 22px rgba(0, 0, 0, .15);
 }
 .agent-workspace .agent-change-summary:hover { background: linear-gradient(105deg, rgba(255, 255, 255, .075), transparent 68%), rgba(33, 28, 30, .65); }
+.agent-workspace .agent-change-summary:focus-visible { outline: 2px solid rgba(226, 159, 177, .62); outline-offset: 2px; }
 .agent-workspace .agent-change-summary > svg { width: 29px; height: 29px; padding: 7px; border-radius: 9px; background: rgba(169, 75, 96, .15); color: #e3a8b6; }
 .agent-workspace .agent-change-summary > strong { color: #eee5e9; font-size: 13px; font-weight: 500; }
 .agent-workspace .agent-change-summary-action { padding: 5px 8px; border-radius: 8px; background: rgba(255, 255, 255, .035); color: #d6b4c1; font-size: 11px; }
@@ -415,7 +416,7 @@
 .agent-workspace .agent-composer .agent-control:hover,
 .agent-workspace .agent-composer .agent-model-trigger:hover { background: rgba(255, 255, 255, .075); color: #f5edf2; }
 .agent-workspace .agent-composer .agent-control[aria-expanded="true"],
-.agent-workspace .agent-composer .agent-model-trigger[aria-expanded="true"] { background: rgba(163, 66, 82, .16); color: #f4e7ed; }
+.agent-workspace .agent-composer .agent-model-trigger[aria-expanded="true"] { background: rgba(163, 66, 82, .16); border-color: rgba(232, 153, 166, .32); color: #f4e7ed; }
 .agent-workspace .agent-composer .agent-provider-mark { filter: drop-shadow(0 1px 5px rgba(0, 0, 0, .3)); }
 .agent-workspace .agent-model-trigger-copy strong { color: #eee6eb; font-size: 13px; font-weight: 500; }
 .agent-workspace .agent-model-trigger-copy small { color: #bbaeb7; font-size: 11px; }
@@ -443,6 +444,10 @@
 .agent-workspace .agent-review-diff .agent-code-language { min-height: 38px; padding-inline: 13px; border-bottom: 1px solid rgba(255, 255, 255, .06); color: #c9b9c2; }
 .agent-workspace .agent-review-diff .agent-code { border-radius: 0 0 11px 11px; }
 .agent-workspace .agent-review-note { margin-top: 7px; padding: 12px 16px; border-top-color: rgba(255, 255, 255, .06); color: #aaa0a6; font-size: 11px; }
+.agent-workspace .agent-reasoning { display: flex; align-items: center; gap: 10px; min-height: 38px; margin: 12px 0 20px; padding: 7px 10px; border-radius: 10px; background: rgba(255, 255, 255, .025); color: #d0c3cb; }
+.agent-workspace .agent-reasoning-loader { color: #ddb6c4; }
+.agent-workspace .agent-reasoning-phases { margin-left: auto; color: #a99da5; font-size: 11px; }
+@media (max-width: 540px) { .agent-workspace .agent-reasoning { padding-inline: 8px; } }
 @media (max-width: 1000px) {
   .agent-workspace .agent-review { width: min(640px, calc(100% - 16px)); border-radius: 16px; }
 }
@@ -459,12 +464,14 @@
 }
 .agent-workspace .agent-composer :is(.agent-picker > .agent-control, .agent-model-trigger) {
   min-height: 36px;
-  border: 0;
-  border-radius: 9px;
+  padding-inline: 11px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 999px;
   background: linear-gradient(140deg, rgba(255, 255, 255, .06), transparent 70%), rgba(255, 255, 255, .035);
   color: #e7dfe4;
 }
-.agent-workspace .agent-composer :is(.agent-picker > .agent-control:hover, .agent-model-trigger:hover) { background: rgba(255, 255, 255, .09); }
+.agent-workspace .agent-composer :is(.agent-control, .agent-model-trigger):focus-visible { outline: 2px solid rgba(226, 159, 177, .62); outline-offset: 2px; }
+.agent-workspace .agent-composer :is(.agent-picker > .agent-control:hover, .agent-model-trigger:hover) { background: rgba(255, 255, 255, .09); border-color: rgba(255, 255, 255, .2); }
 .agent-workspace :is(.agent-picker-popup, .agent-command-menu) > .agent-picker-search {
   min-height: 40px;
   margin: 9px 9px 5px;
@@ -498,6 +505,9 @@
 .agent-workspace :is(.agent-picker-options button[aria-selected="true"], .agent-model-group button[aria-selected="true"]) > svg { color: #e6a7b7; }
 .agent-workspace :is(.agent-picker-options small, .agent-command-name small, .agent-command-description small) { color: #bdb2ba; }
 .agent-workspace .agent-picker-count { min-height: 34px; padding: 8px 12px 9px; font-size: 11px; color: #a79da4; }
+.agent-workspace .agent-picker-popup.is-compact { padding: 5px; }
+.agent-workspace .agent-picker-popup.is-compact .agent-picker-options { padding: 0; }
+.agent-workspace .agent-picker-popup.is-compact .agent-picker-options button { min-height: 40px; }
 .agent-workspace .agent-model-menu-heading { min-height: 56px; padding: 13px 15px 10px; border-bottom: 0; }
 .agent-workspace .agent-model-menu-heading strong { color: #f0e8ec; font-size: 15px; font-weight: 550; letter-spacing: -.01em; }
 .agent-workspace .agent-model-menu-heading span { display: inline-flex; align-items: center; width: fit-content; padding: 2px 7px; border-radius: 99px; background: rgba(255, 255, 255, .05); color: #bdb2ba; font-size: 10px; }
@@ -516,12 +526,12 @@
 .agent-workspace .agent-model-group button strong { font-size: 13.5px; font-weight: 500; color: #eee7eb; }
 .agent-workspace .agent-model-group button small { color: #c3b7bf; }
 .agent-workspace .agent-model-group button code { display: none; }
-.agent-workspace .agent-reasoning-options { padding: 11px 14px 12px; border-top-color: rgba(255, 255, 255, .075); }
+.agent-workspace .agent-reasoning-options { padding: 8px 14px 10px; border: 0; }
 .agent-workspace .agent-reasoning-options legend { color: #e0d5dc; }
 .agent-workspace .agent-reasoning-options label { min-height: 32px; border: 0; background: rgba(255, 255, 255, .025); color: #bcb2b8; }
 .agent-workspace .agent-reasoning-options label.is-selected { background: rgba(163, 66, 82, .18); color: #f1e5ea; }
 .agent-workspace .agent-reasoning-options label:focus-within { outline: 2px solid rgba(232, 153, 166, .58); outline-offset: 2px; }
-.agent-workspace .agent-model-menu-footer { min-height: 46px; padding: 8px 13px; border-top-color: rgba(255, 255, 255, .075); }
+.agent-workspace .agent-model-menu-footer { min-height: 46px; padding: 8px 13px; border: 0; }
 
 /* Change review is a quiet floating inspector; code and +/- remain semantic. */
 .agent-workspace .agent-change-summary {

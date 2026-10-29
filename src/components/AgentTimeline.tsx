@@ -6,6 +6,10 @@ import { AgentMessage, AgentToolResult } from "./AgentMessage"
 import AgentDisclosure from "./AgentDisclosure"
 import AgentProviderMark from "./AgentProviderMark"
 import AgentRequest, { type AgentRequestActions } from "./AgentRequest"
+import LatticeLoader from "./LatticeLoader"
+
+type ReasoningGroup = { kind: "reasoning-group"; id: string; items: TranscriptItem[]; failed: boolean }
+type TimelineGroup = TranscriptItem | TranscriptItem[] | ReasoningGroup
 
 function ToolRow({ item }: { item: TranscriptItem }) {
   const label = toolLabel(item)
@@ -24,19 +28,51 @@ function ToolRow({ item }: { item: TranscriptItem }) {
     </AgentDisclosure>
 }
 type MessageActions = { capabilities?: AgentHistoryCapabilities; enabled: boolean; act: (message: TranscriptItem, retry: boolean) => void }
-export const AgentTimeline = memo(function AgentTimeline({ items, agentName, agentId, plan, actions, requests }: { items: TranscriptItem[]; agentName: string; agentId?: string; plan?: AgentPlanEntry[]; actions?: MessageActions; requests?: AgentRequestActions }) {
-  const groups: Array<TranscriptItem | TranscriptItem[]> = []
+export const AgentTimeline = memo(function AgentTimeline({ items, agentName, agentId, plan, actions, requests, turnActive = false }: { items: TranscriptItem[]; agentName: string; agentId?: string; plan?: AgentPlanEntry[]; actions?: MessageActions; requests?: AgentRequestActions; turnActive?: boolean }) {
+  const groups: TimelineGroup[] = []
+  let reasoning: ReasoningGroup | undefined
+  let tools: TranscriptItem[] | undefined
   for (const item of items) {
-    const last = groups[groups.length - 1]
+    if (item.kind === "reasoning") {
+      tools = undefined
+      if (!reasoning) {
+        reasoning = { kind: "reasoning-group", id: item.id, items: [], failed: false }
+        groups.push(reasoning)
+      }
+      reasoning.items.push(item)
+      continue
+    }
     if (item.kind === "tool") {
-      if (Array.isArray(last)) last.push(item); else groups.push([item])
-    } else groups.push(item)
+      if (!tools) { tools = []; groups.push(tools) }
+      tools.push(item)
+      continue
+    }
+    if (item.kind === "notice" && item.status === "error" && reasoning) reasoning.failed = true
+    tools = undefined
+    if (["user", "assistant", "request", "notice"].includes(item.kind)) reasoning = undefined
+    groups.push(item)
   }
-  return <>{groups.map(item => Array.isArray(item) ? <ToolGroup key={item[0].id} items={item} />
-    : item.kind === "notice" ? <p className={`agent-notice ${item.status === "error" ? "is-error" : ""}`} data-timeline-id={item.id} key={item.id}>{item.title && <strong>{item.title}: </strong>}{item.text}</p> : item.kind === "tool" ? <ToolRow key={item.id} item={item} />
-      : item.kind === "request" ? requests?.expandedId === item.id ? <div key={item.id} data-timeline-id={item.id} className="agent-request-placeholder">Request opened in expanded view</div> : <AgentRequest key={item.id} item={item} actions={requests} />
-      : item.kind === "reasoning" ? <AgentDisclosure key={item.id} id={item.id} className="agent-reasoning" summary={<>Reasoning <AgentIcon name="chevron" size={12} /></>}><AgentMessage text={item.text} /></AgentDisclosure>
-        : <Message key={item.id} item={item} author={item.kind === "user" ? "You" : agentName} agentId={agentId || agentName} actions={actions} />)}
+  let lastUserIndex = -1, lastReasoningIndex = -1
+  groups.forEach((group, index) => {
+    if (!Array.isArray(group) && group.kind === "user") lastUserIndex = index
+    if (!Array.isArray(group) && group.kind === "reasoning-group") lastReasoningIndex = index
+  })
+  const activeReasoningIndex = turnActive && (lastUserIndex < 0 || lastReasoningIndex > lastUserIndex) ? lastReasoningIndex : -1
+  return <>{groups.map((group, index) => {
+    if (Array.isArray(group)) return <ToolGroup key={group[0].id} items={group} />
+    if (group.kind === "reasoning-group") {
+      const status = group.failed ? "error" : index === activeReasoningIndex ? "working" : "done"
+      const label = status === "working" ? "Thinking" : status === "error" ? "Interrupted" : "Thought"
+      return <div key={group.id} className="agent-reasoning" data-timeline-id={group.id}>
+        <LatticeLoader className="agent-reasoning-loader" label={label} doneLabel="Thought" errorLabel="Interrupted" status={status} pattern="orbit" cellSize={3} gap={1.5} showTimer={false} announce={index === activeReasoningIndex} />
+        {group.items.length > 1 && <span className="agent-reasoning-phases">{group.items.length} passes</span>}
+      </div>
+    }
+    if (group.kind === "notice") return <p className={`agent-notice ${group.status === "error" ? "is-error" : ""}`} data-timeline-id={group.id} key={group.id}>{group.title && <strong>{group.title}: </strong>}{group.text}</p>
+    if (group.kind === "tool") return <ToolRow key={group.id} item={group} />
+    if (group.kind === "request") return requests?.expandedId === group.id ? <div key={group.id} data-timeline-id={group.id} className="agent-request-placeholder">Request opened in expanded view</div> : <AgentRequest key={group.id} item={group} actions={requests} />
+    return <Message key={group.id} item={group} author={group.kind === "user" ? "You" : agentName} agentId={agentId || agentName} actions={actions} />
+  })}
     {!!plan?.length && <AgentDisclosure className="agent-plan" summary={<><AgentIcon name="check" size={14} /><span>Plan</span><small>{plan.filter(entry => entry.status === "completed").length} of {plan.length} complete</small><AgentIcon name="chevron" size={12} /></>}><ol>{plan.map((entry, index) => <li key={index} className={entry.status}><span>{entry.status === "completed" ? "✓" : entry.status === "in_progress" ? "•" : "○"}</span>{entry.content}</li>)}</ol></AgentDisclosure>}
   </>
 })

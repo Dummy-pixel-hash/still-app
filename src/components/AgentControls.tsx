@@ -15,7 +15,7 @@ export function modeOption(fields: AgentConfigOption[]) {
 }
 
 type ConfigChange = (id: string, value: string | boolean) => void | Promise<void>
-export function ConfigPicker({ option, disabled, change, icon, label }: { option: AgentConfigOption; disabled: boolean; change: ConfigChange; icon?: ReactNode; label?: string }) {
+export function ConfigPicker({ option, disabled, change, icon, label, searchable = true }: { option: AgentConfigOption; disabled: boolean; change: ConfigChange; icon?: ReactNode; label?: string; searchable?: boolean }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(""), [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null)
   const popup = useRef<HTMLDivElement>(null)
@@ -27,11 +27,12 @@ export function ConfigPicker({ option, disabled, change, icon, label }: { option
   const filtered = all.filter(value => `${value.name} ${value.value} ${value.description || ""}`.toLowerCase().includes(query.toLowerCase()))
   useEffect(() => {
     if (!open) return
-    input.current?.focus()
+    if (searchable) input.current?.focus()
+    else popup.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[active]?.focus({ preventScroll: true })
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
     document.addEventListener("pointerdown", outside)
     return () => document.removeEventListener("pointerdown", outside)
-  }, [open])
+  }, [open, searchable])
   useEffect(() => { revealOption(root.current, '.agent-picker-options .is-active') }, [active, query, open])
   useEffect(() => {
     if (disabled || open || !restoreFocus.current) return
@@ -44,7 +45,7 @@ export function ConfigPicker({ option, disabled, change, icon, label }: { option
   return <div className="agent-picker" ref={root} data-config-id={option.id}>
     <button type="button" className="agent-control" aria-label={`${label || option.name}: ${selected?.name || option.currentValue || "Default"}`} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined} disabled={disabled} onClick={() => { setOpen(!open); setQuery(""); setActive(Math.max(0, all.findIndex(value => value.value === option.currentValue))) }} title={option.description || label || option.name}>
       {icon}<span>{selected?.name || String(option.currentValue || "Default")}</span><AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>
-    {open && <div ref={popup} className="agent-picker-popup" onKeyDown={e => {
+    {open && <div ref={popup} className={`agent-picker-popup${searchable ? "" : " is-compact"}`} onKeyDown={e => {
       e.stopPropagation()
       if (e.key === "Escape") { e.stopPropagation(); setOpen(false); root.current?.querySelector("button")?.focus() }
       if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
@@ -56,12 +57,12 @@ export function ConfigPicker({ option, disabled, change, icon, label }: { option
       if (e.key === "Enter" && e.target === input.current && !e.nativeEvent.isComposing) { e.preventDefault(); if (filtered[active]) choose(filtered[active].value) }
      }}>
        {option.category === "provider" && <div className="agent-picker-heading"><strong>Choose a coding agent</strong><span>{all.length} choices</span></div>}
-       <div className="agent-picker-search"><AgentIcon name="search" size={14} /><input ref={input} role="combobox" aria-expanded="true" aria-controls={listId} aria-activedescendant={filtered[active] ? `${listId}-${active}` : undefined} aria-label={`Search ${option.name.toLowerCase()}`} placeholder={`Search ${option.name.toLowerCase()}…`} value={query} onChange={e => { setQuery(e.target.value); setActive(0) }} /></div>
+       {searchable && <div className="agent-picker-search"><AgentIcon name="search" size={14} /><input ref={input} role="combobox" aria-expanded="true" aria-controls={listId} aria-activedescendant={filtered[active] ? `${listId}-${active}` : undefined} aria-label={`Search ${option.name.toLowerCase()}`} placeholder={`Search ${option.name.toLowerCase()}…`} value={query} onChange={e => { setQuery(e.target.value); setActive(0) }} /></div>}
        <div id={listId} className="agent-picker-options" role="listbox" aria-label={option.name}>{filtered.map((value, index) => <button id={`${listId}-${index}`} type="button" role="option" aria-selected={value.value === option.currentValue} className={active === index ? "is-active" : ""} key={value.value} onClick={() => choose(value.value)} onFocus={() => setActive(index)} onMouseEnter={() => setActive(index)}>
          {option.category === "provider" && <AgentProviderMark id={value.value} size={20} />}
          <span className="agent-picker-option-label">{value.name}<small>{value.description || (value.value !== value.name ? value.value : "")}</small></span>{value.value === option.currentValue && <AgentIcon name="check" size={14} />}</button>)}</div>
       {!filtered.length && <p className="agent-picker-empty">No matching {option.name.toLowerCase()}.</p>}
-      <div className="agent-picker-count">{filtered.length} {option.name.toLowerCase()} options</div>
+      {searchable && <div className="agent-picker-count">{filtered.length} {option.name.toLowerCase()} options</div>}
     </div>}
   </div>
 }

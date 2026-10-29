@@ -184,6 +184,36 @@ test("a detached persistent agent reattaches without starting or sending another
   expect(await page.evaluate(()=>{const h=(window as any).agentFixture;return {id:h.current,starts:h.starts.length,sends:h.sends.length}})).toEqual(before)
 })
 
+test("one lattice indicator stacks reasoning phases around tool calls without exposing raw reasoning", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "userMessage", text: "Check my reasoning indicator" })
+    h.emit(h.current, { type: "reasoningChunk", text: "PRIVATE_REASONING_ALPHA" })
+    h.emit(h.current, { type: "toolStart", toolCallId: "reasoning-tool", title: "Run checks", status: "in_progress" })
+    h.emit(h.current, { type: "reasoningChunk", text: "PRIVATE_REASONING_BETA" })
+    h.emit(h.current, { type: "assistantMessage", text: "Checks complete." })
+  })
+  const indicator = page.locator(".agent-reasoning")
+  await expect(indicator).toHaveCount(1)
+  await expect(indicator.locator(".lattice-loader")).toHaveAttribute("data-status", "working")
+  await expect(indicator.locator(".lattice-loader__text")).toHaveText("Thinking")
+  await expect(indicator.locator(".lattice-loader__text")).toBeVisible()
+  await expect(indicator.locator(".agent-reasoning-phases")).toHaveText("2 passes")
+  await expect(page.locator(".agent-work-group")).toBeVisible()
+  await expect(page.locator(".agent-message-assistant").last()).toContainText("Checks complete.")
+  expect(await page.locator(".agent-work-group").evaluate(el => !!(el.compareDocumentPosition(document.querySelector(".agent-message-assistant:last-of-type")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
+  await expect(page.getByText(/PRIVATE_REASONING_/)).toHaveCount(0)
+
+  await page.evaluate(() => (window as any).agentFixture.finish())
+  await expect(indicator.locator(".lattice-loader")).toHaveAttribute("data-status", "done")
+  await expect(indicator.locator(".lattice-loader__text")).toHaveText("Thought")
+  await page.getByLabel("Message agent").fill("Start another turn")
+  await page.getByLabel("Message agent").press("Enter")
+  await expect(page.locator(".agent-reasoning .lattice-loader")).toHaveAttribute("data-status", "done")
+  await expect(page.locator(".agent-working")).toBeVisible()
+})
+
 test("completed expanded requests remain dismissible and narrow model options are reachable",async({page})=>{
   await connect(page)
   await ask(page,{note:{type:"string",title:"Your answer"}},["note"])
