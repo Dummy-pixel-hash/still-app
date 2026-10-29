@@ -44,9 +44,11 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   const root = source.closest<HTMLElement>('.agent-workspace[data-native-shell="true"]')
   if (!root) return null
   const buffer = document.createElement("canvas")
-  const context = buffer.getContext("2d", { willReadFrequently: true })
+  // Let the browser accelerate filtered draws instead of opting into CPU storage.
+  const context = buffer.getContext("2d")
   if (!context) return null
   source.dataset.frostManaged = "true"
+  const canvasFilter = Reflect.get(context, "filter") !== undefined
   let scratch = new Uint8ClampedArray(0), disposed = false, busy = false, dirty = false
   let frame = 0, revision = 0, lastDraw = -Infinity, currentUrl = ""
   const urls = new Set<string>(), panes = new Set<HTMLElement>()
@@ -72,15 +74,20 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
     lastDraw = now; busy = true
     const scale = Math.min(.25, Math.sqrt(120_000 / (bounds.width * bounds.height)))
     const width = Math.max(1, Math.ceil(bounds.width * scale)), height = Math.max(1, Math.ceil(bounds.height * scale))
-    if (buffer.width !== width || buffer.height !== height || scratch.length !== width * height * 4) { buffer.width = width; buffer.height = height; scratch = new Uint8ClampedArray(width * height * 4) }
+    if (buffer.width !== width || buffer.height !== height) { buffer.width = width; buffer.height = height }
+    if (!canvasFilter && scratch.length !== width * height * 4) scratch = new Uint8ClampedArray(width * height * 4)
     context.setTransform(1, 0, 0, 1, 0, 0)
     context.fillStyle = "#050505"; context.fillRect(0, 0, width, height)
     context.globalAlpha = Number(getComputedStyle(source.parentElement!).opacity)
+    if (canvasFilter) context.filter = `blur(${Math.max(1, 26 * scale)}px)`
     context.drawImage(source, (scene.left - bounds.left) * scale, (scene.top - bounds.top) * scale, scene.width * scale, scene.height * scale)
+    if (canvasFilter) context.filter = "none"
     context.globalAlpha = 1
-    const image = context.getImageData(0, 0, width, height)
-    blurOpaquePixels(image.data, width, height, Math.max(1, Math.round(26 * scale)), scratch)
-    context.putImageData(image, 0, 0)
+    if (!canvasFilter) {
+      const image = context.getImageData(0, 0, width, height)
+      blurOpaquePixels(image.data, width, height, Math.max(1, Math.round(26 * scale)), scratch)
+      context.putImageData(image, 0, 0)
+    }
     position()
     buffer.toBlob(async blob => {
       if (!blob || disposed) { busy = false; return }
@@ -111,9 +118,10 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   const resize = new ResizeObserver(requestDraw)
   const discover = () => {
     const found = new Set(root.querySelectorAll<HTMLElement>(PANES))
-    for (const pane of panes) if (!found.has(pane)) { resize.unobserve(pane); panes.delete(pane) }
-    for (const pane of found) if (!panes.has(pane)) { panes.add(pane); pane.dataset.agentFrost = ""; resize.observe(pane) }
-    position()
+    let changed = false
+    for (const pane of panes) if (!found.has(pane)) { resize.unobserve(pane); panes.delete(pane); changed = true }
+    for (const pane of found) if (!panes.has(pane)) { panes.add(pane); pane.dataset.agentFrost = ""; resize.observe(pane); changed = true }
+    if (changed) position()
     if (!currentUrl) requestDraw()
   }
   const mutations = new MutationObserver(discover)

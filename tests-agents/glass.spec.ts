@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import { test, expect } from "@playwright/test"
-import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
+import { pixelContrast, probeAuroraGlass, probeComposerGlass } from "./glass-pixels.mjs"
 
 test("the main WebView has an opaque native backing while the orb stays transparent", () => {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
@@ -30,6 +30,7 @@ test("native frosted panes visibly blur the real scene without CSS backdrop filt
   await page.goto("/tests-agents/fixture.html?demo")
   await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
+  results.push(...await probeComposerGlass(page, (name: string, image: Buffer) => info.attach(`launch-${name}.png`, { body: image, contentType: "image/png" })))
   for (const pane of results) {
     expect(pane.unblurred, `${pane.name}: real source is transmitted`).toBeGreaterThan(3)
     expect(pane.ratio, `${pane.name}: source is blurred without CSS filters`).toBeLessThan(.3)
@@ -131,7 +132,7 @@ test("the frosted input floats over a wide transcript and reserves space as the 
     return pill.top - last.bottom
   })).toBeGreaterThan(10)
   await page.getByLabel("Message agent").focus()
-  await expect(composer).toHaveCSS("box-shadow", /rgba\(190, 92, 112,/)
+  await expect(composer).toHaveCSS("box-shadow", "none")
   await expect(composer).toHaveCSS("backdrop-filter", "none")
 })
 
@@ -142,9 +143,11 @@ test("native frost remains on the active input after opening history and resizin
   await page.locator(".agent-recent").first().click()
   await page.setViewportSize({ width: 1100, height: 480 })
   await expect(page.locator(".agent-chat")).not.toHaveClass(/is-launch/)
-  await expect(page.locator(".agent-composer")).toHaveAttribute("data-agent-frost", "")
+  const composer = page.locator(".agent-composer")
+  await expect(composer).toHaveAttribute("data-agent-frost", "")
+  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backgroundImage)).toContain("blob:")
   await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
-  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`active-${name}.png`, { body: image, contentType: "image/png" }), [["composer", ".agent-composer"]])
+  const results = await probeComposerGlass(page, (name: string, image: Buffer) => info.attach(`active-${name}.png`, { body: image, contentType: "image/png" }))
   for (const pane of results) {
     expect(pane.unblurred).toBeGreaterThan(3)
     expect(pane.ratio).toBeLessThan(.3)

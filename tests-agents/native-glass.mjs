@@ -5,7 +5,7 @@ import { createServer } from "node:net"
 import { resolve, join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { chromium } from "@playwright/test"
-import { probeAuroraGlass } from "./glass-pixels.mjs"
+import { probeAuroraGlass, probeComposerGlass } from "./glass-pixels.mjs"
 
 assert.equal(process.platform, "win32", "This test must use the real Windows WebView2, not browser emulation")
 assert.ok(process.argv[2], "Pass the packaged Still executable to test")
@@ -55,6 +55,7 @@ try {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.getByRole("button", { name: "Agents", exact: true }).click()
   const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image))
+  results.push(...await probeComposerGlass(page, (name, image) => writeFile(join(output, `launch-${name}.png`), image)))
   const report = { executable, buildRun: process.env.STILL_BUILD_RUN, userAgent: await page.evaluate(() => navigator.userAgent), results }
   if (process.env.STILL_GLASS_DIAGNOSE === "1") {
     report.variants = []
@@ -99,7 +100,7 @@ try {
   // such as restricting the frost layer to .is-launch or removing its target.
   await page.setViewportSize({ width: 1100, height: 480 })
   await page.locator(".agent-chat").evaluate(chat => chat.classList.remove("is-launch"))
-  const active = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `active-${name}.png`), image), [["composer", ".agent-composer"]])
+  const active = await probeComposerGlass(page, (name, image) => writeFile(join(output, `active-${name}.png`), image))
   results.push(...active.map(pane => ({ ...pane, name: `active-${pane.name}` })))
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2))
   console.log(JSON.stringify(report, null, 2))

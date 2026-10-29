@@ -19,9 +19,25 @@ export async function pixelContrast(page, image) {
   }, image.toString("base64"))
 }
 
+/** Keep the compositing depth and pane geometry intact, but expand the test
+ * canvas footprint so the floating input has a measurable source beneath it.
+ * The production beam intentionally does not overlap every composer layout. */
+export async function probeComposerGlass(page, capture) {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await capture("layout", await page.screenshot({ animations: "disabled" }))
+  const footprint = await page.addStyleTag({ content: ".agent-aurora { top: 0 !important; left: 0 !important; width: 100% !important; height: 100% !important; transform: none !important; }" })
+  try {
+    // Let ResizeObserver redraw the source before painting the diagnostic stripes.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    return await probeAuroraGlass(page, capture, [["composer", ".agent-composer"]])
+  } finally {
+    await footprint.evaluate(el => el.remove())
+  }
+}
+
 /** Probe the actual aurora canvas at its production depth, without inserting a
  * higher-z-index backdrop that could accidentally bypass a compositing defect. */
-export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar", ".agent-sidebar"], ["composer", ".agent-composer"]]) {
+export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar", ".agent-sidebar"]]) {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.locator('.agent-aurora[data-rendered="true"][data-paused="true"]').waitFor()
   await page.waitForFunction(() => {
@@ -45,25 +61,26 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
   })
   if (previousFrame !== undefined) await page.waitForFunction(previous => document.querySelector(".agent-aurora canvas").dataset.frostFrame !== previous, previousFrame)
   const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > *, .agent-composer > * { visibility: hidden !important; }" })
-  const source = await page.locator(".agent-aurora").boundingBox()
-  if (!source) throw new Error("The production aurora is not visible")
-  const panes = []
-  for (const [name, selector] of targetPanes) {
-    const bounds = await page.locator(selector).boundingBox()
-    if (!bounds) throw new Error(`${name} is not visible`)
-    const x = Math.ceil(Math.max(bounds.x, source.x) + 20)
-    const y = Math.ceil(Math.max(bounds.y, source.y) + 20)
-    const right = Math.floor(Math.min(bounds.x + bounds.width, source.x + source.width) - 20)
-    const bottom = Math.floor(Math.min(bounds.y + bounds.height, source.y + source.height) - 20)
-    if (right - x < 32 || bottom - y < 16) throw new Error(`${name} does not overlap the actual backdrop`)
-    const clip = { x, y, width: Math.min(200, right - x), height: Math.min(24, bottom - y) }
-    const image = await page.screenshot({ clip, animations: "disabled", scale: "css" })
-    await capture(`${name}-blurred`, image)
-    panes.push({ name, clip, contrast: await pixelContrast(page, image) })
-  }
-  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-sidebar, .agent-recents, .agent-composer::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
-  const results = []
+  let disable
   try {
+    const source = await page.locator(".agent-aurora").boundingBox()
+    if (!source) throw new Error("The production aurora is not visible")
+    const panes = []
+    for (const [name, selector] of targetPanes) {
+      const bounds = await page.locator(selector).boundingBox()
+      if (!bounds) throw new Error(`${name} is not visible`)
+      const x = Math.ceil(Math.max(bounds.x, source.x) + 20)
+      const y = Math.ceil(Math.max(bounds.y, source.y) + 20)
+      const right = Math.floor(Math.min(bounds.x + bounds.width, source.x + source.width) - 20)
+      const bottom = Math.floor(Math.min(bounds.y + bounds.height, source.y + source.height) - 20)
+      if (right - x < 32 || bottom - y < 16) throw new Error(`${name} does not overlap the actual backdrop`)
+      const clip = { x, y, width: Math.min(200, right - x), height: Math.min(24, bottom - y) }
+      const image = await page.screenshot({ clip, animations: "disabled", scale: "css" })
+      await capture(`${name}-blurred`, image)
+      panes.push({ name, clip, contrast: await pixelContrast(page, image) })
+    }
+    disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-sidebar, .agent-recents, .agent-composer::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+    const results = []
     for (const pane of panes) {
       const image = await page.screenshot({ clip: pane.clip, animations: "disabled", scale: "css" })
       await capture(`${pane.name}-unblurred`, image)
@@ -72,7 +89,7 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
     }
     return results
   } finally {
-    await disable.evaluate(el => el.remove())
+    await disable?.evaluate(el => el.remove())
     await hide.evaluate(el => el.remove())
   }
 }

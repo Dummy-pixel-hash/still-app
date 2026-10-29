@@ -343,9 +343,6 @@
   -webkit-backdrop-filter: blur(24px) saturate(112%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1);
 }
-.agent-workspace .agent-chat .agent-composer-area .agent-composer:focus-within {
-  box-shadow: 0 0 0 2px rgba(190, 92, 112, .58);
-}
 /* Selector triggers sit quietly in the writing rail; only open state warms up. */
 .agent-workspace .agent-composer .agent-control,
 .agent-workspace .agent-composer .agent-model-trigger {

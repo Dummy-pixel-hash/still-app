@@ -141,7 +141,7 @@ test("native frost stays on the input pill while its floating wrapper remains cl
   await expect(composer).toHaveCSS("border-top-width", "0px")
   await page.getByLabel("Message agent").focus()
   expect(await frost()).toEqual(before)
-  await expect(composer).toHaveCSS("box-shadow", /rgba\(190, 92, 112,/)
+  await expect(composer).toHaveCSS("box-shadow", "none")
   await page.getByLabel("Message agent").fill("Frosted glass remains usable")
   await expect(page.getByLabel("Message agent")).toHaveValue("Frosted glass remains usable")
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
