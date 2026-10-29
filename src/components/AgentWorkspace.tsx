@@ -512,7 +512,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     {sidebarOverlay && <button className="agent-sidebar-scrim" tabIndex={-1} aria-label="Hide projects" onClick={toggleProjects} />}
     <aside ref={navigationPanel} inert={dialogOpen} className={`agent-sidebar ${sidebarExpanded ? "" : "is-collapsed"} ${sidebar ? "is-open" : ""}`} role={sidebarOverlay ? "dialog" : "complementary"} aria-modal={sidebarOverlay || undefined} aria-label="Projects and conversations">
       <header className="agent-sidebar-top">
-        <button className="agent-brand" onClick={() => { setArchived(false); home() }} aria-label="Still conversations"><StillAgentMark size={24} /><strong>Still</strong></button>
+        <button className="agent-brand" onClick={() => { setArchived(false); home() }} aria-label="Still conversations"><StillAgentMark size={34} /><strong>Still</strong></button>
         <button ref={sidebarToggle} className="agent-sidebar-toggle" aria-label={sidebarExpanded ? "Collapse project sidebar" : "Expand project sidebar"} title={`${sidebarExpanded ? "Collapse" : "Expand"} project sidebar · Ctrl/⌘+\\`} aria-expanded={sidebarExpanded} aria-controls="agent-project-navigation" onClick={toggleProjects}><AgentIcon name="panel" size={17} /></button>
       </header>
       <div className="agent-sidebar-rail" aria-hidden={sidebarExpanded} inert={sidebarExpanded}>

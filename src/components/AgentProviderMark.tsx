@@ -11,8 +11,5 @@ export default function AgentProviderMark({ id, size = 18 }: { id: string; size?
 }
 
 export function StillAgentMark({ size = 44 }: { size?: number }) {
-  return <svg className="still-agent-mark" width={size} height={size} viewBox="0 0 48 48" fill="none" aria-hidden="true">
-    <path d="M34 10H19c-6 0-10 3.5-10 8s3 6 8 6h13c5 0 8 2.5 8 7s-4 7-10 7H13" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-    <path d="m30 5 6 5-6 5M18 33l-6 5 6 5" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
+  return <img className="still-agent-mark" width={Math.round(size * 310 / 330)} height={size} src="/agents/still-terminal-icon.svg" alt="" aria-hidden="true" />
 }

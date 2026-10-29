@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="310" height="330" viewBox="0 0 310 330" role="img" aria-labelledby="title desc">
+<title id="title">Still terminal icon</title>
+<desc id="desc">Dark rounded terminal icon with white prompt and subtle luminous crimson wave.</desc>
+<defs>
+  <linearGradient id="shell" x1="0.05" y1="0" x2="0.92" y2="1">
+    <stop offset="0" stop-color="#280d10"/>
+    <stop offset=".30" stop-color="#160b0e"/>
+    <stop offset=".70" stop-color="#0c0b0d"/>
+    <stop offset="1" stop-color="#220b10"/>
+  </linearGradient>
+  <linearGradient id="rim" x1="0.06" y1="0" x2="0.95" y2="1">
+    <stop offset="0" stop-color="#ff8d81" stop-opacity=".95"/>
+    <stop offset=".26" stop-color="#a83e41" stop-opacity=".52"/>
+    <stop offset=".53" stop-color="#eee1df" stop-opacity=".12"/>
+    <stop offset=".77" stop-color="#5e232b" stop-opacity=".48"/>
+    <stop offset="1" stop-color="#ff8d88" stop-opacity=".90"/>
+  </linearGradient>
+  <linearGradient id="topLight" x1="0" y1="0" x2="1" y2="0.65">
+    <stop offset="0" stop-color="#ffaea0"/>
+    <stop offset=".13" stop-color="#ff6f64"/>
+    <stop offset=".48" stop-color="#cc4145" stop-opacity=".52"/>
+    <stop offset="1" stop-color="#e6b9b4" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="waveStroke" x1="0" y1="1" x2="1" y2="0">
+    <stop offset="0" stop-color="#a62234"/>
+    <stop offset=".25" stop-color="#e44c51"/>
+    <stop offset=".60" stop-color="#ff9d88"/>
+    <stop offset="1" stop-color="#eb4549"/>
+  </linearGradient>
+  <linearGradient id="waveFill" x1=".1" y1="0" x2=".7" y2="1">
+    <stop offset="0" stop-color="#932129" stop-opacity=".50"/>
+    <stop offset=".50" stop-color="#341016" stop-opacity=".40"/>
+    <stop offset="1" stop-color="#0d0a0d" stop-opacity=".02"/>
+  </linearGradient>
+  <linearGradient id="cursor" gradientUnits="userSpaceOnUse" x1="140" y1="156" x2="184" y2="156">
+    <stop offset="0" stop-color="#fff8f6"/>
+    <stop offset=".58" stop-color="#fff1ed"/>
+    <stop offset="1" stop-color="#e45c63"/>
+  </linearGradient>
+  <filter id="rimGlow" x="-90%" y="-90%" width="280%" height="280%">
+    <feGaussianBlur stdDeviation="8"/>
+  </filter>
+  <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+    <feGaussianBlur stdDeviation="4"/>
+  </filter>
+  <filter id="drop" x="-40%" y="-40%" width="180%" height="180%">
+    <feGaussianBlur stdDeviation="13"/>
+  </filter>
+  <clipPath id="iconClip"><rect x="45" y="58" width="220" height="220" rx="51"/></clipPath>
+</defs>
+
+<rect x="49" y="62" width="212" height="212" rx="50" fill="#fa464e" opacity=".22" filter="url(#rimGlow)"/>
+<rect x="43" y="56" width="224" height="224" rx="54" fill="#050405" opacity=".56" filter="url(#drop)"/>
+<rect x="45" y="58" width="220" height="220" rx="51" fill="url(#shell)"/>
+<g clip-path="url(#iconClip)">
+  <path d="M45 243 C85 245 95 249 120 235 C145 223 153 191 177 183 C202 174 235 183 265 181 L265 278 L45 278 Z" fill="url(#waveFill)"/>
+  <path d="M45 244 C79 245 99 250 120 236 C147 217 154 193 178 184 C199 176 232 182 265 181" fill="none" stroke="#f74a50" stroke-width="11" opacity=".42" filter="url(#softGlow)"/>
+  <path d="M45 244 C79 245 99 250 120 236 C147 217 154 193 178 184 C199 176 232 182 265 181" fill="none" stroke="url(#waveStroke)" stroke-width="5.5" stroke-linecap="round"/>
+  <path d="M48 124 L48 116 C48 87 65 63 95 58 L145 58" stroke="#ff554e" stroke-width="15" opacity=".5" fill="none" filter="url(#softGlow)"/>
+  <path d="M46 113 C46 82 69 59 100 58 L158 58" stroke="url(#topLight)" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+  <path d="M202 277 L211 277 C242 277 265 255 265 225" stroke="#ff9385" stroke-width="2" opacity=".64" fill="none"/>
+  <path d="M50 199 L50 218" stroke="#6e1d28" stroke-width="3" opacity=".4"/>
+</g>
+<rect x="45.75" y="58.75" width="218.5" height="218.5" rx="50.25" fill="none" stroke="url(#rim)" stroke-width="1.3"/>
+<path d="M97 116 L123 142 L97 168" stroke="#ffddd9" stroke-width="13" opacity=".28" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#softGlow)"/>
+<path d="M97 116 L123 142 L97 168" stroke="#fff7f4" stroke-width="10.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M145 156 L178 156" stroke="#ff7d77" stroke-width="12" opacity=".37" stroke-linecap="round" filter="url(#softGlow)"/>
+<path d="M145 156 L178 156" stroke="url(#cursor)" stroke-width="9.8" stroke-linecap="round"/>
+</svg>
