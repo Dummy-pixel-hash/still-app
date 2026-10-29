@@ -13,8 +13,8 @@
   --ag-blue: #dedede;
   --ag-green: #7ddcb0;
   --ag-red: #ed7780;
-  --ag-chrome: rgba(18, 18, 18, .62);
-  --ag-chrome-edge: rgba(255, 255, 255, .1);
+  --ag-chrome: rgba(9, 9, 9, .46);
+  --ag-chrome-edge: rgba(255, 255, 255, .075);
   --ag-ease: cubic-bezier(.16, 1, .3, 1);
   position: fixed;
   inset: 0;
@@ -732,11 +732,11 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 
 /* Minimal index: black foundations with real glass over the red particle horizon. */
 .agent-workspace .agent-sidebar {
-  background: radial-gradient(ellipse at 100% 52%, rgba(151, 40, 57, .065), transparent 60%), linear-gradient(140deg, rgba(255, 255, 255, .035), transparent 38%), var(--ag-chrome);
+  background: var(--ag-chrome);
   border-right: 1px solid var(--ag-chrome-edge);
-  backdrop-filter: blur(28px) saturate(110%);
-  -webkit-backdrop-filter: blur(28px) saturate(110%);
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, .025);
+  backdrop-filter: blur(24px) saturate(110%);
+  -webkit-backdrop-filter: blur(24px) saturate(110%);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, .015);
 }
 .agent-workspace .agent-brand > svg { color: #eaa2ab; }
 .agent-workspace .agent-brand strong { color: #f0eded; }
@@ -754,23 +754,22 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-workspace .agent-rail-bottom > button { border-radius: 9px; }
 .agent-workspace .agent-sidebar-rail > .agent-rail-new { color: #e5a1a9; }
 .agent-workspace .agent-main {
-  background: var(--ag-bg);
+  background: transparent;
   border: 0;
   border-radius: 0;
   margin: 0;
-  isolation: isolate;
 }
 .agent-workspace .agent-topbar {
   height: 44px;
   margin: 10px 14px 0;
   padding: 0 13px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .035), transparent), var(--ag-chrome);
+  background: var(--ag-chrome);
   border: 1px solid var(--ag-chrome-edge);
-  border-top-color: rgba(255, 255, 255, .17);
+  border-top-color: rgba(255, 255, 255, .12);
   border-radius: 12px;
-  backdrop-filter: blur(28px) saturate(110%);
-  -webkit-backdrop-filter: blur(28px) saturate(110%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  backdrop-filter: blur(24px) saturate(110%);
+  -webkit-backdrop-filter: blur(24px) saturate(110%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .015);
 }
 .agent-workspace .agent-topbar .agent-icon-button { border-radius: 8px; color: #aaa; }
 .agent-workspace .agent-topbar .agent-icon-button:hover { background: rgba(255, 255, 255, .065); color: #eee; }
@@ -781,15 +780,15 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-workspace .agent-review-toggle small { color: #c0baba; }
 .agent-workspace .agent-composer {
   z-index: 3;
-  background: linear-gradient(135deg, rgba(255, 255, 255, .035), transparent 55%), rgba(27, 27, 27, .32);
-  border: 1px solid rgba(255, 255, 255, .16);
-  border-top-color: rgba(255, 255, 255, .24);
+  background: rgba(9, 9, 9, .42);
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-top-color: rgba(255, 255, 255, .13);
   border-radius: 14px;
-  backdrop-filter: blur(28px) saturate(115%);
-  -webkit-backdrop-filter: blur(28px) saturate(115%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045);
+  backdrop-filter: blur(24px) saturate(112%);
+  -webkit-backdrop-filter: blur(24px) saturate(112%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
 }
-.agent-workspace .agent-composer:focus-within { border-color: #777; background: rgba(29, 29, 29, .46); }
+.agent-workspace .agent-composer:focus-within { border-color: #7c4d56; background: rgba(12, 11, 12, .54); }
 .agent-workspace .agent-sidebar-search {
   background: rgba(255, 255, 255, .02);
   border: 1px solid rgba(255, 255, 255, .065);
@@ -837,12 +836,12 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-chat.is-launch.has-recents .agent-recents {
   align-self: start;
   padding: 18px 20px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, .025), transparent 55%), rgba(24, 24, 24, .2);
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-top-color: rgba(255, 255, 255, .19);
+  background: rgba(8, 8, 8, .3);
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-top-color: rgba(255, 255, 255, .11);
   border-radius: 14px;
-  backdrop-filter: blur(22px) saturate(110%);
-  -webkit-backdrop-filter: blur(22px) saturate(110%);
+  backdrop-filter: blur(20px) saturate(110%);
+  -webkit-backdrop-filter: blur(20px) saturate(110%);
 }
 
 @media (max-width: 1100px) {
