@@ -12,7 +12,7 @@ assert.ok(process.argv[2], "Pass the packaged Still executable to test")
 const executable = resolve(process.argv[2])
 const output = resolve("native-glass-output")
 await mkdir(output, { recursive: true })
-const port = await new Promise((resolve, reject) => {
+const port = process.env.STILL_GLASS_CDP_PORT ? Number(process.env.STILL_GLASS_CDP_PORT) : await new Promise((resolve, reject) => {
   const server = createServer()
   server.once("error", reject)
   server.listen(0, "127.0.0.1", () => {
@@ -20,6 +20,7 @@ const port = await new Promise((resolve, reject) => {
     server.close(error => error ? reject(error) : resolve(port))
   })
 })
+await writeFile(join(output, "launch.json"), JSON.stringify({ executable, port, buildRun: process.env.STILL_BUILD_RUN }, null, 2))
 const app = spawn(executable, [], {
   env: {
     ...process.env,
@@ -63,6 +64,7 @@ try {
   }
   console.log("REAL WINDOWS WEBVIEW2 BLUR VERIFIED")
 } catch (error) {
+  await writeFile(join(output, "error.txt"), String(error.stack || error))
   await page?.screenshot({ path: join(output, "failure.png") }).catch(() => {})
   throw error
 } finally {

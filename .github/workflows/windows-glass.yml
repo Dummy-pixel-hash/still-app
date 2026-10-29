@@ -35,12 +35,29 @@ jobs:
         shell: pwsh
         env:
           STILL_BUILD_RUN: ${{ inputs.build_run }}
+          STILL_GLASS_CDP_PORT: "9223"
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Get-ChildItem -Recurse native-glass-build -Filter 'still-app.exe' | Select-Object -First 1
           if (-not $exe) { throw 'Packaged still-app.exe was not found in the build artifact' }
-          node tests-agents/native-glass.mjs $exe.FullName
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Hosted runners are elevated. WebView2 150+ intentionally ignores
+          # user-writable debug environment variables in elevated processes.
+          # Apply a machine policy only on this disposable CI runner; never
+          # enable a debugging port in the shipped application's configuration.
+          # https://github.com/MicrosoftEdge/WebView2Feedback/issues/5640
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          New-Item -Path $policy -Force | Out-Null
+          $previous = (Get-Item -LiteralPath $policy).GetValue('*', $null)
+          New-ItemProperty -LiteralPath $policy -Name '*' -PropertyType String -Value '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9223' -Force | Out-Null
+          try {
+            node tests-agents/native-glass.mjs $exe.FullName
+            $result = $LASTEXITCODE
+          } finally {
+            $key = Get-Item -LiteralPath $policy
+            if ($null -eq $previous) { $key.DeleteValue('*', $false) }
+            else { $key.SetValue('*', $previous) }
+          }
+          exit $result
       - name: Preserve real WebView2 screenshots and measured contrast
         if: always()
         uses: actions/upload-artifact@v4
