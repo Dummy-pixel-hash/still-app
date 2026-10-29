@@ -1,0 +1,50 @@
+name: still-windows-glass
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful Windows ARM64 build run containing the executable to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-glass:
+    name: Pixel-check the packaged app in real WebView2
+    runs-on: windows-11-arm
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: still-windows-arm64
+          path: native-glass-build
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
+      - name: Launch the actual packaged executable and verify its rendered blur
+        shell: pwsh
+        env:
+          STILL_BUILD_RUN: ${{ inputs.build_run }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Recurse native-glass-build -Filter 'still-app.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Packaged still-app.exe was not found in the build artifact' }
+          node tests-agents/native-glass.mjs $exe.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve real WebView2 screenshots and measured contrast
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: still-native-glass-evidence
+          path: native-glass-output
+          if-no-files-found: warn

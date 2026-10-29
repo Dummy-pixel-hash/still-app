@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
-import { test, expect, type Page } from "@playwright/test"
+import { test, expect } from "@playwright/test"
+import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
 
 test("the main WebView has an opaque native backing while the orb stays transparent", () => {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
@@ -11,26 +12,17 @@ test("the main WebView has an opaque native backing while the orb stays transpar
   expect(orb).toContain(".background_color(tauri::webview::Color(0, 0, 0, 0))")
 })
 
-// Decode screenshots with the browser's image/canvas APIs: no extra image dependency.
-async function pixelContrast(page: Page, image: Buffer) {
-  return page.evaluate(async base64 => {
-    const image = new Image()
-    image.src = `data:image/png;base64,${base64}`
-    await image.decode()
-    const canvas = document.createElement("canvas")
-    canvas.width = image.width; canvas.height = image.height
-    const context = canvas.getContext("2d")!
-    context.drawImage(image, 0, 0)
-    const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
-    let contrast = 0, samples = 0
-    for (let y = 4; y < canvas.height - 4; y++) for (let x = 4; x < canvas.width - 4; x++) {
-      const offset = (y * canvas.width + x) * 4
-      contrast += Math.abs(data[offset] - data[offset - 4])
-      samples++
-    }
-    return contrast / samples
-  }, image.toString("base64"))
-}
+test("the real application blurs its actual aurora canvas at production depth", async ({ page }, info) => {
+  await page.setViewportSize({ width: 1100, height: 720 })
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Agents", exact: true }).click()
+  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`${name}.png`, { body: image, contentType: "image/png" }))
+  for (const pane of results) {
+    expect(pane.unblurred, `${pane.name}: production source is visible`).toBeGreaterThan(3)
+    expect(pane.ratio, `${pane.name}: real source pixels are blurred`).toBeLessThan(.3)
+  }
+})
 
 test("composer and nested model menu visibly blur the backdrop rather than only tinting it", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
