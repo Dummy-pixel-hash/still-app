@@ -110,7 +110,7 @@ test("the particle horizon sits behind genuinely frosted writing and history sur
   await expect(welcomePane).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(welcomePane).toHaveCSS("box-shadow", "none")
   await expect(welcomePane).toHaveCSS("backdrop-filter", "none")
-  await expect(recentPane).toHaveCSS("background-color", "rgba(28, 28, 31, 0.6)")
+  await expect(recentPane).toHaveCSS("background-color", "rgba(18, 18, 21, 0.48)")
   await expect(recentPane).toHaveCSS("border-radius", "14px")
   await expect(recentPane).toHaveCSS("backdrop-filter", "blur(20px) saturate(1.1)")
   await expect(chat.locator(".agent-composer")).toHaveCSS("backdrop-filter", "none")

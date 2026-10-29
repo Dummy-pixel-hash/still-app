@@ -13,7 +13,7 @@
   --ag-blue: #dedede;
   --ag-green: #7ddcb0;
   --ag-red: #ed7780;
-  --ag-chrome: rgba(28, 28, 31, .6);
+  --ag-chrome: rgba(18, 18, 21, .48);
   --ag-chrome-edge: rgba(255, 255, 255, .075);
   --ag-ease: cubic-bezier(.16, 1, .3, 1);
   position: fixed;

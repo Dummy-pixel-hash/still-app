@@ -1,4 +1,4 @@
-# Still — Windows ARM64 CI / real build validation gate.
+# Still — Windows ARM64 CI / build and native glass validation gate.
 #
 # Purpose: build the actual Still desktop application (React + Vite + Tauri 2)
 # on a REAL hosted Windows ARM64 runner, produce the real ARM64 Windows
@@ -10,9 +10,9 @@
 # Do NOT change this to windows-latest / windows-x64 / ubuntu-* / macos-*,
 # QEMU, Wine, or a Linux cross-compile job: those do not validate Windows ARM64.
 #
-# Build success here proves compile+package for Windows ARM64 only.
-# It does NOT prove GUI/WebView2/SSH/keyring runtime behaviour — runtime
-# items remain UNVERIFIED by this workflow by design.
+# The downstream glass job launches the packaged executable in real WebView2
+# and compares rendered backdrop pixels with blur enabled and disabled.
+# This does NOT verify SSH/keyring runtime behaviour or all GUI interactions.
 
 name: still-windows-arm64
 
@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: windows-arm64-${{ github.ref }}
@@ -189,3 +190,10 @@ jobs:
             src-tauri/target/**/bundle/**/*.msi
             src-tauri/target/**/bundle/**/*.exe
             still-windows-arm64-manifest.txt
+
+  verify-native-glass:
+    name: Verify the packaged app's rendered glass
+    needs: build-windows-arm64
+    uses: ./.github/workflows/windows-glass.yml
+    with:
+      build_run: ${{ github.run_id }}

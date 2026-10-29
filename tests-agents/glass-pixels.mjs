@@ -24,8 +24,12 @@ export async function pixelContrast(page, image) {
 export async function probeAuroraGlass(page, capture) {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.locator('.agent-aurora[data-rendered="true"][data-paused="true"]').waitFor()
+  await page.waitForFunction(() => {
+    const source = document.querySelector(".agent-aurora canvas")
+    return !source.dataset.frostManaged || source.dataset.frostFrame
+  })
   await capture("normal", await page.screenshot({ animations: "disabled" }))
-  await page.evaluate(() => {
+  const previousFrame = await page.evaluate(() => {
     const canvas = document.querySelector(".agent-aurora canvas")
     const context = canvas.getContext("2d")
     context.save()
@@ -35,7 +39,11 @@ export async function probeAuroraGlass(page, capture) {
       context.fillRect(x, 0, 8, canvas.height)
     }
     context.restore()
+    const previous = canvas.dataset.frostFrame
+    canvas.dispatchEvent(new Event("still:backdrop-frame"))
+    return previous
   })
+  if (previousFrame !== undefined) await page.waitForFunction(previous => document.querySelector(".agent-aurora canvas").dataset.frostFrame !== previous, previousFrame)
   const hide = await page.addStyleTag({ content: ".agent-composer > *, .agent-sidebar > * { visibility: hidden !important; }" })
   const source = await page.locator(".agent-aurora").boundingBox()
   if (!source) throw new Error("The production aurora is not visible")
@@ -53,7 +61,7 @@ export async function probeAuroraGlass(page, capture) {
     await capture(`${name}-blurred`, image)
     panes.push({ name, clip, contrast: await pixelContrast(page, image) })
   }
-  const disable = await page.addStyleTag({ content: ".agent-composer::before, .agent-sidebar { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-composer::before, .agent-sidebar { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = []
   try {
     for (const pane of panes) {

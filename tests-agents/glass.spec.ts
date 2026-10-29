@@ -24,6 +24,19 @@ test("the real application blurs its actual aurora canvas at production depth", 
   }
 })
 
+test("native glass visibly blurs the real scene even with CSS backdrop filters disabled", async ({ page }, info) => {
+  await page.addInitScript(() => { Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} }) })
+  await page.setViewportSize({ width: 1100, height: 720 })
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/tests-agents/fixture.html")
+  await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
+  for (const pane of results) {
+    expect(pane.unblurred, `${pane.name}: real source is transmitted`).toBeGreaterThan(3)
+    expect(pane.ratio, `${pane.name}: source is blurred without CSS filters`).toBeLessThan(.3)
+  }
+})
+
 test("composer and nested model menu visibly blur the backdrop rather than only tinting it", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
@@ -71,7 +84,7 @@ test("focusing the composer keeps its frost and tint unchanged", async ({ page }
     return { fill: style.backgroundColor, sheen: style.backgroundImage, blur: style.backdropFilter }
   })
   const before = await frost()
-  expect(before.fill).toBe("rgba(28, 28, 31, 0.6)")
+  expect(before.fill).toBe("rgba(18, 18, 21, 0.48)")
   expect(before.sheen).toContain("linear-gradient")
   await page.getByLabel("Message agent").focus()
   expect(await frost()).toEqual(before)

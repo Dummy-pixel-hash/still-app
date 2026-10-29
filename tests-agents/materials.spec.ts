@@ -19,7 +19,7 @@ test("sidebar actions and conversation review use the same warm glass materials"
   await expect(create.locator("svg path")).toHaveAttribute("d", /^M12\.5 4\.5/)
   await sidebar.locator(".agent-thread-open").first().click()
   await expect(page.locator(".agent-composer-hint")).toHaveCount(0)
-  await expect(page.locator(".agent-message-user").first()).toHaveCSS("background-color", "rgba(28, 28, 31, 0.6)")
+  await expect(page.locator(".agent-message-user").first()).toHaveCSS("background-color", "rgba(18, 18, 21, 0.48)")
   await expect(page.locator(".agent-conversation")).toHaveCSS("backdrop-filter", "blur(12px)")
   const summary = page.locator(".agent-change-summary")
   await expect(summary).toHaveCSS("background-color", "rgba(12, 11, 12, 0.68)")
@@ -29,7 +29,7 @@ test("sidebar actions and conversation review use the same warm glass materials"
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
   const review = page.locator(".agent-review")
   await expect(review).toHaveCSS("backdrop-filter", "blur(24px) saturate(1.12)")
-  await expect(review).toHaveCSS("background-color", "rgba(28, 28, 31, 0.8)")
+  await expect(review).toHaveCSS("background-color", "rgba(18, 18, 21, 0.68)")
   await expect(review).toHaveCSS("border-radius", "16px")
   await expect(review.locator(".agent-review-header h2")).toHaveCSS("font-size", "15px")
   await expect(review.locator(".agent-review-files > button.is-selected")).toHaveCSS("background-image", /linear-gradient\(105deg/)
@@ -55,7 +55,7 @@ test("provider and model selectors use deliberate glass surfaces and provider id
 
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
   const models = page.getByRole("dialog", { name: "Model and reasoning", exact: true })
-  await expect(models).toHaveCSS("background-color", "rgba(28, 28, 31, 0.8)")
+  await expect(models).toHaveCSS("background-color", "rgba(18, 18, 21, 0.68)")
   await expect(models).toHaveCSS("backdrop-filter", "blur(22px) saturate(1.12)")
   await expect(models.locator(".agent-model-menu-heading")).toHaveCSS("border-bottom-width", "0px")
   await expect(models.locator(".agent-picker-search")).toHaveCSS("border-bottom-width", "0px")
@@ -68,7 +68,7 @@ test("provider and model selectors use deliberate glass surfaces and provider id
   await page.getByRole("button", { name: "Done", exact: true }).click()
   await expect(models).toHaveCount(0)
   await page.goto("/tests-agents/fixture.html?demo&scenario=question")
-  await expect(page.locator(".agent-request-card")).toHaveCSS("background-color", "rgba(28, 28, 31, 0.6)")
+  await expect(page.locator(".agent-request-card")).toHaveCSS("background-color", "rgba(18, 18, 21, 0.48)")
   await expect(page.getByRole("radio", { name: "Extend the existing session", exact: true })).toBeVisible()
   await page.goto("/tests-agents/fixture.html?demo&scenario=approval")
   const allow = page.getByRole("button", { name: "Allow once", exact: true })
@@ -101,7 +101,7 @@ test("the real application entry opens the shared Agents UI, not a fixture-only 
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toBeVisible()
 })
 
-test("the native-shell CSS path retains a slight white tint and independent backdrop layers", async ({ page }) => {
+test("native panes use a shared pre-blurred scene instead of an unsupported CSS filter", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
   })
@@ -109,18 +109,20 @@ test("the native-shell CSS path retains a slight white tint and independent back
   await page.goto("/tests-agents/fixture.html?demo")
   const workspace = page.locator(".agent-workspace")
   await expect(workspace).toHaveAttribute("data-native-shell", "true")
+  await expect(workspace).toHaveAttribute("data-frost-rendered", "true")
   const composer = page.locator(".agent-composer")
   const recents = page.locator(".agent-recents")
   const topbar = page.locator(".agent-topbar")
-  for (const [pane, filter, pseudo] of [[composer, "blur(24px) saturate(1.12)", "::before"], [recents, "blur(20px) saturate(1.1)", null], [topbar, "blur(24px) saturate(1.1)", null]] as const) {
+  for (const [pane, pseudo] of [[composer, "::before"], [recents, null], [topbar, null]] as const) {
     const background = await pane.evaluate((el, pseudo) => {
       const style = getComputedStyle(el, pseudo)
-      return { image: style.backgroundImage, fill: style.backgroundColor, radius: style.borderTopLeftRadius, filter: style.backdropFilter }
+      return { image: style.backgroundImage, fill: style.getPropertyValue("--ag-chrome").trim(), radius: style.borderTopLeftRadius, filter: style.backdropFilter }
     }, pseudo)
     expect(background.image).toContain("linear-gradient")
-    expect(background.fill).toBe("rgba(28, 28, 31, 0.6)")
+    expect(background.image).toContain("blob:")
+    expect(background.fill).toBe("rgba(18, 18, 21, .48)")
     expect(background.radius).not.toBe("0px")
-    expect(background.filter).toBe(filter)
+    expect(background.filter).toBe("none")
   }
   await expect(composer).toHaveCSS("border-top-width", "0px")
   await page.getByLabel("Message agent").focus()

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { createAuroraRenderer } from "../agents/auroraRenderer"
+import { createGlassBackdrop } from "../agents/glassBackdrop"
 
 /** One decorative particle horizon; never owns focus, input, or application state. */
 export default function AgentAurora() {
@@ -12,12 +13,14 @@ export default function AgentAurora() {
     if (!element) return
     const renderer = createAuroraRenderer(element)
     if (!renderer) { setRendered(false); return }
+    const glass = createGlassBackdrop(element)
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)")
     let width = 0, height = 0, frame = 0, lastFrame = 0, elapsed = 0, stopped = true
 
     const draw = () => {
       if (!width || !height) return
       renderer.draw(elapsed)
+      glass?.draw()
     }
 
     // One visible canvas; the static SVG is only a fallback, not a second live layer.
@@ -58,6 +61,7 @@ export default function AgentAurora() {
       stopped = true
       cancelAnimationFrame(frame)
       observer.disconnect()
+      glass?.dispose()
       document.removeEventListener("visibilitychange", update)
       reducedMotion.removeEventListener("change", update)
     }
