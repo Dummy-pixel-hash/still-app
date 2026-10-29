@@ -3,7 +3,7 @@
  * identifiable providers, syntax-colored code and honest red/green file changes.
  * STORY: Start in the centered composer or reopen local work; review beside the chat.
  * FIRST VIEWPORT: 272px collapsible project navigation, 54px work header, a centered
- * launch area that becomes a 740px transcript and docked composer. Review opens right.
+ * launch area that becomes a 960px transcript and floating composer. Review opens right.
  * FORM: User-pinned T3 Code/Codex desktop canon, grounded in their actual screenshots.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
@@ -11,6 +11,7 @@ import { AGENTS, type AgentAvailability, type AgentCatalog, type AgentCommand, t
 import { conversation } from "../agents/transcript"
 import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, projectKey, readLibraryPreferences, sessionForHost, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
 import { useConversationScroll } from "../agents/useConversationScroll"
+import { useComposerOverlay } from "../agents/useComposerOverlay"
 import { useAgentListMotion } from "../agents/useAgentListMotion"
 import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
@@ -190,6 +191,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const plan = useMemo(() => current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript])
   const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript)
   const showComposer = startScreen || !!current
+  const composerDock = useComposerOverlay(!!current)
   const canSend = hydrated && connectedHere && !busy && !configBusy && !!draft.trim() && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
   const projects = [...prefs.projects]
@@ -619,7 +621,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
         </div>
-        {showComposer && <div className={`agent-composer-area${startScreen ? " is-compact" : ""}`}>
+        {showComposer && <div ref={composerDock} className={`agent-composer-area${startScreen ? " is-compact" : ""}`}>
           {!scroll.atLatest && current && !activeRequestItem && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
           {activeRequestItem && current && <button className={`agent-request-jump ${activeRequestKind === "permission" ? "is-approval" : "is-question"}`} onClick={() => {
             if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)

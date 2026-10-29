@@ -852,9 +852,12 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   .agent-workspace .agent-topbar { height: 46px; margin: 8px 10px 0; padding-inline: 10px; border-radius: 11px; }
 }
 
-/* The active composer floats over the reading surface instead of occupying a
-   black card row. The scroll viewport continues behind a soft bottom fade. */
-.agent-workspace .agent-chat:not(.is-launch) > .agent-conversation { padding-bottom: 220px; }
+/* The frosted input floats above a full-height transcript. Only the pill owns
+   a material: its wrapper stays transparent and lets pointer input through. */
+.agent-workspace .agent-chat:not(.is-launch) > .agent-conversation {
+  padding-bottom: calc(var(--ag-composer-height, 0px) + 22px);
+  scroll-padding-bottom: calc(var(--ag-composer-height, 0px) + 22px);
+}
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area {
   position: absolute;
   inset: auto 0 0;
@@ -868,16 +871,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   background: none;
   pointer-events: none;
 }
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area::before {
-  content: "";
-  position: absolute;
-  inset: -54px 0 -12px;
-  z-index: -1;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(5, 5, 5, 0), rgba(5, 5, 5, .02) 34%, rgba(5, 5, 5, .14));
-  mask-image: linear-gradient(180deg, transparent, #000 36%);
-  -webkit-mask-image: linear-gradient(180deg, transparent, #000 36%);
-}
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > * { pointer-events: auto; }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer,
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer-footnote,
@@ -889,21 +882,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   max-width: 960px;
   margin-inline: auto;
 }
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer::before { content: none; }
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer:focus-within { border: 0; background: transparent; box-shadow: none; }
-.agent-workspace .agent-composer textarea:focus-visible {
-  outline: 2px solid rgba(220, 178, 187, .72) !important;
-  outline-offset: 5px;
-  border-radius: 4px;
-}
 @media (max-width: 540px) {
   .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area { padding: 24px 16px max(10px, env(safe-area-inset-bottom)); }
-  .agent-workspace .agent-chat:not(.is-launch) > .agent-conversation { padding-bottom: 210px; }
 }

@@ -28,6 +28,7 @@ test("native frosted panes visibly blur the real scene without CSS backdrop filt
   await page.setViewportSize({ width: 1100, height: 720 })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
+  await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
   for (const pane of results) {
     expect(pane.unblurred, `${pane.name}: real source is transmitted`).toBeGreaterThan(3)
@@ -35,11 +36,12 @@ test("native frosted panes visibly blur the real scene without CSS backdrop filt
   }
 })
 
-test("model menu blurs while the active composer stays unboxed over scrolling content", async ({ page }, info) => {
+test("the floating input and model menu keep their own blur while the wrapper stays clear", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
   await expect(page.getByRole("dialog", { name: "Model and reasoning" })).toBeVisible()
-  // A high-frequency backdrop makes real menu blur and a transparent composer overlay measurable.
+  // Keep the production layout. The stripes distinguish a blurred pill from
+  // a merely tinted rectangle and from the fully clear space around it.
   await page.evaluate(() => {
     const backdrop = document.createElement("div")
     backdrop.setAttribute("aria-hidden", "true")
@@ -48,39 +50,38 @@ test("model menu blurs while the active composer stays unboxed over scrolling co
   })
   await page.addStyleTag({ content: `
     .agent-aurora { visibility: hidden; }
-    .agent-composer-area > * { visibility: hidden !important; }
+    .agent-composer > *, .agent-composer-footnote { visibility: hidden !important; }
     .agent-model-menu { visibility: visible !important; }
     .agent-model-menu > * { visibility: hidden !important; }
   ` })
-  const veilBounds = await page.locator(".agent-composer-area").boundingBox()
-  expect(veilBounds).not.toBeNull()
-  const veilClip = { x: Math.ceil(veilBounds!.x + 30), y: Math.ceil(veilBounds!.y + 20), width: Math.min(200, Math.floor(veilBounds!.width - 60)), height: 24 }
-  const veilImage = await page.screenshot({ clip: veilClip, scale: "css", animations: "disabled" })
-  await info.attach("composer-veil.png", { body: veilImage, contentType: "image/png" })
-  const veilContrast = await pixelContrast(page, veilImage)
-  expect(veilContrast, "chat pixels remain visible through the unboxed floating composer veil").toBeGreaterThan(3)
-  await expect(page.locator(".agent-composer-area")).toHaveCSS("position", "absolute")
-  await expect(page.locator(".agent-composer")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
-  await expect(page.locator(".agent-composer")).toHaveCSS("border-top-width", "0px")
-  expect(await page.locator(".agent-composer-area").evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("none")
+  const wrapper = page.locator(".agent-composer-area"), composer = page.locator(".agent-composer")
+  await expect(wrapper).toHaveCSS("position", "absolute")
+  await expect(wrapper).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
+  expect(await wrapper.evaluate(el => getComputedStyle(el, "::before").content)).toBe("none")
+  const bounds = await composer.boundingBox(), outer = await wrapper.boundingBox()
+  const clearClip = { x: Math.ceil(outer!.x + 4), y: Math.ceil(bounds!.y + 22), width: Math.floor(bounds!.x - outer!.x - 10), height: 24 }
+  const clear = await page.screenshot({ clip: clearClip, scale: "css" })
+  expect(await pixelContrast(page, clear), "the wrapper must not paint a black footer").toBeGreaterThan(10)
 
-  let menuClip: { x: number; y: number; width: number; height: number }
-  let menuImage: Buffer
-  const menuBounds = await page.locator(".agent-model-menu").boundingBox()
-  expect(menuBounds).not.toBeNull()
-  menuClip = { x: Math.ceil(menuBounds!.x + 18), y: Math.ceil(menuBounds!.y + 18), width: Math.min(200, Math.floor(menuBounds!.width - 36)), height: 24 }
-  menuImage = await page.screenshot({ clip: menuClip, scale: "css", animations: "disabled" })
-  await info.attach("model-menu-blurred.png", { body: menuImage, contentType: "image/png" })
-  const menuFilterContrast = await pixelContrast(page, menuImage)
-  await page.addStyleTag({ content: ".agent-model-menu { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
-  const menuSharp = await page.screenshot({ clip: menuClip, scale: "css", animations: "disabled" })
-  const menuSharpContrast = await pixelContrast(page, menuSharp)
-  await info.attach("model-menu-unblurred.png", { body: menuSharp, contentType: "image/png" })
-  expect(menuSharpContrast).toBeGreaterThan(3)
-  expect(menuFilterContrast).toBeLessThan(menuSharpContrast * .3)
+  const panes = []
+  for (const [name, selector] of [["composer", ".agent-composer"], ["model-menu", ".agent-model-menu"]]) {
+    const box = await page.locator(selector).boundingBox()
+    const clip = { x: Math.ceil(box!.x + 20), y: Math.ceil(box!.y + 20), width: Math.min(200, Math.floor(box!.width - 40)), height: 24 }
+    const image = await page.screenshot({ clip, scale: "css", animations: "disabled" })
+    await info.attach(`${name}-blurred.png`, { body: image, contentType: "image/png" })
+    panes.push({ name, clip, contrast: await pixelContrast(page, image) })
+  }
+  await page.addStyleTag({ content: ".agent-composer::before, .agent-model-menu { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  for (const pane of panes) {
+    const sharp = await page.screenshot({ clip: pane.clip, scale: "css", animations: "disabled" })
+    const contrast = await pixelContrast(page, sharp)
+    await info.attach(`${pane.name}-unblurred.png`, { body: sharp, contentType: "image/png" })
+    expect(contrast).toBeGreaterThan(3)
+    expect(pane.contrast, `${pane.name} retains its blur`).toBeLessThan(contrast * .3)
+  }
 })
 
-test("the composer floats without a box and the message measure is widened", async ({ page }) => {
+test("the frosted input floats over a wide transcript and reserves space as the draft grows", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
   await page.locator(".agent-recent").first().click()
@@ -95,9 +96,11 @@ test("the composer floats without a box and the message measure is widened", asy
   await expect(page.locator(".agent-message-list")).toHaveCSS("max-width", "960px")
   await expect(composer).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(composer).toHaveCSS("border-top-width", "0px")
+  await expect(composer).toHaveCSS("border-radius", "14px")
+  expect(await composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("blur(24px) saturate(1.12)")
   await expect(area).toHaveCSS("position", "absolute")
   await expect(area).toHaveCSS("pointer-events", "none")
-  expect(await area.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("none")
+  expect(await area.evaluate(el => getComputedStyle(el, "::before").content)).toBe("none")
   const layout = await page.evaluate(() => {
     const chat = document.querySelector(".agent-chat").getBoundingClientRect()
     const viewport = document.querySelector(".agent-conversation").getBoundingClientRect()
@@ -113,7 +116,37 @@ test("the composer floats without a box and the message measure is widened", asy
   await expect.poll(() => viewport.evaluate(el => el.scrollTop)).toBe(0)
   await viewport.evaluate(el => { el.scrollTop = 400 })
   await expect.poll(() => viewport.evaluate(el => el.scrollTop)).toBeGreaterThan(100)
+  const initialHeight = (await area.boundingBox())!.height
+  await page.getByLabel("Message agent").fill("Keep this multiline draft while the chat scrolls.\n".repeat(12))
+  await expect.poll(async () => (await area.boundingBox())!.height).toBeGreaterThan(initialHeight + 50)
+  await expect.poll(() => page.evaluate(() => {
+    const dock = document.querySelector(".agent-composer-area")!.getBoundingClientRect()
+    const viewport = document.querySelector(".agent-conversation")!
+    return parseFloat(getComputedStyle(viewport).paddingBottom) - dock.height
+  })).toBeGreaterThanOrEqual(22)
+  await page.getByRole("button", { name: "Latest activity" }).click()
+  await expect.poll(() => page.evaluate(() => {
+    const last = document.querySelector(".agent-message-list")!.lastElementChild!.getBoundingClientRect()
+    const pill = document.querySelector(".agent-composer")!.getBoundingClientRect()
+    return pill.top - last.bottom
+  })).toBeGreaterThan(10)
   await page.getByLabel("Message agent").focus()
-  await expect(page.getByLabel("Message agent")).toHaveCSS("outline-width", "2px")
+  await expect(composer).toHaveCSS("box-shadow", /rgba\(190, 92, 112,/)
   await expect(composer).toHaveCSS("backdrop-filter", "none")
+})
+
+test("native frost remains on the active input after opening history and resizing", async ({ page }, info) => {
+  await page.addInitScript(() => { Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} }) })
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  await page.setViewportSize({ width: 1100, height: 480 })
+  await expect(page.locator(".agent-chat")).not.toHaveClass(/is-launch/)
+  await expect(page.locator(".agent-composer")).toHaveAttribute("data-agent-frost", "")
+  await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`active-${name}.png`, { body: image, contentType: "image/png" }), [["composer", ".agent-composer"]])
+  for (const pane of results) {
+    expect(pane.unblurred).toBeGreaterThan(3)
+    expect(pane.ratio).toBeLessThan(.3)
+  }
 })

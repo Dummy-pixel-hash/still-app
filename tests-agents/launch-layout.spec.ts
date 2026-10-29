@@ -179,6 +179,8 @@ test("Agents keeps a black foundation and a horizontal particle aurora behind ac
   await expect(aurora).toHaveAttribute("aria-hidden", "true")
   await expect(aurora).toHaveAttribute("data-rendered", "true")
   const fieldBounds = await aurora.boundingBox()
+  const workspaceBounds = await workspace.boundingBox()
+  expect((fieldBounds!.y + fieldBounds!.height / 2 - workspaceBounds!.y) / workspaceBounds!.height).toBeCloseTo(.52, 2)
   expect(fieldBounds!.width / fieldBounds!.height).toBeGreaterThan(3)
   const asset = await page.request.get("/agents/particle-aurora.svg")
   expect(asset.ok()).toBe(true)
@@ -188,6 +190,8 @@ test("Agents keeps a black foundation and a horizontal particle aurora behind ac
 
   for (const [width, height] of [[1100, 720], [800, 720], [390, 844], [320, 560]]) {
     await page.setViewportSize({ width, height })
+    const field = await aurora.boundingBox(), root = await workspace.boundingBox()
+    expect((field!.y + field!.height / 2 - root!.y) / root!.height).toBeCloseTo(width <= 640 ? .36 : .52, 2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true)
     expect(await page.evaluate(() => document.documentElement.scrollHeight <= document.documentElement.clientHeight + 1)).toBe(true)
   }

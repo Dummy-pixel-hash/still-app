@@ -101,7 +101,7 @@ test("the real application entry opens the shared Agents UI, not a fixture-only 
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toBeVisible()
 })
 
-test("native glass surfaces use a shared pre-blurred scene while the active composer stays unboxed", async ({ page }) => {
+test("native frost stays on the input pill while its floating wrapper remains clear", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
   })
@@ -124,12 +124,24 @@ test("native glass surfaces use a shared pre-blurred scene while the active comp
   }
   await page.locator(".agent-recent").first().click()
   const composer = page.locator(".agent-composer")
-  await expect(page.locator(".agent-composer-area")).toHaveCSS("position", "absolute")
-  await expect(composer).not.toHaveAttribute("data-agent-frost", "")
+  const wrapper = page.locator(".agent-composer-area")
+  await expect(wrapper).toHaveCSS("position", "absolute")
+  await expect(wrapper).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
+  expect(await wrapper.evaluate(el => getComputedStyle(el, "::before").content)).toBe("none")
+  await expect(composer).toHaveAttribute("data-agent-frost", "")
+  const frost = () => composer.evaluate(el => {
+    const style = getComputedStyle(el, "::before")
+    return { image: style.backgroundImage.replace(/url\("blob:[^"]+"\)/, 'url("blob:scene")'), filter: style.backdropFilter, radius: style.borderRadius }
+  })
+  await expect.poll(async () => (await frost()).image).toContain("blob:")
+  const before = await frost()
+  expect(before.filter).toBe("none")
+  expect(before.radius).toBe("14px")
   await expect(composer).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(composer).toHaveCSS("border-top-width", "0px")
   await page.getByLabel("Message agent").focus()
-  await expect(page.getByLabel("Message agent")).toHaveCSS("outline-width", "2px")
+  expect(await frost()).toEqual(before)
+  await expect(composer).toHaveCSS("box-shadow", /rgba\(190, 92, 112,/)
   await page.getByLabel("Message agent").fill("Frosted glass remains usable")
   await expect(page.getByLabel("Message agent")).toHaveValue("Frosted glass remains usable")
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
