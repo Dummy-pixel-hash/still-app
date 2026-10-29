@@ -75,7 +75,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "" } }
   if (event.type === "threadState" && event.state) {
     row.state = event.state
-    if (event.state === "detached") row.lastError = event.text || "The agent continues on the server. Reattach to catch up."
+    if (event.state === "detached") row.lastError = event.text || "The agent continues on the server. Reconnecting to catch up."
     else if (event.state === "working" || event.state === "connecting") row.lastError = undefined
     if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined }
   }
@@ -187,7 +187,7 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
       if (row) {
         row.state = row.persistent ? "detached" : "submissionUnknown"
         if (!row.persistent) { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false }
-        row.lastError = restored.has(id) ? row.resumable ? "This conversation is saved. Resume it to continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." : error instanceof Error ? error.message : "Remote process is unavailable. Inspect the server before retrying."
+        row.lastError = restored.has(id) ? row.resumable ? "This conversation is saved. Select it to connect and continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." : error instanceof Error ? error.message : "Remote process is unavailable. Inspect the server before retrying."
         emit()
       }
     }
@@ -337,7 +337,7 @@ export function canChangeAgentHistory(row: AgentThreadRow, messageId: string, re
 }
 export async function changeAgentHistory(id: string, messageId: string, retry: boolean) {
   const row = rows.get(id)
-  if (!row || !canChangeAgentHistory(row, messageId, retry)) throw new Error("Resume this conversation and wait until it is idle before changing its messages.")
+  if (!row || !canChangeAgentHistory(row, messageId, retry)) throw new Error("Restore this conversation and wait until it is idle before changing its messages.")
   const message = row.transcript.find(event => event.type === "userMessage" && event.messageId === messageId)!
   const existingDraft = row.meta.draft
   historyOperations.add(id)

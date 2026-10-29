@@ -19,7 +19,7 @@ export default function RemoteAgentWorkspace({ session, sessions, onNeedAuth, ke
   const reattach = useCallback((row: AgentThreadRow) => reattachAgentThread(row.executionId,connection.nativeId || ""),[connection.nativeId])
   return <AgentWorkspace session={target} sessions={sessions} onSelectHost={setTarget}
     onReattach={reattach} transportId={connection.nativeId || undefined}
-    connected={connection.state === "connected"} onConnect={connection.connect} connectionNotice={target && <AgentConnectionNotice connection={connection} />}
+    connected={connection.state === "connected"} connectionNotice={target && <AgentConnectionNotice connection={connection} />}
     onClose={onClose} onOpenTerminal={target ? () => onOpenTerminal(target) : undefined}
     onStart={(agentId, options, onCreated) => startRemoteAgent(connection.nativeId || "", target?.id || "", agentId, options, target || undefined, onCreated)}
     onCheck={(agentId, executable) => nativeBridge.agentCheck(connection.nativeId || "", agentId, executable)}

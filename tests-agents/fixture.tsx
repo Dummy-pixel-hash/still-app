@@ -28,7 +28,7 @@ const modelOptions = [
 const projectCommands = [{ name: "review", description: "Review the current changes" }, { name: "compact", description: "Compact this conversation" }, ...Array.from({ length: 25 }, (_, i) => ({ name: `team/command-${i}`, description: `Project command ${i}` })), { name: "skill:security-review", description: "Audit security boundaries", route: "skill" as const, source: "Skill" }]
 let counter = 0
 const h = {
-  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], inputs: [] as unknown[],
+  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[],
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
   external: [] as string[],
@@ -40,7 +40,7 @@ const h = {
   rejectConfig: false, rejectSend: false, rejectResponse: false, deferResponse: false, deferConfig: false, unknownResponse: false, failSnapshot: false,
   releaseResponse: () => {}, releaseConfig: () => {},
   closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
-  trustCalls: 0, forgetCalls: 0, deferStartup: false, startupFail: false,
+  trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], deferStartup: false, startupFail: false,
   releaseStartup: () => {},
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
@@ -133,8 +133,8 @@ registerNativeBridge({
     h.releaseStartups.set(row.executionId, h.releaseStartup)
     return structuredClone(row)
   },
-  agentSnapshot: async id => { if (h.failSnapshot) throw new Error("Agent connection unavailable"); return structuredClone(snapshots.get(id)!) },
-  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id); if (!row) throw new Error("Persistent worker unavailable"); h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
+  agentSnapshot: async id => { if (h.failSnapshot) throw new Error("Agent connection unavailable"); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row) throw new Error("Agent execution unavailable"); snapshots.set(id, row); return structuredClone(row) },
+  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
     if (h.rejectSend) throw new Error("SSH disconnected. Submission is uncertain.")
@@ -198,11 +198,12 @@ registerNativeBridge({
     h.connects.push(args)
     return { sessionId: `ssh-${h.connects.length}`, status: h.hostKeyMode !== "trusted" && !h.hostTrusted ? "connecting" : "connected" }
   },
+  disconnect: async id => { h.disconnects.push(id); await mockBridge.disconnect(id) },
   subscribeToSession: async (_id, callback) => {
     if (h.hostKeyMode !== "trusted" && !h.hostTrusted) callback({ type: "hostKeyPrompt", prompt: { host: "dev.example.test", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:explicit-test-fingerprint", opensshKey: "ssh-ed25519 synthetic-test-key", changed: h.hostKeyMode === "changed" } })
     return () => {}
   },
-  status: async () => ({ status: h.hostKeyMode !== "trusted" && !h.hostTrusted ? "error" : "connected", lastError: h.hostKeyMode !== "trusted" && !h.hostTrusted ? { code: "host_key_unknown", message: "Verify the server identity" } : null }),
+  status: async id => { h.statusCalls.push(id); return { status: h.hostKeyMode !== "trusted" && !h.hostTrusted ? "error" : "connected", lastError: h.hostKeyMode !== "trusted" && !h.hostTrusted ? { code: "host_key_unknown", message: "Verify the server identity" } : null } },
   trustHost: async () => { h.trustCalls++; h.hostTrusted = true },
   forgetHost: async () => { h.forgetCalls++; h.hostKeyMode = "unknown" },
 })

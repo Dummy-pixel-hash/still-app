@@ -215,18 +215,46 @@ test("cold Agents entry authenticates without opening or creating a terminal", a
   expect(await page.evaluate(() => (window as any).agentFixture.connects[1].sshOnly)).not.toBe(true)
 })
 
-test("saved conversations resume without replacing their history or metadata", async ({ page }) => {
+test("online recovery reconnects even when cached SSH status is live", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?workspace")
+  await page.getByRole("button", { name: "Actions for Development" }).click()
+  await page.getByRole("button", { name: "Start agent", exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.connects.length)).toBe(1)
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.statusCalls.filter((id: string) => id === "ssh-1").length)).toBe(1)
+  await expect(page.locator(".agent-connection-notice")).toHaveCount(0)
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await page.evaluate(() => window.dispatchEvent(new Event("online")))
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.statusCalls.filter((id: string) => id === "ssh-1").length)).toBe(2)
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.disconnects.length)).toBe(1)
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.connects.length)).toBe(2)
+  expect(await page.evaluate(() => (window as any).agentFixture.connects.every((request: any) => request.sshOnly))).toBe(true)
+})
+
+test("selecting a saved conversation automatically resumes its provider session", async ({ page }) => {
   await page.evaluate(() => { (window as any).agentFixture.resumable = true })
   await connect(page, "opencode", "Saved message")
   await page.evaluate(() => (window as any).agentFixture.flush())
   await page.reload()
   await page.locator(".agent-thread-open").filter({ hasText: "Saved message" }).click()
-  await expect(page.getByRole("button", { name: "Resume conversation" })).toBeVisible()
-  await page.getByRole("button", { name: "Resume conversation" }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(1)
+  await expect(page.getByRole("button", { name: /Resume conversation|Reattach agent|Connect to resume|Connect to reattach/ })).toHaveCount(0)
   await expect(page.locator(".agent-message-user")).toContainText("Saved message")
+  expect(await page.evaluate(() => (window as any).agentFixture.starts[0].options.resumeSessionId)).toBe("acp-fixture")
   await refreshSession(page)
   await expect(page.locator(".agent-message-user")).toContainText("Saved message")
   await expect(page.locator(".agent-thread-open")).toHaveCount(1)
+})
+
+test("selecting a persistent conversation automatically reattaches and catches up", async ({ page }) => {
+  await page.evaluate(() => { (window as any).agentFixture.persistent = true })
+  await connect(page, "opencode", "Server-side conversation")
+  await page.evaluate(async () => { const h = (window as any).agentFixture; h.finish(); await h.flush() })
+  await page.reload()
+  await page.locator(".agent-thread-open").filter({ hasText: "Server-side conversation" }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.attaches.length)).toBe(1)
+  await expect(page.getByRole("button", { name: /Resume conversation|Reattach agent|Connect to resume|Connect to reattach/ })).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).agentFixture.starts)).toEqual([])
+  await expect(page.locator(".agent-message-user")).toContainText("Server-side conversation")
 })
 
 test("folder order and collapse are persistent rather than tied to stream output", async ({ page }) => {
@@ -398,7 +426,7 @@ test("project catalogs and skills load on connection before sending a message", 
   expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual([])
 })
 
-test("streamed history survives reload and is readable without terminal cards or a connection", async ({ page }) => {
+test("streamed history survives reload and selecting it connects to its saved server", async ({ page }) => {
   await addFolder(page, "/srv/saved")
   await page.getByLabel("Message agent").fill("Keep the incomplete response")
   await page.getByRole("button", { name: "Send message" }).click()
@@ -410,7 +438,8 @@ test("streamed history survives reload and is readable without terminal cards or
   await expect(page.locator(".agent-message-assistant")).toContainText("First second third.")
   await expect(page.locator(".agent-saved-notice")).toContainText("Saved on this device")
   await expect(page.locator(".agent-error")).toHaveCount(0)
-  expect(await page.evaluate(() => (window as any).agentFixture.connects)).toEqual([])
+  expect(await page.evaluate(() => (window as any).agentFixture.connects)).toHaveLength(1)
+  expect(await page.evaluate(() => (window as any).agentFixture.connects[0].sshOnly)).toBe(true)
 })
 
 test("project drafts stay with their chosen folder and unassigned drafts remain available", async ({ page }) => {
@@ -536,7 +565,7 @@ test("a smaller live snapshot cannot replace already retained messages", async (
   await expect(page.locator(".agent-message-user").filter({ hasText: /^YouRetained 0$/ })).toBeVisible()
 })
 
-test("saved history requests host verification only when the reader chooses to resume", async ({ page }) => {
+test("selecting saved history connects directly while keeping host verification explicit", async ({ page }) => {
   await page.evaluate(() => { (window as any).agentFixture.resumable = true })
   await connect(page, "opencode", "Saved for later")
   await page.evaluate(() => (window as any).agentFixture.flush())
@@ -544,13 +573,13 @@ test("saved history requests host verification only when the reader chooses to r
   await page.evaluate(() => { (window as any).agentFixture.hostKeyMode = "unknown" })
   await page.getByRole("button", { name: "Agents", exact: true }).click()
   await page.locator(".agent-recent").click()
-  expect(await page.evaluate(() => (window as any).agentFixture.connects)).toEqual([])
-  await page.getByRole("button", { name: "Connect to resume" }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.connects.length)).toBe(1)
   await expect(page.getByRole("region", { name: "Verify server identity" })).toBeVisible()
+  await expect(page.getByRole("button", { name: /Resume conversation|Reattach agent|Connect to resume|Connect to reattach/ })).toHaveCount(0)
   await page.getByRole("button", { name: "Trust and connect" }).click()
-  await expect(page.getByRole("button", { name: "Resume conversation" })).toBeEnabled()
-  await page.getByRole("button", { name: "Resume conversation" }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(1)
   await expect(page.locator(".agent-message-user")).toContainText("Saved for later")
+  expect(await page.evaluate(() => (window as any).agentFixture.starts[0].options.resumeSessionId)).toBe("acp-fixture")
   await expect(page.locator(".agent-thread-open")).toHaveCount(1)
 })
 
@@ -958,7 +987,7 @@ test("rejected history operations keep the transcript and unknown outcomes block
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
 })
 
-test("resumed message checkpoints work without restoring reverted older history", async ({ page }) => {
+test("automatically resumed message checkpoints work without restoring reverted older history", async ({ page }) => {
   await page.evaluate(() => { (window as any).agentFixture.resumable = true })
   await connect(page, "opencode", "Prior process message")
   await page.getByLabel("Message agent").fill("Later message")
@@ -966,8 +995,9 @@ test("resumed message checkpoints work without restoring reverted older history"
   await page.evaluate(async () => { const h = (window as any).agentFixture; h.finish(); await h.flush() })
   await page.reload()
   await page.locator(".agent-thread-open").filter({ hasText: "Prior process message" }).click()
-  await expect(page.locator(".agent-message-actions").first().getByRole("button", { name: "Revert", exact: true })).toBeDisabled()
-  await page.getByRole("button", { name: "Resume conversation", exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(1)
+  await expect(page.getByRole("button", { name: "Resume conversation", exact: true })).toHaveCount(0)
+  await expect(page.locator(".agent-message-actions").first().getByRole("button", { name: "Revert", exact: true })).toBeEnabled()
   await page.locator(".agent-message-user").filter({ hasText: "Prior process message" }).getByRole("button", { name: "Revert", exact: true }).click()
   await page.getByRole("button", { name: "Revert conversation", exact: true }).click()
   await expect(page.locator(".agent-message-user")).toHaveCount(0)

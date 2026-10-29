@@ -39,7 +39,6 @@ type Props = {
   session: Session | null
   sessions?: Session[]
   onSelectHost?: (session: Session | null) => void
-  onConnect?: () => Promise<void>
   onReattach?: (row: AgentThreadRow) => Promise<void>
   transportId?: string
   connected?: boolean
@@ -65,7 +64,7 @@ function relativeActivity(at: number) {
   return minutes < 1 ? "now" : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`
 }
 
-export default function AgentWorkspace({ session, sessions = [], onSelectHost, onConnect, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
   const [hydrated, setHydrated] = useState(false)
@@ -84,8 +83,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [modelMenu, setModelMenu] = useState<"model" | "reasoning" | null>(null)
   const [extraControl, setExtraControl] = useState<string | null>(null)
   const [configError, setConfigError] = useState("")
-  const [reattaching, setReattaching] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const attachAttempt = useRef("")
+  const resumeAttempt = useRef("")
   const [timelineOpen, setTimelineOpen] = useState(false), [timelineQuery, setTimelineQuery] = useState("")
   const [feedback, setFeedback] = useState("")
   const [review, setReview] = useState(false)
@@ -122,9 +122,29 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     if (attachAttempt.current === key) return
     attachAttempt.current = key
     const revision = navigation.current
-    setReattaching(true)
-    void onReattach(current).catch(failure => { if (mounted.current && revision === navigation.current) setError(messageOf(failure)) }).finally(() => { if (mounted.current && revision === navigation.current) setReattaching(false) })
+    setRestoring(true)
+    void onReattach(current).catch(failure => { if (mounted.current && revision === navigation.current) setError(messageOf(failure)) }).finally(() => { if (mounted.current && revision === navigation.current) setRestoring(false) })
   }, [current?.executionId, current?.state, transportId, connectedHere, onReattach])
+  useEffect(() => {
+    if (!current || current.persistent || current.state !== "saved" || !canResumeAgentThread(current) || !onStart || !transportId || !connectedHere) return
+    const key = `${current.executionId}:${transportId}`
+    if (resumeAttempt.current === key) return
+    resumeAttempt.current = key
+    const revision = navigation.current
+    setRestoring(true)
+    const start = (agent: string, options: AgentLaunchOptions) => {
+      const launch = callbacks.current.onStart
+      return launch ? launch(agent, options) : Promise.reject(new Error("Connect an agent before resuming this conversation."))
+    }
+    const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
+    void resumeAgentThread(current.executionId, start, resumeExecutable).then(next => {
+      if (mounted.current && revision === navigation.current) setSelected(next.meta.id)
+    }).catch(failure => {
+      if (mounted.current && revision === navigation.current) setError(messageOf(failure))
+    }).finally(() => {
+      if (mounted.current && revision === navigation.current) setRestoring(false)
+    })
+  }, [current?.executionId, current?.state, current?.persistent, current?.meta.hostKey, current?.agentId, transportId, connectedHere, onStart])
   const agentId = current?.agentId || prefs.agent
   const definition = AGENTS.find(agent => agent.id === agentId) || AGENTS[0]
   const executable = context ? prefs.executables[context.host]?.[agentId]?.trim() || undefined : undefined
@@ -335,7 +355,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     }
     newThread(p)
   }
-  const selectThread = (row: AgentThreadRow) => { navigation.current++; setSelected(row.meta.id); setProject({ host: row.meta.hostKey, folder: row.meta.folder }); setView("draft"); setSidebar(false); if (row.state !== "saved" && row.state !== "submissionUnknown") selectHost(row.meta.hostKey) }
+  const selectThread = (row: AgentThreadRow) => { navigation.current++; setSelected(row.meta.id); setProject({ host: row.meta.hostKey, folder: row.meta.folder }); setView("draft"); setSidebar(false); selectHost(row.meta.hostKey) }
   const closeFolder = () => { folderOperation.current++; setFolderOpen(false) }
   const chooseFolder = () => { folderOperation.current++; setFolderOpen(true); const key = context?.host || host; setFolderHost(key); if (key && key !== host) selectHost(key); setFolderPath(""); setError(""); setAddingServer(false) }
   const openFolder = async () => {
@@ -413,11 +433,6 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     const revision = navigation.current
     try { await changeConfig(id, value) }
     catch (failure) { if (mounted.current && revision === navigation.current) setConfigError(messageOf(failure)) }
-  }
-  const resume = async () => {
-    if (!current) return
-    const revision = navigation.current, target = current
-    await run(async () => { const next = await resumeAgentThread(target.executionId, onStart, executable); if (mounted.current && navigation.current === revision) setSelected(next.meta.id) })
   }
   const applyHistoryAction = async () => {
     if (!current || !historyAction?.message.messageId || !connectedHere) return
@@ -610,9 +625,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
             if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)
             else { findMessage(activeRequestItem.id); requestAnimationFrame(() => surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(activeRequestItem.id)}"] .agent-request-expand`)?.focus({ preventScroll: true })) }
           }}><span className="agent-status-dot attention" />{activeRequestKind === "permission" ? "Approval needed" : "Your answer is needed"}<span>Review request</span><AgentIcon name="chevron" size={13} /></button>}
-          {current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{reattaching || current.state === "connecting" ? "Reattaching to the server-side agent…" : "Agent execution is kept on your server"}</span>{onReattach && (connectedHere ? <button className="agent-button" disabled={reattaching || current.state === "connecting"} onClick={() => { setReattaching(true); void onReattach(current).catch(failure => setError(messageOf(failure))).finally(() => setReattaching(false)) }}>Reattach agent</button> : <button className="agent-button" onClick={() => { if (current.meta.hostKey === host) void onConnect?.(); else selectHost(current.meta.hostKey) }}>Connect to reattach</button>)}</div> : current?.state === "saved" ? <><div className="agent-saved-notice"><span><AgentIcon name="check" size={15} />Saved on this device</span>{canResumeAgentThread(current) && (connectedHere ? <button className="agent-button" disabled={busy} onClick={() => void resume()}>Resume conversation</button> : <button className="agent-button" onClick={() => { if (current.meta.hostKey === host) void onConnect?.(); else selectHost(current.meta.hostKey) }}>Connect to resume</button>)}</div></> : null}
+           {current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{restoring || !connectedHere ? "Connecting to the server to restore this agent…" : "Agent execution is kept on your server"}</span></div> : current?.state === "saved" ? <div className="agent-saved-notice" role="status"><span><AgentIcon name={restoring ? "refresh" : "check"} size={15} />{restoring ? "Restoring this conversation from the server…" : canResumeAgentThread(current) ? connectedHere ? "Resuming the saved provider session…" : "Connecting to the saved server…" : "Saved on this device"}</span></div> : null}
           {session && connectionNotice}
-          {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span>{current && canResumeAgentThread(current) && <button className="agent-button" disabled={busy || !connectedHere} onClick={() => void resume()}>Resume conversation</button>}</div>}
+           {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span></div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
           <form className="agent-composer" onSubmit={e => { e.preventDefault(); void send() }}>
@@ -621,7 +636,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current ? <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} /> : <span className="agent-composer-provider"><AgentProviderMark id={current.agentId} size={20} />{current.agentName}</span>}
-                <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Resume this conversation to change its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
+                 <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
                 {agentModeControl && <ConfigPicker key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>

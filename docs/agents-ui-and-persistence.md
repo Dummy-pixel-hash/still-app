@@ -37,18 +37,21 @@ including Gemini's ACP transport.
 - Prompt receipts prevent duplicate submission of an existing message identity.
 - Questions/approval responses receive a worker acknowledgement. This confirms
   forwarding, not successful completion of the requested operation.
-- Wake/online/focus recovery reconnects an already-used server with saved
-  credentials. It never bypasses host-key verification or opens unsolicited
-  password dialogs. Without saved credentials, use **Connect server**.
-- After a full app restart, selecting the saved persistent conversation and
-  connecting its server reattaches to the worker. Global library access remains
-  offline-first and does not choose a server automatically.
+- Wake/online/focus recovery actively reconnects an already-used server with saved
+  credentials after a long sleep or network change, then reattaches the selected
+  persistent execution. It never bypasses host-key verification or opens
+  unsolicited password dialogs.
+- The global library remains offline-first. Selecting a saved conversation selects
+  its saved server and initiates the connection; after credentials and host-key
+  checks, Still automatically reattaches to a persistent worker or resumes a
+  saved provider session. There are no separate Resume/Reattach buttons.
 - Explicit cleanup of an unused preparation or closed execution stops that worker.
   Simply closing the Agents panel is not a stop operation.
 
 Existing foreground executions from older builds are not retroactively moved into
-a detached worker. Resume their saved provider session, or start a new conversation,
-to use the new execution model.
+a detached worker. Selecting one still connects and attempts to continue its saved
+provider session, but it cannot replay output from a worker that was not persistent.
+Start a new conversation to use the detached execution model.
 
 ### Boundaries
 
