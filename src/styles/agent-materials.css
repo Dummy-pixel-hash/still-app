@@ -1,0 +1,212 @@
+/* Shared materials for the complete Agents path, not just its launch screen.
+   Layout remains in agent-workspace.css. Blur is limited to architectural panes
+   and open overlays; messages and nested controls do not each get a GPU layer. */
+.agent-workspace {
+  --ag-sheet: rgba(24, 22, 23, .5);
+  --ag-sheet-deep: rgba(15, 14, 15, .94);
+  --ag-inset: rgba(5, 5, 5, .55);
+  --ag-control-fill: rgba(255, 255, 255, .035);
+  --ag-control-hover: rgba(255, 255, 255, .075);
+  --ag-control-active: rgba(163, 66, 82, .13);
+  --ag-edge: rgba(255, 255, 255, .105);
+  --ag-edge-strong: rgba(255, 255, 255, .18);
+  --ag-edge-active: rgba(232, 153, 166, .24);
+  --ag-reflection: linear-gradient(135deg, rgba(255, 255, 255, .035), transparent 55%);
+}
+
+/* Buttons share a quiet etched edge instead of mixing blue and solid-grey UI. */
+.agent-workspace :is(.agent-button, .agent-primary, .agent-danger) {
+  border: 1px solid var(--ag-edge);
+  border-radius: 9px;
+  background: var(--ag-reflection), var(--ag-control-fill);
+  color: #e7e2e4;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+.agent-workspace .agent-button:hover { background: var(--ag-control-hover); border-color: var(--ag-edge-strong); }
+.agent-workspace .agent-primary { background: #e8e2e4; border-color: #e8e2e4; color: #171315; }
+.agent-workspace .agent-primary:hover { background: #fff6f8; border-color: #fff6f8; }
+.agent-workspace .agent-danger { background: rgba(137, 47, 66, .3); border-color: rgba(230, 124, 145, .4); color: #ffd2dc; }
+.agent-workspace .agent-danger:hover { background: rgba(164, 51, 74, .42); }
+.agent-workspace :is(.agent-icon-button, .agent-request-expand) { border-radius: 8px; }
+.agent-workspace :is(.agent-icon-button, .agent-request-expand):hover { background: var(--ag-control-hover); color: #f1e9ed; }
+.agent-workspace .agent-send:hover { background: #f5eff1; color: #171315; transform: none; }
+.agent-workspace .agent-send:disabled { background: rgba(255, 255, 255, .1); color: #a7a0a3; }
+.agent-workspace .agent-send.agent-stop { background: #e8e2e4; color: #171315; }
+.agent-workspace ::selection { background: rgba(214, 133, 151, .3); }
+
+/* Navigation: one family for actions, folder controls, search and selected rows. */
+.agent-workspace :is(.agent-sidebar-new, .agent-sidebar-archive, .agent-sidebar-settings) {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #bcb5b9;
+  background: transparent;
+  box-shadow: none;
+}
+.agent-workspace .agent-sidebar-new {
+  background: var(--ag-reflection), rgba(190, 121, 136, .055);
+  border-color: rgba(255, 255, 255, .12);
+  color: #eee7eb;
+}
+.agent-workspace :is(.agent-sidebar-new, .agent-sidebar-archive, .agent-sidebar-settings):hover {
+  background: var(--ag-control-hover);
+  border-color: var(--ag-edge);
+  color: #f1e9ed;
+}
+.agent-workspace .agent-sidebar-search {
+  background: rgba(5, 5, 5, .2);
+  border-color: var(--ag-edge);
+  color: #aaa2a7;
+}
+.agent-workspace .agent-sidebar-search:focus-within { background: rgba(255, 255, 255, .035); border-color: var(--ag-edge-active); outline-color: #b8838b; }
+.agent-workspace .agent-folder-heading { border-radius: 9px; }
+.agent-workspace .agent-folder-heading:hover { background: rgba(255, 255, 255, .025); }
+.agent-workspace :is(.agent-sidebar-toggle, .agent-folder-toggle, .agent-project-heading > button, .agent-project-new, .agent-thread-more) {
+  border-radius: 8px;
+  color: #aaa2a7;
+}
+.agent-workspace :is(.agent-sidebar-toggle, .agent-folder-toggle, .agent-project-heading > button, .agent-project-new, .agent-thread-more):hover {
+  background: var(--ag-control-hover);
+  color: #eee7eb;
+}
+.agent-workspace .agent-thread { border-radius: 9px; }
+.agent-workspace .agent-thread:hover { background: var(--ag-control-fill); }
+.agent-workspace .agent-thread-open:hover { background: transparent; }
+.agent-workspace .agent-thread.is-selected {
+  background: var(--ag-reflection), var(--ag-control-active);
+  box-shadow: inset 0 0 0 1px var(--ag-edge-active);
+}
+.agent-workspace .agent-thread > .agent-thread-more:is(:hover, :focus-visible, [aria-expanded="true"]) {
+  background: rgba(34, 27, 30, .96);
+  color: #f1e9ed;
+}
+.agent-workspace .agent-sidebar-empty button { border: 1px solid var(--ag-edge); background: var(--ag-control-fill); color: #c5bcc1; border-radius: 10px; }
+.agent-workspace .agent-sidebar-empty button:hover { background: var(--ag-control-hover); border-color: var(--ag-edge-strong); }
+.agent-workspace .agent-rail-bottom > button:hover,
+.agent-workspace .agent-sidebar-rail > button:hover { background: var(--ag-control-hover); color: #eee7eb; }
+
+/* Popovers are deliberately denser than the background glass for legibility. */
+.agent-workspace :is(.agent-thread-menu, .agent-context-choices, .agent-picker-popup, .agent-model-menu, .agent-command-menu, .agent-modal, .agent-toast) {
+  background: var(--ag-reflection), var(--ag-sheet-deep);
+  border: 1px solid var(--ag-edge-strong);
+  border-top-color: rgba(255, 255, 255, .23);
+  border-radius: 13px;
+  backdrop-filter: blur(24px) saturate(110%);
+  -webkit-backdrop-filter: blur(24px) saturate(110%);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .35);
+}
+.agent-workspace .agent-thread-menu hr { border-color: var(--ag-edge); }
+.agent-workspace :is(.agent-thread-menu button, .agent-project-choice, .agent-timeline-results button):hover { background: var(--ag-control-hover); }
+.agent-workspace .agent-project-choice { color: #e1dade; border-radius: 8px; }
+.agent-workspace .agent-project-choice small { color: #a9a1a6; }
+.agent-workspace :is(.agent-picker-search, .agent-picker-count, .agent-model-menu-heading, .agent-model-menu-footer, .agent-reasoning-options) { border-color: var(--ag-edge); }
+.agent-workspace .agent-picker-search:focus-within { border-bottom-color: var(--ag-edge-active); }
+.agent-workspace :is(.agent-picker-options button.is-active, .agent-picker-options button:hover, .agent-command-options button[aria-selected="true"], .agent-command-options button:hover, .agent-model-group button:hover, .agent-model-group button.is-active) { background: var(--ag-control-hover); }
+.agent-workspace .agent-model-group button[aria-selected="true"] { background: var(--ag-control-active); box-shadow: inset 0 0 0 1px var(--ag-edge-active); }
+.agent-workspace .agent-composer .agent-model-trigger { background: var(--ag-control-fill); border-color: var(--ag-edge); border-radius: 9px; }
+.agent-workspace .agent-composer .agent-model-trigger:hover { background: var(--ag-control-hover); border-color: var(--ag-edge-strong); }
+.agent-workspace :is(.agent-model-group-label, .agent-model-trigger-copy small, .agent-model-group button small, .agent-model-group button code, .agent-model-menu-heading span, .agent-picker-options small, .agent-picker-count, .agent-command-name small, .agent-command-description, .agent-command-description small, .agent-model-menu-footer, .agent-reasoning-options > small) { color: #b7aeb3; }
+.agent-workspace .agent-reasoning-options label { border-color: var(--ag-edge); background: var(--ag-control-fill); color: #c7bec3; border-radius: 8px; }
+.agent-workspace .agent-reasoning-options label.is-selected { border-color: var(--ag-edge-active); background: var(--ag-control-active); color: #f0e7ec; }
+.agent-workspace .agent-reasoning-options legend { color: #d8cfd4; }
+.agent-workspace .agent-model-spinner { border-color: #5d5058; border-top-color: #e3c8d3; }
+
+/* Reading surface supplies the blur once; hundreds of messages stay lightweight. */
+.agent-workspace .agent-chat:not(.is-launch) > .agent-conversation {
+  background: rgba(5, 5, 5, .2);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.agent-workspace .agent-message-user { background: var(--ag-reflection), var(--ag-sheet); border: 1px solid var(--ag-edge); border-radius: 14px; }
+.agent-workspace .agent-message-user .agent-message-author { color: #b4a8b0; }
+.agent-workspace .agent-message-author { color: #d2c9ce; }
+.agent-workspace .agent-prose { color: #ded8dc; }
+.agent-workspace .agent-prose blockquote { border-color: #85646f; color: #c4b6bf; }
+.agent-workspace .agent-prose code { background: rgba(255, 255, 255, .055); color: #e2cbd5; border-radius: 5px; }
+.agent-workspace .agent-prose a { color: #e3b5c4; }
+.agent-workspace .agent-prose input[type="checkbox"] { accent-color: #dcb8c4; }
+.agent-workspace .agent-message-actions button { background: transparent; color: #aaa0a7; border-radius: 7px; }
+.agent-workspace .agent-message-actions button:hover { background: var(--ag-control-hover); color: #eee4ea; }
+.agent-workspace :is(.agent-work-group, .agent-history-page, .agent-plan, .agent-table th, .agent-table td) { border-color: var(--ag-edge); }
+.agent-workspace .agent-work-group-body { border-color: rgba(255, 255, 255, .12); }
+.agent-workspace .agent-tool-label code { color: #b9aeb6; }
+.agent-workspace .agent-tool-body { background: rgba(10, 9, 10, .65); border-radius: 10px; color: #c7bdc4; }
+.agent-workspace :is(.agent-working, .agent-preparation) { color: #d3b6c2; }
+.agent-workspace .agent-preparation button { background: var(--ag-control-fill); color: #e8dce3; border-radius: 7px; }
+.agent-workspace .agent-preparation button:hover { background: var(--ag-control-hover); }
+.agent-workspace .agent-saved-notice { color: #ada5aa; }
+.agent-workspace .agent-jump { border: 1px solid var(--ag-edge-strong); background: rgba(24, 20, 23, .94); color: #e3d7df; }
+.agent-workspace .agent-composer-provider { color: #c6bdc3; }
+.agent-workspace .agent-composer-footnote { flex-wrap: wrap; gap: 6px 15px; }
+.agent-workspace .agent-composer-status { min-width: 0; max-width: 100%; overflow-wrap: anywhere; color: #b7aeb3; font-size: 12px; line-height: 1.5; }
+.agent-workspace .agent-choose-project:hover { background: var(--ag-control-hover); }
+
+/* Code and review keep their semantic red/green, without blue-grey containers. */
+.agent-workspace :is(.agent-code, .agent-diff) { background: rgba(6, 6, 6, .84); border-color: var(--ag-edge); border-radius: 11px; }
+.agent-workspace :is(.agent-code-header, .agent-code-language) { background: rgba(255, 255, 255, .035); border-color: var(--ag-edge); color: #b2a8b0; }
+.agent-workspace .agent-code pre code { background: none; color: #d9d1d7; }
+.agent-workspace .agent-diff .diff-add { background: rgba(45, 115, 79, .17); color: #b2ddc5; }
+.agent-workspace .agent-diff .diff-remove { background: rgba(155, 53, 76, .18); color: #edbbc9; }
+.agent-workspace .agent-diff .diff-hunk { background: rgba(255, 255, 255, .035); color: #b9aab5; }
+.agent-workspace .agent-line-number { color: #a0949e; }
+.agent-workspace :is(.agent-patch, .agent-review-diff):focus-visible { outline-color: #c68fa0; }
+.agent-workspace .agent-change-summary {
+  border: 1px solid var(--ag-edge);
+  border-top-color: var(--ag-edge-strong);
+  border-radius: 12px;
+  background: var(--ag-reflection), var(--ag-sheet);
+  color: #ded2da;
+}
+.agent-workspace .agent-change-summary:hover { background: var(--ag-control-hover); border-color: var(--ag-edge-strong); }
+.agent-workspace .agent-change-summary > svg { color: #d7a5b6; }
+.agent-workspace .agent-change-summary-action { color: #c7a6b6; }
+.agent-workspace .agent-review {
+  background: var(--ag-reflection), rgba(10, 9, 10, .88);
+  border-color: var(--ag-edge-strong);
+  backdrop-filter: blur(24px) saturate(110%);
+  -webkit-backdrop-filter: blur(24px) saturate(110%);
+}
+.agent-workspace :is(.agent-review-header, .agent-review-files, .agent-review-note, .agent-review-edit, .agent-raw-patch) { border-color: var(--ag-edge); }
+.agent-workspace .agent-review-header { background: rgba(255, 255, 255, .025); }
+.agent-workspace .agent-review-header > div { color: #d7a5b6; }
+.agent-workspace .agent-review-header h2 { color: #e8e0e5; }
+.agent-workspace .agent-review-files > button { color: #c7bbc4; border-radius: 8px; }
+.agent-workspace .agent-review-files > button:hover { background: var(--ag-control-hover); }
+.agent-workspace .agent-review-files > button.is-selected { background: var(--ag-control-active); color: #eee2e9; box-shadow: inset 0 0 0 1px var(--ag-edge-active); }
+.agent-workspace .agent-review-diff { scrollbar-color: #4d414a transparent; }
+.agent-workspace .agent-review-edit { background: rgba(255, 255, 255, .025); }
+.agent-workspace .agent-review-empty { color: #ad94a4; }
+.agent-workspace .agent-review-empty h3 { color: #d8c7d2; }
+
+/* Questions, approvals, settings and confirmations are part of the same app. */
+.agent-workspace :is(.agent-request-card, .agent-connection-notice) { background: var(--ag-sheet); border-color: var(--ag-edge-strong); border-radius: 13px; }
+.agent-workspace .agent-request-card.is-active { border-color: rgba(232, 153, 166, .33); }
+.agent-workspace .agent-request-card.agent-request-permission { background: rgba(38, 30, 22, .6); border-color: rgba(211, 174, 116, .28); }
+.agent-workspace .agent-request-backdrop .agent-request-card { background: var(--ag-reflection), var(--ag-sheet-deep); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.agent-workspace .agent-request-mark { background: var(--ag-control-active); color: #e1b1c1; }
+.agent-workspace .agent-request-mark.is-approval { background: rgba(163, 121, 59, .16); color: #ecd0a5; }
+.agent-workspace .agent-request-heading > div > span { color: #c8a7b7; }
+.agent-workspace .agent-request-permission .agent-request-heading > div > span { color: #ecd0a5; }
+.agent-workspace .agent-request-body > p { color: #d1c4cd; }
+.agent-workspace .agent-request-actions { background: rgba(6, 5, 6, .32); border-color: var(--ag-edge); }
+.agent-workspace .agent-request-permission .agent-request-actions { background: rgba(18, 14, 10, .3); border-color: rgba(211, 174, 116, .2); }
+.agent-workspace .agent-request-jump.is-question { background: rgba(35, 24, 31, .88); border-color: var(--ag-edge-active); color: #e4c6d6; }
+.agent-workspace :is(.agent-request-command, .agent-request-resource, .agent-install-command) { background: var(--ag-inset); color: #d0c3cb; border: 1px solid var(--ag-edge); border-radius: 9px; }
+.agent-workspace .agent-question-number { background: var(--ag-control-fill); border-color: var(--ag-edge-strong); color: #c9a9bb; }
+.agent-workspace :is(.agent-question-input, .agent-choice-search, .agent-field input, .agent-field select, .agent-view-menu select) { background: var(--ag-inset); border: 1px solid var(--ag-edge-strong); border-radius: 9px; color: var(--ag-text); }
+.agent-workspace .agent-question-choice { border-color: var(--ag-edge); color: #ddd1da; }
+.agent-workspace .agent-question-choice:hover { background: var(--ag-control-hover); }
+.agent-workspace .agent-question-choice.is-selected { background: var(--ag-control-active); color: #f0e6ed; }
+.agent-workspace :is(.agent-question-choice input, .agent-question-boolean input) { accent-color: #d8a3b6; }
+.agent-workspace .agent-question-choice > span small { color: #b7a7b3; }
+.agent-workspace :is(.agent-question-required, .agent-question-description) { color: #bcb0ba; }
+.agent-workspace .agent-question-field-label { color: #e5dce2; }
+.agent-workspace .agent-provider-logo { background: var(--ag-control-fill); border: 1px solid var(--ag-edge); border-radius: 11px; }
+.agent-workspace .agent-field { color: #d5cbd2; }
+.agent-workspace .agent-modal p { color: #bfb1bc; }
+.agent-workspace .agent-history-confirm blockquote { border-color: #9d6e80; background: rgba(255, 255, 255, .03); color: #d5bdcb; }
+.agent-workspace .agent-timeline-results small { color: #b9a3b3; }
+.agent-workspace .agent-toast > button:not(.agent-icon-button) { color: #ecd3e2; }
+.agent-workspace .agent-confirm-backdrop { background: rgba(0, 0, 0, .68); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.agent-workspace :is(.agent-error, .agent-model-error) { background: rgba(70, 27, 42, .6); border-color: rgba(237, 119, 133, .35); color: #efc8d2; }
+.agent-workspace :is(.agent-storage-notice, .agent-command-error) { background: rgba(47, 36, 20, .9); border-color: rgba(211, 174, 116, .23); color: #e6d0ab; }
+.agent-workspace .agent-storage-notice { border-bottom: 1px solid rgba(211, 174, 116, .23); }

@@ -12,7 +12,7 @@ export function AgentChangeSummary({ changes, open }: { changes: AgentChange[]; 
   const count = total.files || total.reportedFiles
   const label = `${count} ${total.files ? "changed" : "reported"} ${count === 1 ? "file" : "files"}`
   return <button className="agent-change-summary" onClick={open} aria-label={`Review ${label}`}>
-    <AgentIcon name="code" size={17} /><strong>{label}</strong>
+    <AgentIcon name="changes" size={17} /><strong>{label}</strong>
     {total.files > 0 && total.exact && <ChangeNumbers additions={total.additions} deletions={total.deletions} />}
     {total.attempts > 0 && <small className="agent-change-attempts">{total.attempts} {total.attempts === 1 ? "edit not completed" : "edits not completed"}</small>}
     <span className="agent-change-summary-action">Review changes <AgentIcon name="chevron" size={13} /></span>
@@ -59,7 +59,7 @@ export default function AgentChanges({ changes, close }: { changes: AgentChange[
       else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus() }
     }
   }}>
-    <header className="agent-review-header"><div><AgentIcon name="code" size={16} /><h2>Changes</h2><span>{total.reportedFiles}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
+    <header className="agent-review-header"><div><AgentIcon name="changes" size={16} /><h2>Changes</h2><span>{total.reportedFiles}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
     <div className="agent-review-context"><span>{total.attempts ? total.files ? "Completed edits only" : "No completed edits reported" : "From this conversation"}</span>{total.files > 0 && total.exact && <ChangeNumbers additions={total.additions} deletions={total.deletions} />}</div>
     {files.length ? <>
       <div className="agent-review-files" aria-label="Changed files">{files.map(file => {

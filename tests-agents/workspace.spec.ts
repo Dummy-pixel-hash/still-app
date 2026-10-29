@@ -3,6 +3,7 @@ import { test, expect, type Page } from "@playwright/test"
 test.beforeEach(async ({ page }) => {
   // Optional live-design chrome belongs to the interactive preview, not test input.
   await page.route("**/__impeccable/**", route => route.abort())
+  await page.route("**/live.js?*", route => route.abort())
   await page.goto("/tests-agents/fixture.html")
 })
 async function connect(page: Page, agent = "opencode", firstMessage?: string) {
@@ -435,10 +436,12 @@ test("failed saves are retried with the newest draft and code copy uses the OS b
   await page.evaluate(() => { (window as any).agentFixture.failSave = true })
   await page.getByLabel("Message agent").fill("Older unsaved draft")
   await expect(page.getByRole("alert").filter({ hasText: "could not be saved" })).toBeVisible()
+  await expect(page.locator(".agent-storage-status.has-error")).toContainText("Changes need saving")
   await page.getByLabel("Message agent").fill("Newest unsaved draft")
   await page.evaluate(() => { (window as any).agentFixture.failSave = false })
   await page.getByRole("button", { name: "Retry saving", exact: true }).click()
-  await expect(page.locator(".agent-storage-status")).toContainText("Saved on this device")
+  await expect(page.getByRole("alert").filter({ hasText: "could not be saved" })).toBeHidden()
+  await expect(page.locator(".agent-storage-status")).toHaveCount(0)
   await page.reload()
   await page.locator(".agent-thread-open").click()
   await expect(page.getByLabel("Message agent")).toHaveValue("Newest unsaved draft")

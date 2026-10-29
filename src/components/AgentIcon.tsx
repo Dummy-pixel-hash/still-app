@@ -1,7 +1,9 @@
 import type { CSSProperties } from "react"
 
-export type AgentIconName = "back" | "chevron" | "plus" | "folder" | "chat" | "search" | "more" | "close" | "arrow" | "stop" | "settings" | "terminal" | "check" | "pin" | "archive" | "trash" | "edit" | "panel" | "refresh" | "code" | "file" | "command" | "expand"
+export type AgentIconName = "back" | "chevron" | "plus" | "folder" | "chat" | "search" | "more" | "close" | "arrow" | "stop" | "settings" | "terminal" | "check" | "pin" | "archive" | "trash" | "edit" | "panel" | "refresh" | "code" | "file" | "command" | "expand" | "compose" | "changes"
 const paths: Record<AgentIconName, string> = {
+  compose: "M12.5 4.5H6a2.5 2.5 0 0 0-2.5 2.5v11A2.5 2.5 0 0 0 6 20.5h11a2.5 2.5 0 0 0 2.5-2.5v-6.5M16.5 3.5l4 4-8.5 8.5-4.5.5.5-4.5 8.5-8.5ZM14.5 5.5l4 4",
+  changes: "M8 3.5h8.5L21 8v10.5A2 2 0 0 1 19 20.5H8a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2ZM16 3.5V8h5M2.5 7.5v12a3 3 0 0 0 3 3h9M10 11h6M13 8v6M10 17h6",
   expand: "M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7",
   back: "m14 6-6 6 6 6M8 12h12", chevron: "m9 5 7 7-7 7", plus: "M12 5v14M5 12h14",
   folder: "M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z", chat: "M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z",

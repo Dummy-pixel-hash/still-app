@@ -10,6 +10,7 @@ logs/
 *.log
 test-results/
 playwright-report/
+.impeccable/
 
 # local docs & media scratch (videos, notes) — never committed
 !docs/

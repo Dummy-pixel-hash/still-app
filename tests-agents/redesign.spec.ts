@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test"
 
 test.beforeEach(async ({ page }) => {
+  await page.route("**/live.js?*", route => route.abort())
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html")
 })
