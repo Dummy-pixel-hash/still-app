@@ -10,7 +10,7 @@ test("sidebar actions and conversation review use the same warm glass materials"
   const sidebar = page.locator(".agent-sidebar")
   const create = sidebar.getByRole("button", { name: "New conversation", exact: true })
   await expect(create).toHaveCSS("border-top-width", "1px")
-  await expect(create).toHaveCSS("border-radius", "10px")
+  await expect(create).toHaveCSS("border-radius", "11px")
   await expect(create.locator("svg path")).toHaveAttribute("d", /^M12\.5 4\.5/)
   await sidebar.locator(".agent-thread-open").first().click()
   await expect(page.locator(".agent-composer-hint")).toHaveCount(0)

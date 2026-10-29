@@ -34,55 +34,155 @@
 .agent-workspace .agent-send.agent-stop { background: #e8e2e4; color: #171315; }
 .agent-workspace ::selection { background: rgba(214, 133, 151, .3); }
 
-/* Navigation: one family for actions, folder controls, search and selected rows. */
-.agent-workspace :is(.agent-sidebar-new, .agent-sidebar-archive, .agent-sidebar-settings) {
+/* The sidebar is an open navigation canvas, not a column of little cards. */
+.agent-workspace .agent-sidebar {
+  background:
+    radial-gradient(ellipse at 100% 27%, rgba(151, 40, 57, .09), transparent 48%),
+    linear-gradient(152deg, rgba(255, 255, 255, .038), transparent 43%),
+    rgba(12, 10, 11, .78);
+  border-right-color: rgba(255, 255, 255, .055);
+}
+.agent-workspace .agent-sidebar-top { height: 70px; padding-left: 22px; padding-right: 16px; }
+.agent-workspace .agent-brand { gap: 11px; }
+.agent-workspace .agent-brand > svg { color: #eaa2ab; }
+.agent-workspace .agent-brand strong {
+  font-family: var(--font-serif);
+  font-size: 21px;
+  font-weight: 400;
+  letter-spacing: -.015em;
+  color: #f0e9ec;
+}
+.agent-workspace .agent-sidebar-toggle { width: 30px; height: 30px; border-radius: 9px; color: #989095; }
+.agent-workspace .agent-sidebar-toggle:hover { background: rgba(255, 255, 255, .06); color: #f0e9ec; }
+.agent-workspace .agent-sidebar-panel { padding: 2px 14px 0; }
+.agent-workspace .agent-sidebar-new,
+.agent-workspace .agent-sidebar-archive,
+.agent-workspace .agent-sidebar-settings {
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 11px;
   color: #bcb5b9;
   background: transparent;
   box-shadow: none;
+  transition: background-color 160ms var(--ag-ease), border-color 160ms var(--ag-ease), color 160ms var(--ag-ease);
 }
 .agent-workspace .agent-sidebar-new {
-  background: var(--ag-reflection), rgba(190, 121, 136, .055);
+  min-height: 42px;
+  margin: 1px 0 7px;
+  padding: 9px 12px;
+  gap: 11px;
   border-color: rgba(255, 255, 255, .12);
-  color: #eee7eb;
-}
-.agent-workspace :is(.agent-sidebar-new, .agent-sidebar-archive, .agent-sidebar-settings):hover {
-  background: var(--ag-control-hover);
-  border-color: var(--ag-edge);
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, .07), transparent 65%),
+    rgba(151, 53, 73, .13);
   color: #f1e9ed;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045), 0 7px 20px rgba(0, 0, 0, .12);
 }
+.agent-workspace .agent-sidebar-new > svg { color: #edb5c0; }
+.agent-workspace .agent-sidebar-new > span { font-size: 13.5px; font-weight: 550; }
+.agent-workspace .agent-sidebar-new:hover { background: rgba(170, 70, 90, .2); border-color: rgba(242, 177, 190, .3); color: #fff7f9; }
+.agent-workspace .agent-sidebar-archive { min-height: 36px; padding: 7px 12px; gap: 11px; }
+.agent-workspace .agent-sidebar-archive > svg { color: #948a90; }
+.agent-workspace .agent-sidebar-archive > span { font-size: 13px; font-weight: 450; }
+.agent-workspace .agent-sidebar-archive:hover { background: rgba(255, 255, 255, .045); color: #eee6eb; }
+.agent-workspace .agent-sidebar-archive.is-selected { background: rgba(172, 73, 94, .15); color: #f3e7eb; }
 .agent-workspace .agent-sidebar-search {
-  background: rgba(5, 5, 5, .2);
-  border-color: var(--ag-edge);
-  color: #aaa2a7;
+  min-height: 37px;
+  margin: 0 0 3px;
+  padding: 7px 11px;
+  gap: 9px;
+  border: 1px solid rgba(255, 255, 255, .055);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .018);
+  color: #91888e;
+  transition: background-color 160ms var(--ag-ease), border-color 160ms var(--ag-ease);
 }
-.agent-workspace .agent-sidebar-search:focus-within { background: rgba(255, 255, 255, .035); border-color: var(--ag-edge-active); outline-color: #b8838b; }
-.agent-workspace .agent-folder-heading { border-radius: 9px; }
-.agent-workspace .agent-folder-heading:hover { background: rgba(255, 255, 255, .025); }
-.agent-workspace :is(.agent-sidebar-toggle, .agent-folder-toggle, .agent-project-heading > button, .agent-project-new, .agent-thread-more) {
-  border-radius: 8px;
-  color: #aaa2a7;
+.agent-workspace .agent-sidebar-search:hover { background: rgba(255, 255, 255, .035); border-color: rgba(255, 255, 255, .09); }
+.agent-workspace .agent-sidebar-search:focus-within { background: rgba(255, 255, 255, .045); border-color: rgba(232, 153, 166, .3); outline: 2px solid rgba(232, 153, 166, .22); outline-offset: 1px; }
+.agent-workspace .agent-sidebar-search input { font-size: 12.5px; }
+.agent-workspace .agent-project-heading {
+  min-height: 35px;
+  margin: 21px 0 5px;
+  padding: 0 4px 0 10px;
+  color: #b3a8ae;
+  font-size: 12px;
 }
-.agent-workspace :is(.agent-sidebar-toggle, .agent-folder-toggle, .agent-project-heading > button, .agent-project-new, .agent-thread-more):hover {
-  background: var(--ag-control-hover);
-  color: #eee7eb;
-}
-.agent-workspace .agent-thread { border-radius: 9px; }
-.agent-workspace .agent-thread:hover { background: var(--ag-control-fill); }
+.agent-workspace .agent-project-heading > span { font-weight: 500; }
+.agent-workspace .agent-project-heading > button,
+.agent-workspace .agent-icon-button.agent-project-new,
+.agent-workspace .agent-icon-button.agent-thread-more,
+.agent-workspace .agent-folder-toggle { border-radius: 8px; color: #938990; }
+.agent-workspace .agent-project-heading > button:hover,
+.agent-workspace .agent-icon-button.agent-project-new:hover,
+.agent-workspace .agent-icon-button.agent-thread-more:hover,
+.agent-workspace .agent-folder-toggle:hover { background: rgba(255, 255, 255, .065); color: #f1e8ed; }
+.agent-workspace .agent-sidebar-rail > .agent-rail-new { color: #edb5c0; }
+.agent-workspace .agent-sidebar-rail > .agent-rail-new:hover { background: rgba(170, 70, 90, .14); color: #fff1f4; }
+.agent-workspace .agent-folder { margin-bottom: 17px; }
+.agent-workspace .agent-folder-heading { min-height: 37px; padding-inline: 3px 2px; border-radius: 9px; }
+.agent-workspace .agent-folder-heading:hover { background: rgba(255, 255, 255, .022); }
+.agent-workspace .agent-folder-heading.is-current .agent-project-open { color: #f2e8ed; }
+.agent-workspace .agent-folder-toggle { width: 24px; }
+.agent-workspace .agent-project-open { gap: 9px; padding: 6px 4px; color: #c4b9bf; }
+.agent-workspace .agent-project-open > svg { color: #c28594; }
+.agent-workspace .agent-project-open > span { font-size: 13.5px; font-weight: 500; color: inherit; }
+.agent-workspace .agent-folder-threads { padding: 4px 0 0 14px; }
+.agent-workspace .agent-thread { min-height: 40px; margin: 3px 0; border-radius: 9px; transition: background-color 160ms var(--ag-ease); }
+.agent-workspace .agent-thread:hover { background: rgba(255, 255, 255, .038); }
+.agent-workspace .agent-thread-open { min-height: 40px; gap: 8px; padding: 8px 38px 8px 9px; color: #b9b0b5; }
 .agent-workspace .agent-thread-open:hover { background: transparent; }
+.agent-workspace .agent-thread-provider { opacity: .92; }
+.agent-workspace .agent-thread-title { font-size: var(--ag-nav-body); font-weight: 400; color: inherit; }
+.agent-workspace .agent-thread-time { color: #a1979d; font-size: var(--ag-nav-time); }
 .agent-workspace .agent-thread.is-selected {
-  background: var(--ag-reflection), var(--ag-control-active);
-  box-shadow: inset 0 0 0 1px var(--ag-edge-active);
+  background: linear-gradient(110deg, rgba(171, 72, 94, .2), rgba(171, 72, 94, .055) 82%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045);
 }
-.agent-workspace .agent-thread > .agent-thread-more:is(:hover, :focus-visible, [aria-expanded="true"]) {
-  background: rgba(34, 27, 30, .96);
-  color: #f1e9ed;
-}
-.agent-workspace .agent-sidebar-empty button { border: 1px solid var(--ag-edge); background: var(--ag-control-fill); color: #c5bcc1; border-radius: 10px; }
-.agent-workspace .agent-sidebar-empty button:hover { background: var(--ag-control-hover); border-color: var(--ag-edge-strong); }
+.agent-workspace .agent-thread.is-selected .agent-thread-open { color: #f1e8ec; }
+.agent-workspace .agent-thread.is-selected .agent-thread-provider { opacity: 1; }
+.agent-workspace .agent-thread.is-selected .agent-thread-time { color: #c4a7b0; }
+.agent-workspace .agent-thread > .agent-thread-more:is(:hover, :focus-visible, [aria-expanded="true"]) { background: rgba(34, 27, 30, .96); color: #f1e9ed; }
+.agent-workspace .agent-sidebar-empty { padding: 8px 10px 18px; color: #aa9fa6; }
+.agent-workspace .agent-sidebar-empty p { line-height: 1.7; }
+.agent-workspace .agent-sidebar-empty button { border: 1px solid rgba(255, 255, 255, .1); border-radius: 10px; background: rgba(255, 255, 255, .025); color: #ccc0c7; }
+.agent-workspace .agent-sidebar-empty button:hover { background: rgba(255, 255, 255, .065); border-color: rgba(255, 255, 255, .17); color: #fff; }
+.agent-workspace .agent-sidebar-footer { gap: 4px 7px; margin: 0 2px; padding: 9px 2px 15px; border-top: 1px solid rgba(255, 255, 255, .05); }
+.agent-workspace .agent-sidebar-settings { min-height: 37px; padding: 7px 10px; gap: 10px; color: #aaa0a7; }
+.agent-workspace .agent-sidebar-settings > svg { color: #8f858c; }
+.agent-workspace .agent-sidebar-settings > span { font-size: 13px; font-weight: 450; }
+.agent-workspace .agent-sidebar-settings:hover { background: rgba(255, 255, 255, .045); color: #f0e7ec; }
 .agent-workspace .agent-rail-bottom > button:hover,
 .agent-workspace .agent-sidebar-rail > button:hover { background: var(--ag-control-hover); color: #eee7eb; }
+
+@media (max-width: 800px) {
+  .agent-workspace .agent-sidebar-panel { padding-inline: 12px; }
+  .agent-workspace .agent-sidebar-new { min-height: 40px; }
+}
+
+/* Treat navigation as its own rounded pane, set apart from the open workspace. */
+@media (min-width: 801px) {
+  .agent-workspace .agent-sidebar {
+    width: 280px;
+    flex-basis: 280px;
+    margin: 8px 0 8px 8px;
+    border: 1px solid rgba(255, 255, 255, .11);
+    border-radius: 16px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .055), 0 10px 32px rgba(0, 0, 0, .24);
+  }
+  .agent-workspace .agent-sidebar.is-collapsed { width: 56px; flex-basis: 56px; }
+}
+@media (max-width: 800px) {
+  .agent-workspace .agent-sidebar {
+    inset: 54px auto 8px 8px;
+    width: min(272px, calc(100vw - 32px));
+    margin: 0;
+    border: 1px solid rgba(255, 255, 255, .15);
+    border-radius: 16px;
+    background-color: rgba(13, 11, 12, .88);
+    box-shadow: 0 16px 46px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .07);
+    backdrop-filter: blur(30px) saturate(112%);
+    -webkit-backdrop-filter: blur(30px) saturate(112%);
+  }
+}
 
 /* Popovers are deliberately denser than the background glass for legibility. */
 .agent-workspace :is(.agent-thread-menu, .agent-context-choices, .agent-picker-popup, .agent-model-menu, .agent-command-menu, .agent-modal, .agent-toast) {
