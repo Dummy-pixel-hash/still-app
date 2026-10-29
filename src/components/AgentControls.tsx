@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import type { AgentConfigOption, AgentConfigOptionValue, AgentCommand } from "../agents/types"
 import AgentIcon from "./AgentIcon"
+import AgentProviderMark from "./AgentProviderMark"
 import { useAgentPopover } from "../agents/useAgentPopover"
 
 export function configValues(option: AgentConfigOption): AgentConfigOptionValue[] {
@@ -53,10 +54,12 @@ export function ConfigPicker({ option, disabled, change, icon, label }: { option
         if (e.target !== input.current) popup.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[next]?.focus()
       }
       if (e.key === "Enter" && e.target === input.current && !e.nativeEvent.isComposing) { e.preventDefault(); if (filtered[active]) choose(filtered[active].value) }
-    }}>
-      <div className="agent-picker-search"><AgentIcon name="search" size={14} /><input ref={input} role="combobox" aria-expanded="true" aria-controls={listId} aria-activedescendant={filtered[active] ? `${listId}-${active}` : undefined} aria-label={`Search ${option.name.toLowerCase()}`} placeholder={`Search ${option.name.toLowerCase()}…`} value={query} onChange={e => { setQuery(e.target.value); setActive(0) }} /></div>
-      <div id={listId} className="agent-picker-options" role="listbox" aria-label={option.name}>{filtered.map((value, index) => <button id={`${listId}-${index}`} type="button" role="option" aria-selected={value.value === option.currentValue} className={active === index ? "is-active" : ""} key={value.value} onClick={() => choose(value.value)} onFocus={() => setActive(index)} onMouseEnter={() => setActive(index)}>
-        <span>{value.name}<small>{value.description || (value.value !== value.name ? value.value : "")}</small></span>{value.value === option.currentValue && <AgentIcon name="check" size={14} />}</button>)}</div>
+     }}>
+       {option.category === "provider" && <div className="agent-picker-heading"><strong>Choose a coding agent</strong><span>{all.length} choices</span></div>}
+       <div className="agent-picker-search"><AgentIcon name="search" size={14} /><input ref={input} role="combobox" aria-expanded="true" aria-controls={listId} aria-activedescendant={filtered[active] ? `${listId}-${active}` : undefined} aria-label={`Search ${option.name.toLowerCase()}`} placeholder={`Search ${option.name.toLowerCase()}…`} value={query} onChange={e => { setQuery(e.target.value); setActive(0) }} /></div>
+       <div id={listId} className="agent-picker-options" role="listbox" aria-label={option.name}>{filtered.map((value, index) => <button id={`${listId}-${index}`} type="button" role="option" aria-selected={value.value === option.currentValue} className={active === index ? "is-active" : ""} key={value.value} onClick={() => choose(value.value)} onFocus={() => setActive(index)} onMouseEnter={() => setActive(index)}>
+         {option.category === "provider" && <AgentProviderMark id={value.value} size={20} />}
+         <span className="agent-picker-option-label">{value.name}<small>{value.description || (value.value !== value.name ? value.value : "")}</small></span>{value.value === option.currentValue && <AgentIcon name="check" size={14} />}</button>)}</div>
       {!filtered.length && <p className="agent-picker-empty">No matching {option.name.toLowerCase()}.</p>}
       <div className="agent-picker-count">{filtered.length} {option.name.toLowerCase()} options</div>
     </div>}
