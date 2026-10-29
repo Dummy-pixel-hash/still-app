@@ -43,6 +43,9 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
       continue
     }
     if (item.kind === "tool") {
+      // A tool call closes the current thought. Any later reasoning belongs to
+      // a new, separately ordered activity marker after the stacked tool group.
+      reasoning = undefined
       if (!tools) { tools = []; groups.push(tools) }
       tools.push(item)
       continue
@@ -57,14 +60,14 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
     if (!Array.isArray(group) && group.kind === "user") lastUserIndex = index
     if (!Array.isArray(group) && group.kind === "reasoning-group") lastReasoningIndex = index
   })
-  const activeReasoningIndex = turnActive && (lastUserIndex < 0 || lastReasoningIndex > lastUserIndex) ? lastReasoningIndex : -1
+  const activeReasoningIndex = turnActive && lastReasoningIndex === groups.length - 1 && (lastUserIndex < 0 || lastReasoningIndex > lastUserIndex) ? lastReasoningIndex : -1
   return <>{groups.map((group, index) => {
     if (Array.isArray(group)) return <ToolGroup key={group[0].id} items={group} />
     if (group.kind === "reasoning-group") {
       const status = group.failed ? "error" : index === activeReasoningIndex ? "working" : "done"
       const label = status === "working" ? "Thinking" : status === "error" ? "Interrupted" : "Thought"
       return <div key={group.id} className="agent-reasoning" data-timeline-id={group.id}>
-        <LatticeLoader className="agent-reasoning-loader" label={label} doneLabel="Thought" errorLabel="Interrupted" status={status} pattern="orbit" cellSize={3} gap={1.5} showTimer={false} announce={index === activeReasoningIndex} />
+        <LatticeLoader className="agent-reasoning-loader" label={label} doneLabel="Thought" errorLabel="Interrupted" status={status} pattern="orbit" grid={3} cellSize={4} gap={2} showTimer={false} announce={index === activeReasoningIndex} />
         {group.items.length > 1 && <span className="agent-reasoning-phases">{group.items.length} passes</span>}
       </div>
     }

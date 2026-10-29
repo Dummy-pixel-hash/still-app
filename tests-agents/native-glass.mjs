@@ -54,7 +54,8 @@ try {
   await page.setViewportSize({ width: 1100, height: 720 })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.getByRole("button", { name: "Agents", exact: true }).click()
-  const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image))
+  await page.locator(".agent-chat").evaluate(chat => chat.classList.remove("is-launch"))
+  const results = await probeAuroraGlass(page, (name, image) => writeFile(join(output, `${name}.png`), image), [["sidebar", ".agent-sidebar"], ["composer-veil", ".agent-composer-area"]])
   const report = { executable, buildRun: process.env.STILL_BUILD_RUN, userAgent: await page.evaluate(() => navigator.userAgent), results }
   if (process.env.STILL_GLASS_DIAGNOSE === "1") {
     report.variants = []

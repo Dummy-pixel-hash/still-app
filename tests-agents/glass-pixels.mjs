@@ -44,7 +44,7 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
     return previous
   })
   if (previousFrame !== undefined) await page.waitForFunction(previous => document.querySelector(".agent-aurora canvas").dataset.frostFrame !== previous, previousFrame)
-  const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > * { visibility: hidden !important; }" })
+  const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > *, .agent-composer-area > * { visibility: hidden !important; }" })
   const source = await page.locator(".agent-aurora").boundingBox()
   if (!source) throw new Error("The production aurora is not visible")
   const panes = []
@@ -61,7 +61,7 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
     await capture(`${name}-blurred`, image)
     panes.push({ name, clip, contrast: await pixelContrast(page, image) })
   }
-  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } [data-agent-frost] { background-image: none !important; } .agent-sidebar, .agent-recents { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  const disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } [data-agent-frost] { background-image: none !important; } .agent-sidebar, .agent-recents, .agent-composer-area::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = []
   try {
     for (const pane of panes) {

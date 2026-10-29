@@ -94,7 +94,7 @@ test("the composer floats without a box and the message measure is widened", asy
   await expect(composer).toHaveCSS("border-top-width", "0px")
   await expect(area).toHaveCSS("position", "absolute")
   await expect(area).toHaveCSS("pointer-events", "none")
-  expect(await area.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("blur(8px)")
+  expect(await area.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toBe("blur(12px)")
   const layout = await page.evaluate(() => {
     const chat = document.querySelector(".agent-chat").getBoundingClientRect()
     const viewport = document.querySelector(".agent-conversation").getBoundingClientRect()

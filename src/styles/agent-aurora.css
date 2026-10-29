@@ -1,7 +1,7 @@
 /* A horizontal red particle horizon, sampled by the real glass surfaces above it. */
 .agent-workspace .agent-aurora {
   position: absolute;
-  top: 52%;
+  top: 68%;
   left: -2%;
   width: 104%;
   height: clamp(220px, 36vh, 340px);
@@ -13,5 +13,5 @@
 .agent-workspace .agent-aurora canvas { display: block; width: 100%; height: 100%; }
 .agent-workspace .agent-aurora[data-rendered="false"] { background: url("/agents/particle-aurora.svg") center / max(100%, 1100px) 100% no-repeat; }
 @media (max-width: 640px) {
-  .agent-workspace .agent-aurora { top: 36%; height: 250px; }
+  .agent-workspace .agent-aurora { top: 68%; height: 250px; }
 }
