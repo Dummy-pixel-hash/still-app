@@ -46,7 +46,8 @@ function makeDust(count: number): Dust {
 }
 
 /** Bounded 2D rendering: a tiny cached gas pass, plus four batched dust fills. */
-export function createAuroraRenderer(canvas: HTMLCanvasElement) {
+export function createAuroraRenderer(canvas: HTMLCanvasElement, options: { maxParticles?: number } = {}) {
+  const maxParticles = Math.min(MAX_PARTICLES, Math.max(1, options.maxParticles ?? MAX_PARTICLES))
   const context = canvas.getContext("2d")
   if (!context) return null
   const gas = document.createElement("canvas")
@@ -100,7 +101,7 @@ export function createAuroraRenderer(canvas: HTMLCanvasElement) {
       gas.width = Math.min(176, Math.max(96, Math.round(width / 8)))
       gas.height = GAS_HEIGHT
       image = gasContext.createImageData(gas.width, gas.height)
-      const nextCount = Math.min(MAX_PARTICLES, Math.max(3600, Math.round(width * 8)))
+      const nextCount = Math.min(maxParticles, Math.max(Math.min(3600, maxParticles), Math.round(width * 8)))
       if (nextCount !== count) {
         count = nextCount
         dust = makeDust(count)

@@ -11,7 +11,9 @@ export default function AgentAurora() {
   useEffect(() => {
     const element = canvas.current
     if (!element) return
-    const renderer = createAuroraRenderer(element)
+    const isNativeWindows = navigator.userAgent.includes("Windows") &&
+      ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    const renderer = createAuroraRenderer(element, isNativeWindows ? { maxParticles: 6000 } : undefined)
     if (!renderer) { setRendered(false); return }
     const glass = createGlassBackdrop(element)
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)")
@@ -20,18 +22,15 @@ export default function AgentAurora() {
     const draw = () => {
       if (!width || !height) return
       renderer.draw(elapsed)
-      // Native glass snapshots are throttled independently of Aurora frames.
-      if (glass) {
-        element.dispatchEvent(new Event("still:backdrop-frame"))
-        glass.draw()
-      }
+      // The shared native glass texture updates at its own lower cadence.
+      glass?.draw()
     }
 
     // One visible canvas; the static SVG is only a fallback, not a second live layer.
     const tick = (now: number) => {
       if (stopped) return
       if (!lastFrame) lastFrame = now
-      if (now - lastFrame >= 1000 / 30) {
+      if (now - lastFrame >= 1000 / (isNativeWindows ? 20 : 30)) {
         elapsed += Math.min((now - lastFrame) / 1000, .1)
         lastFrame = now
         draw()

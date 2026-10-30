@@ -271,6 +271,22 @@ test("dense fluid dust stays bounded and batches particles into four paint opera
   await expect(page.locator(".agent-aurora canvas")).toHaveCount(1)
 })
 
+test("native particle budget caps Windows animation work while preserving the small-scene density", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?demo")
+  const metrics = await page.evaluate(async () => {
+    const { createAuroraRenderer } = await import("/src/agents/auroraRenderer.ts")
+    const canvas = document.createElement("canvas")
+    const renderer = createAuroraRenderer(canvas, { maxParticles: 6000 })!
+    renderer.resize(1232, 323, 1)
+    const wide = renderer.metrics().particles
+    renderer.resize(405, 250, 1)
+    const compact = renderer.metrics().particles
+    return { wide, compact }
+  })
+  expect(metrics.wide).toBe(6000)
+  expect(metrics.compact).toBe(3600)
+})
+
 test("a static particle horizon remains available when canvas cannot initialize", async ({ page }) => {
   await page.addInitScript(() => {
     HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext

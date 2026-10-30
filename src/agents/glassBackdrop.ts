@@ -55,7 +55,7 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   const canvasFilter = Reflect.get(context, "filter") !== undefined
   let scratch = new Uint8ClampedArray(0), disposed = false, busy = false, dirty = false
   let frame = 0, resizeTimer = 0, revision = 0, lastDraw = -Infinity, currentUrl = ""
-  const maxFps = 8
+  const maxFps = 3
   const minFrameInterval = 1000 / maxFps
   const urls = new Set<string>(), panes = new Set<HTMLElement>()
 
@@ -87,10 +87,10 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
     const bounds = root.getBoundingClientRect(), scene = source.getBoundingClientRect()
     if (!bounds.width || !bounds.height || !source.width || !source.height) return
     lastDraw = now; busy = true
-    // Bound the shared blur surface to ~0.08 megapixels even on high-DPI
-    // displays. One downsampled texture serves every pane; an 8fps cap and
+    // Bound the shared blur surface to ~0.05 megapixels even on high-DPI
+    // displays. One downsampled texture serves every pane; a 3fps cap and
     // this pixel budget bound blur, PNG encoding, and image decode work.
-    const scale = Math.min(.25, Math.sqrt(80_000 / (bounds.width * bounds.height)))
+    const scale = Math.min(.2, Math.sqrt(48_000 / (bounds.width * bounds.height)))
     // Floor instead of ceil so rounding cannot push the texture past budget.
     const width = Math.max(1, Math.floor(bounds.width * scale)), height = Math.max(1, Math.floor(bounds.height * scale))
     if (buffer.width !== width || buffer.height !== height) { buffer.width = width; buffer.height = height }
@@ -153,7 +153,6 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   resize.observe(root)
   discover()
   root.addEventListener("scroll", position, true)
-  source.addEventListener("still:backdrop-frame", requestDraw)
   const visibility = () => { if (document.hidden) { cancelAnimationFrame(frame); frame = 0; window.clearTimeout(resizeTimer); resizeTimer = 0 } else requestDraw() }
   document.addEventListener("visibilitychange", visibility)
 
@@ -163,7 +162,6 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
       disposed = true; cancelAnimationFrame(frame); window.clearTimeout(resizeTimer)
       mutations.disconnect(); resize.disconnect()
       root.removeEventListener("scroll", position, true)
-      source.removeEventListener("still:backdrop-frame", requestDraw)
       document.removeEventListener("visibilitychange", visibility)
       delete root.dataset.frostRendered
       delete source.dataset.frostManaged

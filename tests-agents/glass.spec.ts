@@ -2,6 +2,14 @@ import { readFileSync } from "node:fs"
 import { test, expect } from "@playwright/test"
 import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
 
+test("the Windows WebView uses sRGB to avoid washed-out wide-gamut colors", () => {
+  const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
+  const main = config.app.windows.find((window: { label: string }) => window.label === "main")
+  expect(main.additionalBrowserArgs).toContain("--force-color-profile=srgb")
+  // Setting custom browser args replaces Wry's defaults, so preserve them.
+  expect(main.additionalBrowserArgs).toContain("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection")
+})
+
 test("the main WebView has an opaque native backing while the orb stays transparent", () => {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
   const main = config.app.windows.find((window: { label: string }) => window.label === "main")
@@ -43,7 +51,7 @@ test("native workspace panes blur with their shared frost texture without CSS ba
   await expect(page.locator(".agent-workspace")).toHaveAttribute("data-frost-rendered", "true")
   const readPixels = () => page.locator(".agent-aurora canvas").evaluate(canvas => Number(canvas.dataset.frostPixels))
   await expect.poll(readPixels).toBeGreaterThan(0)
-  expect(await readPixels(), "native blur surface is bounded to 80k pixels; DPR does not multiply work").toBeLessThanOrEqual(80_000)
+  expect(await readPixels(), "native blur surface is bounded to 48k pixels; DPR does not multiply work").toBeLessThanOrEqual(48_000)
 })
 
 test("the floating input and model menu keep their own CSS blur while the wrapper stays clear", async ({ page }, info) => {
