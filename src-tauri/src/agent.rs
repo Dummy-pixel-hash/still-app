@@ -628,30 +628,70 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<String, StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
     let definition = definition(agent_id).ok_or_else(|| StillError::friendly("agent_unsupported", "Unknown agent."))?;
-    let (command, env) = if agent_id == "gemini" {
+    let (command, env) = if !create {
+        (Vec::new(), json!({}))
+    } else if agent_id == "gemini" {
         (std::iter::once(executable.to_owned()).chain(definition.args.iter().map(|arg| (*arg).to_owned())).collect::<Vec<_>>(), json!({}))
     } else {
         (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
     };
-    let payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env,"source":include_str!("../agent-host/supervisor.mjs"),"todosSource":include_str!("../agent-host/todos.mjs"),"todoPiSource":include_str!("../agent-host/todo-pi.mjs")});
+    let mut payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env});
+    if create {
+        payload["source"] = json!(include_str!("../agent-host/supervisor.mjs"));
+        payload["todosSource"] = json!(include_str!("../agent-host/todos.mjs"));
+        payload["todoPiSource"] = json!(include_str!("../agent-host/todo-pi.mjs"));
+    }
     let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).map_err(|error| StillError::friendly("agent_launch", error.to_string()))?);
-    let bootstrap = r#"import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
-const config=JSON.parse(Buffer.from(process.argv[1],'base64').toString('utf8'));
-const root=path.join(process.env.HOME,'.local','state','still','agents');
-const directory=path.join(root,config.executionId);config.directory=directory;
-if(config.create)fs.mkdirSync(directory,{recursive:true,mode:0o700});
-const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==process.getuid())throw new Error('Unsafe worker directory');fs.chmodSync(directory,0o700);
-if(config.create){for(const [name,source] of [['transport.mjs',config.source],['todos.mjs',config.todosSource],['todo-pi.mjs',config.todoPiSource]])fs.writeFileSync(path.join(directory,name),source,{mode:0o600,flag:'wx'});}
-delete config.source;delete config.todosSource;delete config.todoPiSource;
-const child=spawn(process.execPath,[path.join(directory,'transport.mjs'),'attach',Buffer.from(JSON.stringify(config)).toString('base64')],{stdio:'inherit'});
-child.on('error',error=>{console.error(error.message);process.exitCode=1});child.on('exit',(code)=>process.exit(code??1));
-"#;
-    Ok(login_command(&format!("exec node --input-type=module -e {} {}", quote(bootstrap), quote(&encoded))))
+    let bootstrap = include_str!("../agent-host/bootstrap.mjs");
+    let command = login_command(&format!("exec node --input-type=module -e {}", quote(bootstrap)));
+    Ok((command, encoded))
+}
+
+async fn bootstrap_remote(channel: &mut Channel<client::Msg>, payload: &str) -> Result<Vec<u8>, String> {
+    let mut input = payload.as_bytes().to_vec();
+    input.push(b'\n');
+    for chunk in input.chunks(16 * 1024) {
+        channel.data_bytes(chunk.to_vec()).await.map_err(|error| format!("Could not send remote agent configuration: {error}"))?;
+    }
+
+    const READY: &str = "STILL_BOOTSTRAP_READY";
+    const ERROR: &str = "STILL_BOOTSTRAP_ERROR:";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut output = Vec::new();
+    let mut stderr = String::new();
+    loop {
+        let message = tokio::time::timeout_at(deadline, channel.wait()).await
+            .map_err(|_| "Remote bootstrap timed out before the agent transport was ready".to_owned())?;
+        match message {
+            Some(ChannelMsg::Data { data }) => {
+                output.extend_from_slice(&data);
+                if output.len() > 64 * 1024 { return Err("Remote startup output exceeded 64 KiB before bootstrap".into()); }
+                while let Some(end) = output.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<_> = output.drain(..=end).collect();
+                    let line = String::from_utf8_lossy(&line);
+                    let line = line.trim_end_matches(['\r', '\n']);
+                    if line == READY { return Ok(std::mem::take(&mut output)); }
+                    if let Some(error) = line.strip_prefix(ERROR) { return Err(error.to_owned()); }
+                }
+            }
+            Some(ChannelMsg::ExtendedData { data, .. }) => {
+                stderr.push_str(&String::from_utf8_lossy(&data));
+                if stderr.len() > 8 * 1024 {
+                    let mut cut = stderr.len() - 8 * 1024;
+                    while !stderr.is_char_boundary(cut) { cut += 1; }
+                    stderr.drain(..cut);
+                }
+            }
+            Some(ChannelMsg::ExitStatus { exit_status }) => return Err(format!("Remote bootstrap exited with status {exit_status}. {}", stderr.trim())),
+            Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err(format!("Remote bootstrap closed before the agent transport was ready. {}", stderr.trim())),
+            _ => {}
+        }
+    }
 }
 
 #[tauri::command]
@@ -697,9 +737,16 @@ pub async fn still_agent_start(
     let mut initial_todos = saved_todos.and_then(|todos| validate_todos(&todos).ok()).unwrap_or_else(default_todos);
     initial_todos["toolAvailable"] = json!(false);
     initial_todos["available"] = json!(true);
-    let remote = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0)?;
+    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0)?;
     let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
-    let channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
+    let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
+    let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
+        Ok(data) => data,
+        Err(error) => {
+            let _ = channel.eof().await; let _ = channel.close().await;
+            return Err(StillError::friendly("agent_launch", format!("Could not prepare the remote agent: {error}")));
+        }
+    };
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
     let (outbound, outbound_rx) = mpsc::unbounded_channel();
     let (close, close_rx) = mpsc::unbounded_channel();
@@ -762,7 +809,7 @@ pub async fn still_agent_start(
         history_request: None,
     }));
     registry().lock().await.insert(execution_id, row.clone());
-    tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd));
+    tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd, bootstrap_data));
     Ok(snapshot)
 }
 
@@ -773,9 +820,10 @@ async fn run(
     cancel: mpsc::UnboundedReceiver<()>,
     close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cwd: String,
+    initial_data: Vec<u8>,
 ) {
     let epoch = row.lock().await.transport_epoch;
-    run_stream(&mut channel, row.clone(), outbound, cancel, close, cwd).await;
+    run_stream(&mut channel, row.clone(), outbound, cancel, close, cwd, initial_data).await;
     // Every exit, including malformed frames and initialization timeout, closes
     // stdin explicitly so the remote host can reap its native child processes.
     let mut thread = row.lock().await;
@@ -797,9 +845,10 @@ async fn run_stream(
     mut cancel: mpsc::UnboundedReceiver<()>,
     mut close: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cwd: String,
+    initial_data: Vec<u8>,
 ) {
     if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{transport_lost(&row,&format!("ACP initialize failed: {error}")).await;return}
-    let mut buffer = Vec::new();
+    let mut buffer = initial_data;
     let mut stage = 0_u8;
     let mut session_id = None;
     let mut permission: Option<(Value, Vec<Value>)> = None;
@@ -1807,8 +1856,15 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let remote = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
-    let channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
+    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
+    let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
+    let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
+        Ok(data) => data,
+        Err(error) => {
+            let _ = channel.eof().await; let _ = channel.close().await;
+            return Err(StillError::friendly("agent_attach", format!("Could not start the server-side transport: {error}")));
+        }
+    };
     let (outbound, outbound_rx) = mpsc::unbounded_channel();
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
     let (close, close_rx) = mpsc::unbounded_channel();
@@ -1838,7 +1894,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
     let snapshot = row.lock().await.snapshot.clone();
     registry().lock().await.insert(args.execution_id, row.clone());
     let cwd = snapshot.cwd.clone();
-    tokio::spawn(run(channel,row,outbound_rx,cancel_rx,close_rx,cwd));
+    tokio::spawn(run(channel,row,outbound_rx,cancel_rx,close_rx,cwd,bootstrap_data));
     Ok(snapshot)
 }
 #[tauri::command]
@@ -1962,6 +2018,25 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persistent_agent_bootstrap_streams_large_sources_over_stdin() {
+        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0).unwrap();
+        assert!(command.len() < 8 * 1024, "SSH exec command must stay far below Linux's 128 KiB argument limit");
+        assert!(!command.contains(&payload), "base64 configuration belongs on stdin, never in the SSH exec argument");
+        assert!(payload.len() > 128 * 1024, "test fixture should exercise the Linux per-argument overflow boundary");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+        let config: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(config["source"], include_str!("../agent-host/supervisor.mjs"));
+        assert_eq!(config["todosSource"], include_str!("../agent-host/todos.mjs"));
+        assert_eq!(config["command"][3], include_str!("../agent-host/bridge.mjs"));
+
+        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17).unwrap();
+        assert!(attach_command.len() < 8 * 1024);
+        assert!(attach_payload.len() < 1024, "reattach does not need to retransmit bundled source code");
+        let attach_config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(attach_payload).unwrap()).unwrap();
+        assert!(attach_config.get("source").is_none());
+        assert_eq!(attach_config["command"], json!([]));
+    }
     #[test]
     fn todo_snapshots_reject_stale_revisions_invalid_status_and_duplicate_ids() {
         let valid=json!({"protocolVersion":3,"revision":7,"activeId":"task-2","toolAvailable":true,"available":true,"items":[{"id":"task-1","title":"Read project files","status":"completed","createdBy":"agent","updatedBy":"agent","startedAt":100,"completedAt":12000,"durationMs":11900},{"id":"task-2","title":"Run checks","status":"pending","createdBy":"agent","updatedBy":"agent","startedAt":13000,"detail":"Running focused checks"}]});

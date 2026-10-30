@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:regressions": "node tests-m3/regressions.mjs && node tests-m5/regressions.mjs && node tests-m5/preview-regressions.mjs && node tests-m6/regressions.mjs",
     "test:presets": "node tests-presets/regressions.mjs",
-    "test:agents": "node --test tests-agents/frost.test.mjs tests-agents/request-state.test.mjs tests-agents/supervisor.test.mjs tests-agents/protocol.test.mjs && playwright test -c tests-agents/playwright.config.ts",
+    "test:agents": "node --test tests-agents/bootstrap.test.mjs tests-agents/frost.test.mjs tests-agents/request-state.test.mjs tests-agents/supervisor.test.mjs tests-agents/protocol.test.mjs && playwright test -c tests-agents/playwright.config.ts",
     "test:agents:ui": "playwright test -c tests-agents/playwright.config.ts",
     "test:agents:persistence": "node --test tests-agents/request-state.test.mjs tests-agents/supervisor.test.mjs",
     "test:hostkey": "node tests-m5/regressions.mjs",
