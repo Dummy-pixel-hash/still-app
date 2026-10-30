@@ -66,10 +66,13 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
     if (group.kind === "reasoning-group") {
       const status = group.failed ? "error" : index === activeReasoningIndex ? "working" : "done"
       const label = status === "working" ? "Thinking" : status === "error" ? "Interrupted" : "Thought"
-      return <div key={group.id} className="agent-reasoning" data-timeline-id={group.id}>
-        <LatticeLoader className="agent-reasoning-loader" label={label} doneLabel="Thought" errorLabel="Interrupted" status={status} pattern="orbit" grid={3} cellSize={4} gap={2} showTimer={false} announce={index === activeReasoningIndex} />
+      if (status === "working") return <div key={group.id} className="agent-reasoning" data-timeline-id={group.id}>
+        <LatticeLoader className="agent-reasoning-loader" label="Thinking" status="working" pattern="orbit" grid={3} cellSize={4} gap={2} showTimer={false} announce />
         {group.items.length > 1 && <span className="agent-reasoning-phases">{group.items.length} passes</span>}
       </div>
+      return <AgentDisclosure key={group.id} id={group.id} className={`agent-thought${status === "error" ? " is-failed" : ""}`} summary={<span>{label}</span>}>
+        <p className="agent-thought-details">{group.items.length} reasoning {group.items.length === 1 ? "update" : "updates"}</p>
+      </AgentDisclosure>
     }
     if (group.kind === "notice") return <p className={`agent-notice ${group.status === "error" ? "is-error" : ""}`} data-timeline-id={group.id} key={group.id}>{group.title && <strong>{group.title}: </strong>}{group.text}</p>
     if (group.kind === "tool") return <ToolRow key={group.id} item={group} />
@@ -94,6 +97,9 @@ function ToolGroup({ items }: { items: TranscriptItem[] }) {
   const failed = items.some(item => item.status === "failed" || item.status === "error")
   const active = items.some(item => item.status === "running" || item.status === "in_progress")
   const stopped = items.some(item => item.status === "cancelled" || item.status === "interrupted")
-  const label = items.length === 1 ? toolLabel(items[0]) : null
-  return <AgentDisclosure id={items[0].id} className={`agent-work-group ${failed ? "is-failed" : ""}`} summary={<><AgentIcon name={done === items.length ? "check" : "terminal"} size={15} /><span className="agent-tool-label">{label?.action || `${items.length} operations`}{label?.detail && <code>{label.detail}</code>}</span><small>{failed ? "Needs attention" : active ? "Working" : stopped ? "Stopped" : done === items.length ? "Completed" : "Pending"}</small><AgentIcon name="chevron" size={12} /></>}><div className="agent-work-group-body">{items.map(item => <ToolRow key={item.id} item={item} />)}</div></AgentDisclosure>
+  const count = items.length
+  const noun = count === 1 ? "operation" : "operations"
+  const failedCount = items.filter(item => item.status === "failed" || item.status === "error").length
+  const summary = failed ? `${count} ${noun} · ${failedCount} failed` : active ? `${count} ${noun} working` : stopped ? `${count} ${noun} stopped` : done === count ? `${count} ${noun} done` : `${count} ${noun} pending`
+  return <AgentDisclosure id={items[0].id} className={`agent-work-group ${failed ? "is-failed" : done === count ? "is-complete" : ""}`} summary={<><AgentIcon name={done === count && !failed ? "check" : "terminal"} size={14} /><span className="agent-work-summary">{summary}</span></>}><div className="agent-work-group-body">{items.map(item => <ToolRow key={item.id} item={item} />)}</div></AgentDisclosure>
 }

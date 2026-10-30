@@ -377,10 +377,13 @@
 .agent-workspace .agent-review-diff .agent-code-language { min-height: 38px; padding-inline: 13px; border-bottom: 1px solid rgba(255, 255, 255, .06); color: #c9b9c2; }
 .agent-workspace .agent-review-diff .agent-code { border-radius: 0 0 11px 11px; }
 .agent-workspace .agent-review-note { margin-top: 7px; padding: 12px 16px; border-top-color: rgba(255, 255, 255, .06); color: #aaa0a6; font-size: 11px; }
-.agent-workspace .agent-reasoning { display: flex; align-items: center; gap: 10px; min-height: 38px; margin: 12px 0 20px; padding: 7px 10px; border-radius: 10px; background: rgba(11, 10, 11, .62); color: #d0c3cb; }
+.agent-workspace .agent-reasoning { display: flex; align-items: center; gap: 9px; min-height: 24px; margin: 8px 0 15px; padding: 0; color: #d0c3cb; }
 .agent-workspace .agent-reasoning-loader { color: #ddb6c4; }
-.agent-workspace .agent-reasoning-phases { margin-left: auto; color: #a99da5; font-size: 11px; }
-@media (max-width: 540px) { .agent-workspace .agent-reasoning { padding-inline: 8px; } }
+.agent-workspace .agent-reasoning-phases { margin-left: 2px; color: #b1a3ac; font-size: 11px; }
+.agent-workspace .agent-thought { width: fit-content; margin: 7px 0 13px; color: #c7b9c2; }
+.agent-workspace .agent-thought > summary { display: inline-flex; align-items: center; list-style: none; cursor: pointer; padding: 2px 0; color: inherit; font: 500 12px/1.45 var(--font-sans); }
+.agent-workspace .agent-thought.is-failed > summary { color: #e8aab4; }
+.agent-workspace .agent-thought-details { margin: 4px 0 5px; color: #b7aab2; font-size: 11px; line-height: 1.5; }
 @media (max-width: 1000px) {
   .agent-workspace .agent-review { width: min(640px, calc(100% - 16px)); border-radius: 16px; }
 }
