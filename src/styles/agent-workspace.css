@@ -882,6 +882,116 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   max-width: 960px;
   margin-inline: auto;
 }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer {
+  transition: max-width 260ms cubic-bezier(.16, 1, .3, 1), padding 220ms cubic-bezier(.16, 1, .3, 1), border-radius 220ms cubic-bezier(.16, 1, .3, 1);
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-todos-dock { display: flex; justify-content: center; flex-shrink: 0; width: min(100%, 800px); margin: 0 auto 7px; pointer-events: none; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed {
+  width: 100%;
+  max-width: 360px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  cursor: text;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed textarea {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 1px;
+  min-width: 1px;
+  height: 1px;
+  min-height: 1px;
+  max-height: 1px;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  transform: translateY(5px);
+  pointer-events: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer textarea {
+  transition: opacity 140ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1), width 220ms cubic-bezier(.16, 1, .3, 1), min-height 220ms cubic-bezier(.16, 1, .3, 1);
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-toolbar {
+  flex-wrap: nowrap;
+  justify-content: center;
+  gap: 7px;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-controls {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-controls > :not(.agent-model-picker),
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-actions > :not(.agent-send),
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area.is-collapsed > .agent-composer-footnote {
+  display: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger {
+  max-width: 230px;
+  min-height: 31px;
+  padding: 4px 8px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger-copy small,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger > svg {
+  display: none;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger-copy strong {
+  max-width: 210px;
+  color: #e5dbe1;
+  font-size: 12px;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-send {
+  margin-left: 0;
+  transition: transform 180ms cubic-bezier(.16, 1, .3, 1), background-color 160ms ease;
+}
+
+/* A tiny progress capsule when folded; the detailed timeline opens above the same composer. */
+.agent-todos { width: 100%; max-width: 140px; pointer-events: auto; transition: max-width 300ms cubic-bezier(.16, 1, .3, 1); }
+.agent-todo-progress-pill { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 11px; border: 1px solid var(--ag-line); border-radius: 999px; color: var(--ag-dim); background: var(--ag-raised); font-size: 11px !important; white-space: nowrap; }
+.agent-todo-progress-pill:hover { color: var(--ag-text); border-color: var(--ag-chrome-edge); background: var(--ag-hover); }
+.agent-todo-progress-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ag-accent); }
+.agent-todos.is-expanded { max-width: 800px; padding: 12px 15px 14px; border: 1px solid var(--ag-line); border-radius: 14px; background: var(--ag-raised); }
+.agent-todos-states { display: grid; grid-template-rows: 1fr 0fr; transition: grid-template-rows 300ms cubic-bezier(.16, 1, .3, 1); }
+.agent-todos-states.is-expanded { grid-template-rows: 0fr 1fr; }
+.agent-todos-state-clip { min-height: 0; overflow: hidden; transition: opacity 180ms ease, transform 240ms cubic-bezier(.16, 1, .3, 1); }
+.agent-todos-states.is-expanded .agent-todos-state-clip:first-child { opacity: 0; transform: translateY(-5px); }
+.agent-todos-states:not(.is-expanded) .agent-todos-state-clip:last-child { opacity: 0; transform: translateY(5px); }
+.agent-todo-card { min-width: 0; }
+.agent-todos-heading { display: flex; align-items: center; justify-content: space-between; min-height: 25px; margin-bottom: 5px; }
+.agent-todos-heading-copy { display: flex; align-items: center; gap: 10px; }
+.agent-todos-heading h2 { margin: 0; color: var(--ag-text); font-family: var(--font-serif); font-size: 19px; font-weight: 400; }
+.agent-todos-progress { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; background: var(--ag-hover); color: var(--ag-dim); font: 11px var(--font-sans); }
+.agent-todos-progress i { width: 6px; height: 6px; border-radius: 50%; background: var(--ag-accent); }
+.agent-todos-expand { width: 27px; height: 27px; color: var(--ag-dim); }
+.agent-todos-expand:hover { color: var(--ag-text); background: var(--ag-hover); }
+.agent-todo-status-mark { z-index: 1; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--ag-faint); border-radius: 50%; color: var(--ag-faint); background: var(--ag-raised); font-size: 11px; line-height: 1; }
+.agent-todo-status-mark.is-completed { border-color: var(--ag-dim); color: var(--ag-bg); background: var(--ag-dim); }
+.agent-todo-status-mark.is-current { border: 2px solid var(--ag-accent); color: var(--ag-accent); box-shadow: 0 0 0 2px var(--ag-chrome-edge); }
+.agent-todo-readonly-meta { display: inline-flex; align-items: center; gap: 8px; color: var(--ag-dim); font-size: 10px; white-space: nowrap; }
+.agent-todo-full-list { position: relative; display: grid; gap: 0; max-height: min(320px, 38vh); margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; scrollbar-width: thin; }
+.agent-todo-readonly { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: start; gap: 9px; min-height: 42px; padding: 7px 3px; }
+.agent-todo-readonly:not(:last-child)::before { position: absolute; top: 24px; bottom: -12px; left: 11px; width: 1px; background: var(--ag-line); content: ""; }
+.agent-todo-readonly .agent-todo-status-mark { width: 20px; height: 20px; }
+.agent-todo-readonly.is-current .agent-todo-status-mark { width: 20px; height: 20px; }
+.agent-todo-readonly-body { min-width: 0; }
+.agent-todo-readonly-line { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.agent-todo-readonly-title { min-width: 0; overflow-wrap: anywhere; color: var(--ag-dim); font-family: var(--font-serif); font-size: 17px; line-height: 1.3; }
+.agent-todo-readonly.is-current .agent-todo-readonly-title { color: var(--ag-text); }
+.agent-todo-readonly.is-completed .agent-todo-readonly-title { color: var(--ag-faint); }
+.agent-todo-detail { margin: 4px 0 2px; color: var(--ag-dim); font-size: 11px; line-height: 1.4; }
+.agent-todo-empty, .agent-todos-offline { margin: 8px 3px; color: var(--ag-dim); font-size: 11px; line-height: 1.45; }
+@media (max-width: 540px) {
+  .agent-todos.is-expanded { max-width: 800px; padding: 10px 9px 11px; }
+  .agent-todo-readonly { gap: 5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-todos,
+  .agent-todos-states,
+  .agent-todos-state-clip { transition: none; transform: none; }
+}
 @media (max-width: 540px) {
   .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area { padding: 24px 16px max(10px, env(safe-area-inset-bottom)); }
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area.is-collapsed { padding-top: 10px; }
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed { max-width: 320px; }
 }

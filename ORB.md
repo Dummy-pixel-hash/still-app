@@ -2,6 +2,18 @@
 
 The selected **B · Smoked glass** study is now a reusable renderer and an opt-in companion in Still. This is the window/interaction foundation with **observed connection activity**, not a restored agent classifier.
 
+## Approved next milestone — agent-driven status
+
+The 2026-10-30 product direction makes this same orb the **Agents workspace's status
+companion**. Structured conversation state will drive working, attention, finished,
+failed, and unknown signals; activation will open the relevant agent conversation.
+Observation will include background conversations while the main app is running.
+
+The implementation plan, status semantics, and acceptance criteria are in
+[AG-01 — Agent-driven orb](docs/todo/agent-orb.md), with the full roadmap in
+[the Agents todo tracker](docs/todo/README.md). AG-01 is **planned**, so the sections
+below continue to document the current connection-driven runtime until it ships.
+
 ## Use
 
 Open **Settings → Orb companion → Float above other apps** in the desktop app. It is off by default. Choose a 48, 64, or 96px visible orb; 64px is the default.

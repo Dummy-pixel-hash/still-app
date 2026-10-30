@@ -15,6 +15,7 @@ async function connect(page: Page, agent = "opencode", firstMessage?: string) {
   await page.getByRole("button", { name: "Send message", exact: true }).click()
   await expect(page.locator(".agent-message-assistant").last()).toContainText("First second third.")
   await page.evaluate(() => (window as any).agentFixture.finish())
+  await page.getByLabel("Message agent").focus()
   await expect(page.locator(".agent-composer-provider")).toBeVisible()
   await expect(page.getByRole("button", { name: "Model: Model A" })).toBeEnabled()
 }
@@ -128,6 +129,55 @@ test("approvals and questions resolve without duplicate operations", async ({ pa
   await page.getByRole("button", { name: "Submit answer", exact: true }).click()
   expect(await page.evaluate(() => (window as any).agentFixture.inputs)).toEqual([{ requestId: "question", answers: { pm: "pnpm" } }])
   await expect(page.getByRole("region", { name: "Choose a package manager", exact: true })).toContainText("Your answer was sent to the agent")
+})
+
+test("model-managed Todos fold to a compact progress pill and expand to an agent progress timeline", async ({ page }) => {
+  await connect(page)
+  await expect(page.locator(".agent-topbar-actions button[aria-label^='Todos']")).toHaveCount(0)
+  const dock=page.locator(".agent-todos-dock"), composer=page.locator(".agent-composer")
+  const now=Date.now()
+  const todos={protocolVersion:3,revision:6,activeId:"model-todo-3",toolAvailable:true,available:true,items:[
+    {id:"model-todo-1",title:"Persist the shared list by conversation",status:"completed",createdBy:"agent",updatedBy:"agent",startedAt:now-12_000,durationMs:12_000},
+    {id:"model-todo-2",title:"Keep task state binary and simple",status:"completed",createdBy:"agent",updatedBy:"agent",startedAt:now-28_000,durationMs:28_000},
+    {id:"model-todo-3",title:"Check the attached expand and collapse interaction",status:"pending",createdBy:"agent",updatedBy:"agent",startedAt:now-64_000,detail:"Checking the current task and progress detail…"},
+    {id:"model-todo-4",title:"Finish provider runtime verification",status:"pending",createdBy:"agent",updatedBy:"agent"},
+  ]}
+  await page.evaluate(value=>{const h=(window as any).agentFixture;h.emit(h.current,{type:"todos",todos:value})},todos)
+  await page.getByRole("button", { name: "Find a message" }).focus()
+  await expect(composer).toHaveClass(/is-collapsed/)
+  await expect(composer).toHaveCSS("border-radius", "999px")
+  const progressPill=page.getByRole("button",{name:"2 of 4 Todos done. Expand list"})
+  const pillWidth=(await progressPill.boundingBox())!.width
+  const composerWidth=(await composer.boundingBox())!.width
+  await expect(progressPill).toContainText("2/4 Todos done")
+  await expect(progressPill).toHaveCSS("border-radius","999px")
+  expect(pillWidth).toBeLessThan(composerWidth)
+  await expect(progressPill).toBeVisible()
+  await expect(dock.locator("select, input, textarea")).toHaveCount(0)
+  expect(await dock.locator(".agent-todos").evaluate(node=>getComputedStyle(node).transitionDuration)).toContain("0.3s")
+  expect(await dock.locator(".agent-todos-states").evaluate(node=>getComputedStyle(node).transitionDuration)).toContain("0.3s")
+  await expect.poll(()=>page.evaluate(()=>{const pill=document.querySelector(".agent-todo-progress-pill")!.getBoundingClientRect(),composer=document.querySelector(".agent-composer")!.getBoundingClientRect();return Math.abs((composer.top-pill.bottom)-7)})).toBeLessThanOrEqual(1)
+  await progressPill.click()
+  await expect(dock.locator(".agent-todos")).toHaveClass(/is-expanded/)
+  await expect(composer).toHaveCSS("border-radius", "999px")
+  expect(Math.abs((await composer.boundingBox())!.width-composerWidth)).toBeLessThanOrEqual(1)
+  await expect.poll(()=>page.evaluate(()=>{const panel=document.querySelector(".agent-todos")!.getBoundingClientRect(),composer=document.querySelector(".agent-composer")!.getBoundingClientRect();return Math.abs((composer.top-panel.bottom)-7)})).toBeLessThanOrEqual(1)
+  await expect(dock.locator("#agent-todos-full")).toHaveAttribute("aria-hidden","false")
+  const rows=dock.getByRole("listitem")
+  await expect(rows).toHaveCount(4)
+  await expect(rows.nth(0)).toContainText("Done")
+  await expect(rows.nth(1)).toContainText("28s")
+  await expect(rows.nth(2)).toContainText("Not done")
+  await expect(rows.nth(2)).toContainText("1m 4s")
+  await expect(dock.locator(".agent-todo-detail")).toContainText("Checking the current task")
+  await expect(dock.locator("select, input, textarea")).toHaveCount(0)
+  await dock.getByRole("button", { name: "Collapse Todos" }).press("Escape")
+  await expect(page.getByRole("button", { name: "2 of 4 Todos done. Expand list" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "2 of 4 Todos done. Expand list" })).toBeFocused()
+  await page.getByRole("button", { name: "2 of 4 Todos done. Expand list" }).click()
+  await expect(dock.locator(".agent-todos")).toHaveClass(/is-expanded/)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test("conversations group by folder and rename, pin, archive, restore, delete survive reload", async ({ page }) => {

@@ -9,7 +9,7 @@ export function useComposerOverlay(active: boolean) {
     if (!active || !element || !chat) return
     let frame = 0, height = -1
     const measure = () => {
-      const next = Math.ceil(element.getBoundingClientRect().height)
+      const next = element.offsetHeight
       if (height === next) return
       height = next
       chat.style.setProperty("--ag-composer-height", `${height}px`)

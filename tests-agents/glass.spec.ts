@@ -51,9 +51,10 @@ test("the floating input and model menu keep their own blur while the wrapper st
   })
   await page.addStyleTag({ content: `
     .agent-aurora { visibility: hidden; }
-    .agent-composer > *, .agent-composer-footnote { visibility: hidden !important; }
+    .agent-composer textarea, .agent-composer-footnote, .agent-composer-provider, .agent-composer-actions { visibility: hidden !important; }
+    .agent-composer .agent-model-trigger { opacity: 0 !important; pointer-events: none !important; }
     .agent-model-menu { visibility: visible !important; }
-    .agent-model-menu > * { visibility: hidden !important; }
+    .agent-model-menu > * { opacity: 0 !important; pointer-events: none !important; }
   ` })
   const wrapper = page.locator(".agent-composer-area"), composer = page.locator(".agent-composer")
   await expect(wrapper).toHaveCSS("position", "absolute")
@@ -94,6 +95,16 @@ test("the frosted input floats over a wide transcript and reserves space as the 
   })
   const composer = page.locator(".agent-composer")
   const area = page.locator(".agent-composer-area")
+  await expect(composer).toHaveClass(/is-collapsed/)
+  await expect(composer).toHaveCSS("border-radius", "999px")
+  await expect(composer).toHaveCSS("max-width", "360px")
+  await expect(composer.locator(".agent-composer-provider")).toBeHidden()
+  await expect(composer.locator(".agent-model-trigger-copy strong")).toHaveText("Model A")
+  await expect(composer.locator(".agent-model-trigger-copy small")).toBeHidden()
+  await expect(composer.getByLabel("Commands and skills")).toBeHidden()
+  await expect(composer.getByLabel("Send message")).toBeVisible()
+  await composer.click({ position: { x: 5, y: 20 } })
+  await expect(composer).not.toHaveClass(/is-collapsed/)
   await expect(page.locator(".agent-message-list")).toHaveCSS("max-width", "960px")
   await expect(composer).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   await expect(composer).toHaveCSS("border-top-width", "0px")
@@ -146,6 +157,7 @@ test("native frost remains on the active input after opening history and resizin
   const composer = page.locator(".agent-composer")
   await expect(composer).toHaveAttribute("data-agent-frost", "")
   await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backgroundImage)).toContain("blob:")
+  await page.getByLabel("Message agent").focus()
   await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   const results = await probeComposerGlass(page, (name: string, image: Buffer) => info.attach(`active-${name}.png`, { body: image, contentType: "image/png" }))
   for (const pane of results) {

@@ -5,6 +5,10 @@
 import { spawn } from "node:child_process"
 import { randomUUID, randomBytes } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
+import { pathToFileURL } from "node:url"
+
+const todoHost = process.env.STILL_TODO_MODULE ? await import(pathToFileURL(process.env.STILL_TODO_MODULE).href) : null
+const todoMcp = () => ({ command: process.execPath, args: [process.env.STILL_TODO_MODULE, "mcp"], env: { STILL_TODO_SOCKET: process.env.STILL_TODO_SOCKET, STILL_TODO_TOKEN: process.env.STILL_TODO_TOKEN } })
 
 const LIMIT = 2 * 1024 * 1024
 export function frameReader(onFrame, onError) {
@@ -141,7 +145,7 @@ export class Driver {
 
 export class PiDriver extends Driver {
   async start(resume) {
-    this.peer = new Peer(this.executable, ["--mode", "rpc", ...(resume ? ["--session", resume] : [])], value => this.event(value))
+    this.peer = new Peer(this.executable, ["--mode", "rpc", ...(resume ? ["--session", resume] : []), ...(todoHost ? ["--extension", process.env.STILL_TODO_PI_EXTENSION] : [])], value => this.event(value))
     this.peer.onFailure = error => this.fail(error)
     this.call = (method, params) => this.peer.request(method, params, "pi")
     const state = await this.call("get_state")
@@ -260,9 +264,13 @@ export class CodexDriver extends Driver {
     this.peer.send({ jsonrpc: "2.0", method: "initialized" })
     const account = await this.peer.request("account/read", {})
     if (account.requiresOpenaiAuth && !account.account) throw new Error("Codex is installed but needs sign-in. Run codex login on this server.")
-    const result = await this.peer.request(resume ? "thread/resume" : "thread/start", { cwd: process.cwd(), ...(resume ? { threadId: resume } : {}) })
+    const dynamicTools = todoHost ? { dynamicTools: [{ type: "function", ...todoHost.todoTool }] } : {}
+    const result = await this.peer.request(resume ? "thread/resume" : "thread/start", { cwd: process.cwd(), ...(resume ? { threadId: resume } : {}), ...dynamicTools })
     this.id = result.thread?.id
     if (!this.id) throw new Error("Codex did not return a thread identity")
+    // Native dynamic tools persist with threads created by this integration.
+    // A resumed pre-feature thread remains unverified until it actually calls one.
+    if (todoHost) await todoHost.markTodoToolReady(todoHost.todoConnection())
     this.resumable = true; this.model = result.model; this.effort = result.reasoningEffort
     this.historyCapabilities = { revert: result.thread.historyMode === "paginated", retry: result.thread.historyMode === "paginated" }
     this.models = []; let cursor
@@ -328,7 +336,13 @@ export class CodexDriver extends Driver {
     if (event.id !== undefined && method) {
       try {
         let result
-        if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+        if (method === "item/tool/call" && todoHost && p.tool === todoHost.todoTool.name && !p.namespace) {
+          try {
+            await todoHost.markTodoToolReady(todoHost.todoConnection())
+            const list = await todoHost.requestTodos(todoHost.todoConnection(), p.arguments, `codex:${p.callId}`)
+            result = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(list) }] }
+          } catch (error) { result = { success: false, contentItems: [{ type: "inputText", text: errorText(error) }] } }
+        } else if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
           const decision = await this.permission(p.itemId, p.command || p.reason || "Approve agent operation", p, ["accept", "decline"])
           result = { decision }
         } else if (method === "item/tool/requestUserInput") {
@@ -364,7 +378,7 @@ export class CodexDriver extends Driver {
 export class ClaudeDriver extends Driver {
   async start(resume) {
     this.id = resume || randomUUID(); this.resumable = true; this.tasks = new Set(); this.blocks = new Map()
-    this.peer = new Peer(this.executable, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--setting-sources", "user,project,local", resume ? `--resume=${resume}` : `--session-id=${this.id}`], value => this.event(value), { CLAUDE_CODE_SDK_READS_SESSION_STATE: "1" })
+    this.peer = new Peer(this.executable, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--setting-sources", "user,project,local", resume ? `--resume=${resume}` : `--session-id=${this.id}`, ...(todoHost ? ["--mcp-config", JSON.stringify({ mcpServers: { "still-todos": todoMcp() } })] : [])], value => this.event(value), { CLAUDE_CODE_SDK_READS_SESSION_STATE: "1" })
     this.peer.onFailure = error => this.fail(error)
     this.call = (method, params) => this.peer.request(method, params, "claude")
     const init = await this.call("initialize", { hooks: null })
@@ -473,6 +487,15 @@ export class OpenCodeDriver extends Driver {
   }
   async start(resume) {
     await this.startServer()
+    if (todoHost) {
+      const mcp = todoMcp()
+      try {
+        const schema = await this.http("GET", "/openapi.json")
+        if (!schema.paths?.["/api/experimental/mcp/{server}"]?.put) throw new Error("This OpenCode server does not expose the runtime MCP tool API.")
+        await this.http("PUT", `/api/experimental/mcp/still-todos?location[directory]=${encodeURIComponent(process.cwd())}`, { config: { type: "local", command: [mcp.command, ...mcp.args], environment: mcp.env } })
+        await todoHost.markTodoToolReady(todoHost.todoConnection())
+      } catch (error) { this.update({ sessionUpdate: "notice", message: `Still todos stay available in the app, but OpenCode did not confirm the tool connection: ${errorText(error)}` }) }
+    }
     const result = resume ? await this.http("GET", `/api/session/${encodeURIComponent(resume)}`) : await this.http("POST", "/api/session", { location: { directory: process.cwd() } })
     this.session = result.data || result; this.id = this.session.id; this.resumable = true
     if (!this.id) throw new Error("OpenCode did not return a session identity")

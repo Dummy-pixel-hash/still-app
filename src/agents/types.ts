@@ -32,8 +32,23 @@ export type AgentEventType =
   | "historyCapabilities"
   | "agentRequest"
   | "requestOutcome"
+  | "todos"
 
 export interface AgentHistoryCapabilities { revert: boolean; retry: boolean }
+export type AgentTodoStatus = "pending" | "completed"
+export interface AgentTodoItem {
+  id: string
+  title: string
+  status: AgentTodoStatus
+  createdBy: "user" | "agent"
+  updatedBy: "user" | "agent"
+  createdAt?: number
+  startedAt?: number
+  completedAt?: number
+  durationMs?: number
+  detail?: string
+}
+export interface AgentTodoSnapshot { protocolVersion: number; revision: number; items: AgentTodoItem[]; activeId?: string; toolAvailable: boolean; available: boolean }
 
 export interface AgentPermissionOption {
   optionId: string
@@ -106,6 +121,7 @@ export interface AgentThreadEvent {
   historyCapabilities?: AgentHistoryCapabilities
   request?: AgentRequestSummary
   requestOutcome?: AgentRequestOutcome
+  todos?: AgentTodoSnapshot
   remoteCursor?: number
   turnActive?: boolean
 }
@@ -164,6 +180,7 @@ export interface AgentThreadSnapshot {
   persistent?: boolean
   remoteCursor?: number
   promptId?: string | number
+  todos?: AgentTodoSnapshot
 }
 
 export interface AgentLibrary {

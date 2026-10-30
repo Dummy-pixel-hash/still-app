@@ -95,6 +95,8 @@ pub struct Event {
     pub remote_cursor: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Value>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -127,6 +129,7 @@ impl Event {
             request_outcome: None,
             remote_cursor: None,
             turn_active: None,
+            todos: None,
         }
     }
 }
@@ -165,6 +168,8 @@ pub struct Snapshot {
     pub prompt_id: Option<Value>,
     #[serde(default)]
     pub recovery_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Value>,
 }
 impl Snapshot {
     fn history_header(&self) -> Self {
@@ -178,6 +183,7 @@ impl Snapshot {
             history_capabilities: self.history_capabilities.clone(),
             active_message_ids: None,
             persistent: self.persistent, remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
+            todos: self.todos.clone(),
         }
     }
 }
@@ -622,7 +628,7 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<String, StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<String, StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -632,14 +638,16 @@ fn persistent_command(execution: &str, cwd: &str, agent_id: &str, executable: &s
     } else {
         (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
     };
-    let payload = json!({"executionId":execution,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env,"source":include_str!("../agent-host/supervisor.mjs")});
+    let payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env,"source":include_str!("../agent-host/supervisor.mjs"),"todosSource":include_str!("../agent-host/todos.mjs"),"todoPiSource":include_str!("../agent-host/todo-pi.mjs")});
     let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).map_err(|error| StillError::friendly("agent_launch", error.to_string()))?);
     let bootstrap = r#"import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
 const config=JSON.parse(Buffer.from(process.argv[1],'base64').toString('utf8'));
 const root=path.join(process.env.HOME,'.local','state','still','agents');
 const directory=path.join(root,config.executionId);config.directory=directory;
-if(config.create){fs.mkdirSync(directory,{recursive:true,mode:0o700});const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==process.getuid())throw new Error('Unsafe worker directory');fs.chmodSync(directory,0o700);fs.writeFileSync(path.join(directory,'transport.mjs'),config.source,{mode:0o600,flag:'wx'});}
-delete config.source;
+if(config.create)fs.mkdirSync(directory,{recursive:true,mode:0o700});
+const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink()||stat.uid!==process.getuid())throw new Error('Unsafe worker directory');fs.chmodSync(directory,0o700);
+if(config.create){for(const [name,source] of [['transport.mjs',config.source],['todos.mjs',config.todosSource],['todo-pi.mjs',config.todoPiSource]])fs.writeFileSync(path.join(directory,name),source,{mode:0o600,flag:'wx'});}
+delete config.source;delete config.todosSource;delete config.todoPiSource;
 const child=spawn(process.execPath,[path.join(directory,'transport.mjs'),'attach',Buffer.from(JSON.stringify(config)).toString('base64')],{stdio:'inherit'});
 child.on('error',error=>{console.error(error.message);process.exitCode=1});child.on('exit',(code)=>process.exit(code??1));
 "#;
@@ -683,8 +691,13 @@ pub async fn still_agent_start(
     .await?;
     let path = executable(&def, args.executable.as_deref())?;
     let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
-    let remote = persistent_command(&execution_id, &cwd, &args.agent_id, &path, true, 0)?;
     let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
+    let default_todos = || json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":true});
+    let saved_todos = if args.conversation_id.is_some() { agent_store::load_snapshot(&app, conversation_id.clone()).await?.todos } else { None };
+    let mut initial_todos = saved_todos.and_then(|todos| validate_todos(&todos).ok()).unwrap_or_else(default_todos);
+    initial_todos["toolAvailable"] = json!(false);
+    initial_todos["available"] = json!(true);
+    let remote = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0)?;
     let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
@@ -709,7 +722,8 @@ pub async fn still_agent_start(
         commands: Vec::new(),
         pending_input: None,
         resumable: args.resume_session_id.is_some(),
-        history_capabilities: json!({"revert":false,"retry":false}),
+            history_capabilities: json!({"revert":false,"retry":false}),
+            todos: Some(initial_todos),
         active_message_ids: None,
         persistent: true, remote_cursor: 0, prompt_id: None, recovery_required: false,
     };
@@ -949,10 +963,35 @@ async fn handle(
             }
             return Ok(());
         }
+        if method == "_still/todos_changed" {
+            let mut thread = row.lock().await;
+            let value = value.pointer("/params/todos").cloned().ok_or("Missing todo snapshot")?;
+            if value["protocolVersion"].as_u64() != Some(3) {
+                let old = thread.snapshot.todos.get_or_insert_with(|| json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":false}));
+                old["available"] = json!(false); old["toolAvailable"] = json!(false);
+                let mut event = Event::new("todos"); event.todos = Some(old.clone()); emit(&mut thread, event).await;
+                return Ok(());
+            }
+            if let Some(todos) = update_todos(&mut thread, value)? {
+                let mut event = Event::new("todos"); event.todos = Some(todos); emit(&mut thread, event).await;
+            }
+            return Ok(());
+        }
         if method == "_still/caught_up" {
             let mut thread = row.lock().await;
             let params = &value["params"];
             thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(params["index"].as_u64().unwrap_or(0));
+            if let Some(raw) = params.get("todos").filter(|todos| todos["protocolVersion"].as_u64() == Some(3)) {
+                if let Some(todos) = update_todos(&mut thread, raw.clone())? {
+                    let mut event = Event::new("todos"); event.todos = Some(todos); emit(&mut thread, event).await;
+                }
+            } else if let Some(old) = thread.snapshot.todos.as_mut() {
+                if old["available"] != false || old["toolAvailable"] != false {
+                    old["available"] = json!(false);
+                    old["toolAvailable"] = json!(false);
+                    let mut event = Event::new("todos"); event.todos = Some(old.clone()); emit(&mut thread, event).await;
+                }
+            }
             let unconfirmed_prompt = thread.prompt.is_some() && params["busy"] == false;
             thread.snapshot.turn_active = params["busy"].as_bool().unwrap_or(false);
             if unconfirmed_prompt || thread.recovering_uncertain {
@@ -1517,6 +1556,42 @@ fn failure_state(thread: &Thread) -> &'static str {
     if thread.history_request.is_some() || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
 }
 
+fn validate_todos(value: &Value) -> Result<Value, String> {
+    if value.get("protocolVersion").and_then(Value::as_u64) != Some(3) { return Err("Unsupported shared todo protocol version".into()); }
+    let revision = value.get("revision").and_then(Value::as_u64).filter(|revision| *revision <= 9_007_199_254_740_991).ok_or("Todo snapshot has no valid revision")?;
+    let available = value.get("toolAvailable").and_then(Value::as_bool).ok_or("Todo snapshot has no tool status")?;
+    let service_available = value.get("available").and_then(Value::as_bool).ok_or("Todo snapshot has no service status")?;
+    let items = value.get("items").and_then(Value::as_array).ok_or("Todo snapshot has no item list")?;
+    if items.len() > 100 { return Err("Todo list exceeds 100 items".into()); }
+    let mut ids = std::collections::HashSet::new();
+    for item in items {
+        let id = item.get("id").and_then(Value::as_str).ok_or("Todo item has no ID")?;
+        let title = item.get("title").and_then(Value::as_str).ok_or("Todo item has no title")?;
+        if id.is_empty() || id.len() > 100 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') || !ids.insert(id) {
+            return Err("Todo item has an invalid or duplicate ID".into());
+        }
+        if title.trim().is_empty() || title.chars().count() > 500 || title.len() > 2000 || title.chars().any(char::is_control) { return Err("Todo item has an invalid title".into()); }
+        if !["pending", "completed"].contains(&item.get("status").and_then(Value::as_str).unwrap_or("")) { return Err("Todo item has an invalid status".into()); }
+        if !["user", "agent"].contains(&item.get("createdBy").and_then(Value::as_str).unwrap_or("")) || !["user", "agent"].contains(&item.get("updatedBy").and_then(Value::as_str).unwrap_or("")) { return Err("Todo item has an invalid author".into()); }
+        if item.get("detail").is_some_and(|detail| detail.as_str().is_none_or(|detail| detail.chars().count()>500 || detail.len()>2000 || detail.chars().any(char::is_control))) { return Err("Todo item has invalid progress detail".into()); }
+        for field in ["createdAt","startedAt","completedAt","durationMs"] { if item.get(field).is_some_and(|value| value.as_u64().is_none_or(|time| time>9_007_199_254_740_991)) { return Err("Todo item has an invalid timestamp".into()); } }
+    }
+    let active_id=value.get("activeId").and_then(Value::as_str);
+    if value.get("activeId").is_some_and(|id| !id.is_null() && (active_id.is_none() || !items.iter().any(|item| item["id"]==active_id.unwrap() && item["status"]=="pending"))) { return Err("Todo snapshot has an invalid active item".into()); }
+    let mut result=json!({"protocolVersion":3,"revision":revision,"items":items,"toolAvailable":available,"available":service_available});
+    if let Some(active_id)=active_id { result["activeId"]=json!(active_id); }
+    Ok(result)
+}
+
+fn update_todos(thread: &mut Thread, value: Value) -> Result<Option<Value>, String> {
+    let next = validate_todos(&value)?;
+    let revision = next["revision"].as_u64().unwrap_or(0);
+    if thread.snapshot.todos.as_ref().and_then(|todos| todos["revision"].as_u64()).is_some_and(|current| revision < current) { return Ok(None); }
+    if thread.snapshot.todos.as_ref() == Some(&next) { return Ok(Some(next)); }
+    thread.snapshot.todos = Some(next.clone());
+    Ok(Some(next))
+}
+
 async fn queue_request_response(thread: &mut Thread, id: Value, response: Value, outcome: Value) -> Result<oneshot::Receiver<Result<(), String>>, StillError> {
     if thread.response_delivery.is_some() {
         return Err(StillError::friendly("agent_response_busy", "A response is already being sent."));
@@ -1732,7 +1807,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let remote = persistent_command(&saved.execution_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
+    let remote = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
     let channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let (outbound, outbound_rx) = mpsc::unbounded_channel();
     let (cancel, cancel_rx) = mpsc::unbounded_channel();
@@ -1887,6 +1962,16 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn todo_snapshots_reject_stale_revisions_invalid_status_and_duplicate_ids() {
+        let valid=json!({"protocolVersion":3,"revision":7,"activeId":"task-2","toolAvailable":true,"available":true,"items":[{"id":"task-1","title":"Read project files","status":"completed","createdBy":"agent","updatedBy":"agent","startedAt":100,"completedAt":12000,"durationMs":11900},{"id":"task-2","title":"Run checks","status":"pending","createdBy":"agent","updatedBy":"agent","startedAt":13000,"detail":"Running focused checks"}]});
+        assert_eq!(validate_todos(&valid).unwrap(),valid);
+        assert!(validate_todos(&json!({"protocolVersion":3,"revision":9_007_199_254_740_992u64,"toolAvailable":false,"available":true,"items":[]})).is_err());
+        assert!(validate_todos(&json!({"protocolVersion":3,"revision":1,"toolAvailable":false,"available":true,"items":[{"id":"same","title":"A","status":"in_progress","createdBy":"user","updatedBy":"user"}]})).is_err());
+        let duplicate=json!({"protocolVersion":3,"revision":1,"toolAvailable":false,"available":true,"items":[{"id":"same","title":"A","status":"pending","createdBy":"user","updatedBy":"user"},{"id":"same","title":"B","status":"pending","createdBy":"agent","updatedBy":"agent"}]});
+        assert!(validate_todos(&duplicate).is_err());
+        assert!(validate_todos(&json!({"protocolVersion":3,"revision":1,"activeId":"task-1","toolAvailable":false,"available":true,"items":[{"id":"task-1","title":"Finished","status":"completed","createdBy":"agent","updatedBy":"agent"}]})).is_err());
+    }
     #[test]
     fn request_ids_do_not_reuse_prompt_receipts_after_reattachment() {
         let first = next_request_id();

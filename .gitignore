@@ -17,6 +17,7 @@ playwright-report/
 docs/*
 !docs/agents-t3-review.md
 !docs/agents-ui-and-persistence.md
+!docs/todo/
 
 # OS / editors
 .DS_Store

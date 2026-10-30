@@ -118,6 +118,8 @@ pnpm test:terminal        # terminal tests, including Playwright coverage
 
 ## What's next?
 
+- [Agents roadmap and todo](docs/todo/README.md): agent-driven orb, live Git review,
+  worktrees, attachments, queues, and the complete prioritized feature plan.
 - macOS and Linux builds
 - SFTP-backed uploads for pasted images
 - More platforms, more polish—and contributions are welcome

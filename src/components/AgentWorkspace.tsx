@@ -30,6 +30,7 @@ import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./Agen
 import AgentModelPicker from "./AgentModelPicker"
 import AgentAurora from "./AgentAurora"
 import { AgentTimeline } from "./AgentTimeline"
+import AgentTodos from "./AgentTodos"
 import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
 import { requestKey, questionFields } from "../agents/requests"
 import type { TranscriptItem } from "../agents/transcript"
@@ -79,6 +80,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
   const [undo, setUndo] = useState<{ id: string; at?: number } | null>(null)
   const [busy, setBusy] = useState(false), [configBusy, setConfigBusy] = useState(false)
+  const [composerExpanded, setComposerExpanded] = useState(false)
   const [error, setError] = useState("")
   const [commandOpen, setCommandOpen] = useState(false), [commandQuery, setCommandQuery] = useState("")
   const [modelMenu, setModelMenu] = useState<"model" | "reasoning" | null>(null)
@@ -90,6 +92,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [timelineOpen, setTimelineOpen] = useState(false), [timelineQuery, setTimelineQuery] = useState("")
   const [feedback, setFeedback] = useState("")
   const [review, setReview] = useState(false)
+  const [todosOpen, setTodosOpen] = useState(false)
   const [historyAction, setHistoryAction] = useState<{ message: TranscriptItem; retry: boolean } | null>(null)
   const [folderOpen, setFolderOpen] = useState(false), [folderHost, setFolderHost] = useState(""), [folderPath, setFolderPath] = useState("")
   const [projectChoices, setProjectChoices] = useState(false)
@@ -191,6 +194,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const plan = useMemo(() => current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript])
   const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript)
   const showComposer = startScreen || !!current
+  const composerCollapsed = !!current && !composerExpanded
   const composerDock = useComposerOverlay(!!current)
   const canSend = hydrated && connectedHere && !busy && !configBusy && !!draft.trim() && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
@@ -301,8 +305,15 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   }, [host, connected])
   useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
   useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setCommandOpen(false) }, [selected, current?.executionId])
-  useEffect(() => { setReview(false) }, [selected, view])
-  useEffect(() => { const input = textarea.current; if (input) { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 156)}px` } }, [draft, selected, view])
+  useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
+  useEffect(() => { if (!current?.todos?.items.length) setTodosOpen(false) }, [current?.meta.id, current?.todos?.items.length])
+  useEffect(() => {
+    const input = textarea.current
+    if (!input) return
+    if (composerCollapsed) { input.style.height = ""; return }
+    input.style.height = "auto"
+    input.style.height = `${Math.min(input.scrollHeight, 156)}px`
+  }, [draft, selected, view, composerCollapsed])
   useEffect(() => { mounted.current = true; const previous = document.activeElement as HTMLElement | null; surface.current?.focus(); return () => { mounted.current = false; void flushAgentSaves(); if (previous?.isConnected) previous.focus() } }, [])
   useLayoutEffect(() => {
     if (!dialogOpen) return
@@ -621,7 +632,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
         </div>
-        {showComposer && <div ref={composerDock} className={`agent-composer-area${startScreen ? " is-compact" : ""}`}>
+        {showComposer && <div ref={composerDock} className={`agent-composer-area${startScreen ? " is-compact" : ""}${composerCollapsed ? " is-collapsed" : ""}`}>
           {!scroll.atLatest && current && !activeRequestItem && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
           {activeRequestItem && current && <button className={`agent-request-jump ${activeRequestKind === "permission" ? "is-approval" : "is-question"}`} onClick={() => {
             if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)
@@ -632,7 +643,18 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
            {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span></div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
-          <form className="agent-composer" onSubmit={e => { e.preventDefault(); void send() }}>
+          {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} expanded={todosOpen} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
+          <form className={`agent-composer${composerCollapsed ? " is-collapsed" : ""}`} onFocusCapture={e => {
+            if ((e.target as HTMLElement).tagName === "TEXTAREA") setComposerExpanded(true)
+          }} onBlurCapture={e => {
+            if (composerDock.current?.contains(e.relatedTarget as Node | null)) return
+            setComposerExpanded(false)
+            setCommandOpen(false)
+            setModelMenu(null)
+          }} onClick={e => {
+            if (!composerCollapsed || (e.target as HTMLElement).closest("button, a, input, select, textarea, [role=button]")) return
+            textarea.current?.focus({ preventScroll: true })
+          }} onSubmit={e => { e.preventDefault(); void send() }}>
             {commandOpen && <CommandPicker commands={commands} query={commandQuery} onQuery={setCommandQuery} onSelect={chooseCommand} onClose={() => { setCommandOpen(false); textarea.current?.focus() }} loading={catalogBusy || preparing && !preparation.ready && !preparation.error} error={catalogError || preparation.error} refresh={() => void refreshCatalog()} />}
             <textarea ref={textarea} aria-label="Message agent" aria-description="Enter to send. Shift+Enter for a new line. Type / for commands." rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="agent-composer-toolbar">

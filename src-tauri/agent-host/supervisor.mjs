@@ -1,9 +1,10 @@
 // A detached, per-conversation ACP process. SSH transports attach; they do not own it.
 import { createServer, createConnection } from "node:net"
 import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { existsSync, mkdirSync, chmodSync, lstatSync, openSync, closeSync, writeSync, readFileSync, writeFileSync, renameSync, unlinkSync, fsyncSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { createTodoStore, todoStorePath } from "./todos.mjs"
 
 const mode = process.argv[2]
 const encoded = process.argv[3]
@@ -16,7 +17,7 @@ const key = createHash("sha256").update(directory).digest("hex").slice(0, 28)
 const socketPath = join("/tmp", `still-${process.getuid?.() ?? "user"}-${key}.sock`)
 const journalPath = join(directory, "events.jsonl")
 const statePath = join(directory, "state.json")
-const version = 1
+const version = 3
 const errors = error => error instanceof Error ? error.message : String(error)
 const writeLine = (target, frame) => target.write(JSON.stringify(frame) + "\n")
 
@@ -44,6 +45,22 @@ async function worker() {
   let owner = null, child = null, childEnded = false, closed = false, sequence = 0, eventIndex = 0
   let initializeResult = null, sessionResult = null, busy = false, activePrompt = null, closing = false, maxRequestId = 3
   let initializeOperation = null, sessionOperation = null
+  const todoRoot = join(process.env.HOME, ".local", "state", "still", "agent-todos")
+  mkdirSync(todoRoot, { recursive: true, mode: 0o700 })
+  const todoRootStat = lstatSync(todoRoot)
+  if (!todoRootStat.isDirectory() || todoRootStat.isSymbolicLink() || todoRootStat.uid !== process.getuid?.()) throw new Error("Unsafe todo storage directory")
+  chmodSync(todoRoot, 0o700)
+  const conversation = typeof config.conversationId === "string" && config.conversationId ? config.conversationId : config.executionId
+  const todoFile = todoStorePath(process.env.HOME, conversation)
+  const todoDirectory = dirname(todoFile)
+  mkdirSync(todoDirectory, { recursive: true, mode: 0o700 })
+  const todoDirectoryStat = lstatSync(todoDirectory)
+  if (!todoDirectoryStat.isDirectory() || todoDirectoryStat.isSymbolicLink() || todoDirectoryStat.uid !== process.getuid?.()) throw new Error("Unsafe per-conversation todo directory")
+  chmodSync(todoDirectory, 0o700)
+  const todos = createTodoStore(todoFile)
+  const todoToken = randomBytes(32).toString("hex")
+  let todoToolAvailable = false
+  const todoSnapshot = () => ({ ...todos.snapshot(), protocolVersion: 3, toolAvailable: todoToolAvailable, available: true })
   const pending = new Map(), inflight = new Map(), history = []
   const journal = openSync(journalPath, "a", 0o600)
   const remember = () => {
@@ -56,7 +73,7 @@ async function worker() {
     history.push(frame)
     writeSync(journal, JSON.stringify(frame) + "\n")
     // A response boundary or approval must survive loss of the client machine.
-    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission") fsyncSync(journal)
+    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission" || message.method === "_still/todos_changed") fsyncSync(journal)
     remember()
     const handshake = !message.method && (message.id === initializeOperation || message.id === sessionOperation)
     if (owner?.writable && (owner.replayed || handshake)) {
@@ -93,7 +110,7 @@ async function worker() {
   const ensureChild = () => {
     if (child || childEnded || closed) return
     const [executable, ...args] = config.command
-    child = spawn(executable, args, { cwd: config.cwd, env: { ...process.env, ...(config.env || {}) }, stdio: ["pipe", "pipe", "pipe"] })
+    child = spawn(executable, args, { cwd: config.cwd, env: { ...process.env, ...(config.env || {}), STILL_TODO_SOCKET: socketPath, STILL_TODO_TOKEN: todoToken, STILL_TODO_MODULE: join(directory, "todos.mjs"), STILL_TODO_PI_EXTENSION: join(directory, "todo-pi.mjs") }, stdio: ["pipe", "pipe", "pipe"] })
     frames(child.stdout, stamp, error => { failure(`Agent returned invalid protocol: ${errors(error)}`); child.kill("SIGTERM") })
     child.stderr.on("data", bytes => process.stderr.write(bytes))
     child.stdin.on("error", error => { if (!closing) failure(`Agent input stream closed: ${errors(error)}`) })
@@ -109,13 +126,13 @@ async function worker() {
     if (!child?.stdin.writable || childEnded || closed) throw new Error("The persistent agent process has ended")
     writeLine(child.stdin, frame)
   }
-  const sessionMetadata = () => ({ ...(sessionResult?._meta || {}), persistent: true, busy, activePrompt, maxRequestId, executionId: config.executionId })
+  const sessionMetadata = () => ({ ...(sessionResult?._meta || {}), persistent: true, busy, activePrompt, maxRequestId, executionId: config.executionId, todos: todoSnapshot() })
   const replay = socket => {
     for (const event of history) {
       const method = event.method
       const pendingRequest = (method === "session/request_permission" || method === "elicitation/create") && pending.has(JSON.stringify(event.id))
       const response = !method && event.id !== initializeOperation && event.id !== sessionOperation
-      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || pendingRequest || response)
+      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || method === "_still/todos_changed" || pendingRequest || response)
       if (shouldReplay) writeLine(socket,event)
     }
     // Forms are state, not disposable events: disk history intentionally strips their schema.
@@ -130,6 +147,29 @@ async function worker() {
     if (request.id !== undefined) writeLine(socket, { jsonrpc: "2.0", id: request.id, error: { code: -32000, message } })
   }
   const handle = (socket, request) => {
+    if (request.method === "_still/todos" || request.method === "_still/todo_tool_ready") {
+      const token = request.params?.token
+      const fromTool = typeof token === "string" && /^[a-f0-9]{64}$/.test(token) && timingSafeEqual(Buffer.from(token), Buffer.from(todoToken))
+      if (closed || childEnded) { reject(socket, request, "The agent worker has ended. Restore the conversation before editing todos."); return }
+      if (!fromTool) { reject(socket, request, "Only the registered agent todo tool may access this list."); return }
+      if (typeof request.id === "number" && Number.isSafeInteger(request.id)) maxRequestId = Math.max(maxRequestId, request.id)
+      remember()
+      try {
+        const before = todos.snapshot().revision
+        if (request.method === "_still/todo_tool_ready") {
+          if (!fromTool) throw new Error("Only the registered tool can acknowledge availability.")
+          if (!todoToolAvailable) {
+            todoToolAvailable = true
+            publish({ jsonrpc: "2.0", method: "_still/todos_changed", params: { todos: todoSnapshot() } })
+          }
+        } else {
+          todos.apply(request.params?.input, "agent", request.params?.requestId)
+          if (todos.snapshot().revision !== before) publish({ jsonrpc: "2.0", method: "_still/todos_changed", params: { todos: todoSnapshot() } })
+        }
+        writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { todos: todoSnapshot() } })
+      } catch (error) { reject(socket, request, errors(error)) }
+      return
+    }
     if (request.method === "_still/attach") {
       if (request.params?.executionId !== config.executionId) throw new Error("Persistent execution identity mismatch")
       if (closed || childEnded) throw new Error("The remote agent process has ended. Resume its provider session explicitly.")
@@ -166,6 +206,12 @@ async function worker() {
       }
       if (sessionOperation !== null) return
       sessionOperation = request.id
+      if (config.agentId === "gemini") {
+        request = { ...request, params: { ...request.params, mcpServers: [
+          ...(request.params?.mcpServers || []),
+          { name: "still-todos", command: process.execPath, args: [join(directory, "todos.mjs"), "mcp"], env: [{ name: "STILL_TODO_SOCKET", value: socketPath }, { name: "STILL_TODO_TOKEN", value: todoToken }] },
+        ] } }
+      }
     }
     if (!request.method && request.id !== undefined) {
       if (!pending.has(JSON.stringify(request.id))) { reject(socket, request, "This agent request has already been answered or cancelled"); return }

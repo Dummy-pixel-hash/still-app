@@ -61,6 +61,7 @@ const h = {
     if (event.type === "requestOutcome") { if (event.requestOutcome?.kind === "question") row.pendingInput = undefined; else row.pendingPermission = undefined }
     if (event.type === "configOptions") row.configOptions = event.configOptions!
     if (event.type === "commands") row.commands = event.commands
+    if (event.type === "todos" && event.todos) row.todos = event.todos
     value.turnActive = row.turnActive
     const data = library(), saved = data.rows.find((item: any) => item.conversationId === row.conversationId)
     if (saved) {
@@ -115,7 +116,7 @@ registerNativeBridge({
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
     const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
-      configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, persistent:h.persistent, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
+      configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, todos:{protocolVersion:3,revision:0,items:[],toolAvailable:true,available:true}, persistent:h.persistent, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
     row.conversationId = options?.conversationId || row.executionId
     row.hostKey = hostKey(session)
     snapshots.set(row.executionId, row)
@@ -230,11 +231,27 @@ if (preview && scenario) {
     row.pendingPermission = permission; row.state = "inputRequired"; row.turnActive = true
     row.transcript.push({type:"permission",permission,sequence:++row.lastSequence,attemptId:row.executionId})
   }
+  if (scenario === "todos") {
+    const now=Date.now()
+    row.meta.title = "Ship shared conversation Todos"
+    row.state = "complete"; row.turnActive = false
+    row.transcript.push(
+      {type:"userMessage",messageId:"demo-todos-request",sequence:++row.lastSequence,attemptId:row.executionId,text:"Create a shared task list for this conversation and mark tasks Done as you complete them."},
+      {type:"assistantChunk",messageId:"demo-todos-reply",sequence:++row.lastSequence,attemptId:row.executionId,text:"I added the ordered checklist below. The `still_todos` tool updates this list as I work; the app keeps it read-only. Todo completion tracks checklist progress, not whether a turn, test suite, or code change has finished."},
+      {type:"threadComplete",sequence:++row.lastSequence,attemptId:row.executionId,state:"complete"},
+    )
+    row.todos = {protocolVersion:3,revision:6,activeId:"demo-todo-3",toolAvailable:true,available:true,items:[
+      {id:"demo-todo-1",title:"Store todos durably per conversation",status:"completed",createdBy:"agent",updatedBy:"agent",startedAt:now-12000,completedAt:now,durationMs:12000},
+      {id:"demo-todo-2",title:"Expose the shared list as `still_todos`",status:"completed",createdBy:"agent",updatedBy:"agent",startedAt:now-28000,completedAt:now,durationMs:28000},
+      {id:"demo-todo-3",title:"Verify stale updates cannot overwrite newer work",status:"pending",createdBy:"agent",updatedBy:"agent",startedAt:now-64000,detail:"Checking revision conflicts and reconnect replay…"},
+      {id:"demo-todo-4",title:"Run provider and Windows release checks",status:"pending",createdBy:"agent",updatedBy:"agent"},
+    ]}
+  }
   snapshots.set(row.executionId,structuredClone(row)); saveLibrary(demo)
 }
 const fullWorkspace = new URLSearchParams(location.search).has("workspace")
 if (fullWorkspace) localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{id:"still",name:"Still",note:"",order:0}],sessions: new URLSearchParams(location.search).has("empty") ? [] : [session],order:{still:[session.id]},keys:[],settings:{confirmRemove:true,terminal:{fontSize:14,cursorStyle:"block",scrollback:5000}} }))
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} transportId="ssh-fixture" onReattach={row => reattachAgentThread(row.executionId,"ssh-fixture")} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
+ createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} transportId="ssh-fixture" onReattach={row => reattachAgentThread(row.executionId,"ssh-fixture")} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
 if (preview && scenario) {
   const observer = new MutationObserver(() => {
     const row = document.querySelector<HTMLButtonElement>('.agent-thread-open')

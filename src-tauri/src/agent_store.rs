@@ -200,7 +200,7 @@ fn fields(snapshot: &Snapshot) -> Value {
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
         "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities,
-        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required})
+        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required,"todos":snapshot.todos})
 }
 
 pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, StillError> {

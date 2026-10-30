@@ -89,6 +89,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "threadStopped") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = true; row.state = "working"; row.lastError = event.text || "Waiting for remote cancellation confirmation." }
   if (event.type === "configOptions" && event.configOptions) row.configOptions = event.configOptions
   if (event.type === "historyCapabilities" && event.historyCapabilities) row.historyCapabilities = event.historyCapabilities
+  if (event.type === "todos" && event.todos) row.todos = event.todos
   if (event.type === "messageCheckpoint") row.transcript = row.transcript.map(message => message.type === "userMessage" && message.messageId === event.messageId ? { ...message, checkpoint: event.checkpoint } : message)
   if (event.type === "historyReverted") {
     row.transcript = revertHistory(row.transcript, event.messageId)
