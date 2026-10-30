@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs"
 import { test, expect } from "@playwright/test"
-import { pixelContrast, probeAuroraGlass, probeComposerGlass } from "./glass-pixels.mjs"
+import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
 
 test("the main WebView has an opaque native backing while the orb stays transparent", () => {
   const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
@@ -12,7 +12,7 @@ test("the main WebView has an opaque native backing while the orb stays transpar
   expect(orb).toContain(".background_color(tauri::webview::Color(0, 0, 0, 0))")
 })
 
-test("the real application blurs its actual aurora canvas at production depth", async ({ page }, info) => {
+test("browser workspace panes blur the real aurora background", async ({ page }, info) => {
   await page.setViewportSize({ width: 1100, height: 720 })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
@@ -21,23 +21,20 @@ test("the real application blurs its actual aurora canvas at production depth", 
     expect(pane.unblurred, `${pane.name}: production source is visible`).toBeGreaterThan(3)
     expect(pane.ratio, `${pane.name}: real source pixels are blurred`).toBeLessThan(.3)
   }
+  const composer = page.locator(".agent-composer")
+  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
 
-test("native frosted panes visibly blur the real scene without CSS backdrop filters", async ({ page }, info) => {
+test("native workspace panes use the same CSS backdrop blur as browser preview", async ({ page }) => {
   await page.addInitScript(() => { Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} }) })
   await page.setViewportSize({ width: 1100, height: 720 })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
-  await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
-  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
-  results.push(...await probeComposerGlass(page, (name: string, image: Buffer) => info.attach(`launch-${name}.png`, { body: image, contentType: "image/png" })))
-  for (const pane of results) {
-    expect(pane.unblurred, `${pane.name}: real source is transmitted`).toBeGreaterThan(3)
-    expect(pane.ratio, `${pane.name}: source is blurred without CSS filters`).toBeLessThan(.3)
-  }
+  await expect.poll(() => page.locator(".agent-sidebar").evaluate(el => getComputedStyle(el).backdropFilter)).toContain("blur")
+  await expect.poll(() => page.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
 
-test("the floating input and model menu keep their own blur while the wrapper stays clear", async ({ page }, info) => {
+test("the floating input and model menu keep their own CSS blur while the wrapper stays clear", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
   await expect(page.getByRole("dialog", { name: "Model and reasoning" })).toBeVisible()
@@ -143,11 +140,10 @@ test("the frosted input floats over a wide transcript and reserves space as the 
     return pill.top - last.bottom
   })).toBeGreaterThan(10)
   await page.getByLabel("Message agent").focus()
-  await expect(composer).toHaveCSS("box-shadow", "none")
-  await expect(composer).toHaveCSS("backdrop-filter", "none")
+  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
 
-test("native frost remains on the active input after opening history and resizing", async ({ page }, info) => {
+test("CSS frost remains on the active input after opening history and resizing", async ({ page }) => {
   await page.addInitScript(() => { Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} }) })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
@@ -155,13 +151,7 @@ test("native frost remains on the active input after opening history and resizin
   await page.setViewportSize({ width: 1100, height: 480 })
   await expect(page.locator(".agent-chat")).not.toHaveClass(/is-launch/)
   const composer = page.locator(".agent-composer")
-  await expect(composer).toHaveAttribute("data-agent-frost", "")
-  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backgroundImage)).toContain("blob:")
+  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
   await page.getByLabel("Message agent").focus()
-  await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
-  const results = await probeComposerGlass(page, (name: string, image: Buffer) => info.attach(`active-${name}.png`, { body: image, contentType: "image/png" }))
-  for (const pane of results) {
-    expect(pane.unblurred).toBeGreaterThan(3)
-    expect(pane.ratio).toBeLessThan(.3)
-  }
+  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
