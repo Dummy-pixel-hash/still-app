@@ -11,6 +11,13 @@ const todoHost = process.env.STILL_TODO_MODULE ? await import(pathToFileURL(proc
 const todoMcp = () => ({ command: process.execPath, args: [process.env.STILL_TODO_MODULE, "mcp"], env: { STILL_TODO_SOCKET: process.env.STILL_TODO_SOCKET, STILL_TODO_TOKEN: process.env.STILL_TODO_TOKEN } })
 
 const LIMIT = 2 * 1024 * 1024
+// Launch-time runtime identity supplied by the native host. Absent fields stay absent:
+// a transport name is not proof of a version, and "native" is not a provider version.
+function launchRuntime(fallback) {
+  let supplied = {}
+  try { const value = JSON.parse(process.env.STILL_PROVIDER_RUNTIME || "null"); if (value && typeof value === "object" && !Array.isArray(value)) supplied = value } catch { /* Treat malformed metadata as absent. */ }
+  return { ...(fallback.transport ? { transport: fallback.transport } : {}), ...(fallback.executable ? { executable: fallback.executable } : {}), ...supplied }
+}
 export function frameReader(onFrame, onError) {
   const decoder = new StringDecoder("utf8")
   let pending = ""
@@ -270,7 +277,7 @@ export class CodexDriver extends Driver {
     if (!this.id) throw new Error("Codex did not return a thread identity")
     // Native dynamic tools persist with threads created by this integration.
     // A resumed pre-feature thread remains unverified until it actually calls one.
-    if (todoHost) await todoHost.markTodoToolReady(todoHost.todoConnection())
+    if (todoHost && !resume) await todoHost.markTodoToolReady(todoHost.todoConnection())
     this.resumable = true; this.model = result.model; this.effort = result.reasoningEffort
     this.historyCapabilities = { revert: result.thread.historyMode === "paginated", retry: result.thread.historyMode === "paginated" }
     this.models = []; let cursor
@@ -493,8 +500,9 @@ export class OpenCodeDriver extends Driver {
         const schema = await this.http("GET", "/openapi.json")
         if (!schema.paths?.["/api/experimental/mcp/{server}"]?.put) throw new Error("This OpenCode server does not expose the runtime MCP tool API.")
         await this.http("PUT", `/api/experimental/mcp/still-todos?location[directory]=${encodeURIComponent(process.cwd())}`, { config: { type: "local", command: [mcp.command, ...mcp.args], environment: mcp.env } })
-        await todoHost.markTodoToolReady(todoHost.todoConnection())
-      } catch (error) { this.update({ sessionUpdate: "notice", message: `Still todos stay available in the app, but OpenCode did not confirm the tool connection: ${errorText(error)}` }) }
+        // Accepting a configuration is not a connected tool. Readiness is reported by
+        // the MCP server itself when OpenCode lists or calls the tool.
+      } catch (error) { this.update({ sessionUpdate: "notice", message: `Still todos stay available in the app, but OpenCode did not accept the tool configuration: ${errorText(error)}` }) }
     }
     const result = resume ? await this.http("GET", `/api/session/${encodeURIComponent(resume)}`) : await this.http("POST", "/api/session", { location: { directory: process.cwd() } })
     this.session = result.data || result; this.id = this.session.id; this.resumable = true
@@ -710,6 +718,7 @@ export function createHost(write, driverId, executable) {
   const classes = { pi: PiDriver, codex: CodexDriver, claude: ClaudeDriver, opencode: OpenCodeDriver }
   const DriverClass = classes[driverId]
   if (!DriverClass) throw new Error("Unsupported native agent")
+  const launched = launchRuntime({ transport: { pi: "pi-rpc", codex: "codex-app-server", claude: "claude-stream-json", opencode: "http-v2+sse" }[driverId], executable })
   let driver, ready = false, closing = false, serial = 0, queue = [], cancelling = false, prompting = false, reverting = false
   const requests = new Map()
   const host = {
@@ -725,7 +734,11 @@ export function createHost(write, driverId, executable) {
         if (message.method === "initialize") result = { protocolVersion: 1, agentInfo: { name: { pi: "Pi", codex: "Codex", claude: "Claude Code", opencode: "OpenCode" }[driverId], version: "native" }, agentCapabilities: { loadSession: true }, authMethods: [] }
         else if (["session/new", "session/load"].includes(message.method)) {
           driver = new DriverClass(host, executable); await driver.start(message.params?.sessionId)
-          result = { sessionId: driver.id, configOptions: driver.configs, _meta: { resumable: driver.resumable === true, historyCapabilities: driver.historyCapabilities } }
+          // A running server's own version outranks the executable probe.
+          const providerRuntime = driver.version
+            ? { ...launched, version: driver.version, versionSource: "runtime", versionObservedAt: Date.now() }
+            : launched
+          result = { sessionId: driver.id, configOptions: driver.configs, _meta: { resumable: driver.resumable === true, historyCapabilities: driver.historyCapabilities, providerRuntime } }
         } else if (message.method === "session/prompt") {
           if (!ready || closing || cancelling || prompting || reverting) throw new Error("Agent session is not ready")
           prompting = true

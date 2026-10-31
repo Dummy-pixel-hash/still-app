@@ -2,12 +2,12 @@ import { readFileSync } from "node:fs"
 import { test, expect } from "@playwright/test"
 import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
 
-test("the Windows WebView uses sRGB to avoid washed-out wide-gamut colors", () => {
-  const config = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"))
-  const main = config.app.windows.find((window: { label: string }) => window.label === "main")
-  expect(main.additionalBrowserArgs).toContain("--force-color-profile=srgb")
+test("Windows WebView uses sRGB to avoid washed-out wide-gamut colors", () => {
+  const windows = JSON.parse(readFileSync(new URL("../src-tauri/tauri.windows.conf.json", import.meta.url), "utf8"))
+  const windowsMain = windows.app.windows.find((window: { label: string }) => window.label === "main")
+  expect(windowsMain.additionalBrowserArgs).toContain("--force-color-profile=srgb")
   // Setting custom browser args replaces Wry's defaults, so preserve them.
-  expect(main.additionalBrowserArgs).toContain("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection")
+  expect(windowsMain.additionalBrowserArgs).toContain("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection")
 })
 
 test("the main WebView has an opaque native backing while the orb stays transparent", () => {
@@ -20,28 +20,24 @@ test("the main WebView has an opaque native backing while the orb stays transpar
   expect(orb).toContain(".background_color(tauri::webview::Color(0, 0, 0, 0))")
 })
 
-test("browser workspace panes blur the real aurora background", async ({ page }, info) => {
+test("browser preview keeps CSS backdrop blur instead of the native canvas fallback", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 720 })
-  await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
-  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`${name}.png`, { body: image, contentType: "image/png" }))
-  for (const pane of results) {
-    expect(pane.unblurred, `${pane.name}: production source is visible`).toBeGreaterThan(3)
-    expect(pane.ratio, `${pane.name}: real source pixels are blurred`).toBeLessThan(.3)
-  }
-  const composer = page.locator(".agent-composer")
-  await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
+  const workspace = page.locator(".agent-workspace")
+  await expect(workspace).not.toHaveAttribute("data-native-shell", "true")
+  await expect(workspace).not.toHaveAttribute("data-frost-rendered", "true")
+  await expect(page.locator(".agent-sidebar")).toHaveCSS("backdrop-filter", /blur/)
+  await expect.poll(() => page.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
 
 test("native workspace panes blur with their shared frost texture without CSS backdrop filters", async ({ page }, info) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
-    Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0" })
   })
   await page.setViewportSize({ width: 1100, height: 720 })
-  await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")
   await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+  await expect.poll(() => page.locator(".agent-workspace").getAttribute("data-frost-rendered")).toBe("true")
   const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
   for (const pane of results) {
     expect(pane.unblurred, `${pane.name}: native scene texture is visible`).toBeGreaterThan(3)
@@ -166,7 +162,6 @@ test("the frosted input floats over a wide transcript and reserves space as the 
 test("native frost tracks the active composer after history opens and viewport resizes", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })
-    Object.defineProperty(navigator, "userAgent", { configurable: true, get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0" })
   })
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo")

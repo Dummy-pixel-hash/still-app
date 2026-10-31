@@ -17,7 +17,7 @@ import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
 import { commandInventory } from "../agents/commands"
 import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, reconcileAgentRequest, refreshAgentCommands, refreshAgentThread, respondAgentInput, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
-import { discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
+import { agentDiscoverySelectionKey, discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
 import { nativeBridge } from "../bridge/nativeBridge"
 import type { Session } from "../types"
@@ -33,6 +33,7 @@ import { AgentTimeline } from "./AgentTimeline"
 import AgentTodos from "./AgentTodos"
 import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
 import { requestKey, questionFields } from "../agents/requests"
+import AgentCapabilities, { agentProviderTransportLabel } from "./AgentCapabilities"
 import type { TranscriptItem } from "../agents/transcript"
 import "../styles/agent-workspace.css"
 import "../styles/agent-materials.css"
@@ -93,6 +94,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [feedback, setFeedback] = useState("")
   const [review, setReview] = useState(false)
   const [todosOpen, setTodosOpen] = useState(false)
+  const [agentDetailsOpen, setAgentDetailsOpen] = useState(false)
   const [historyAction, setHistoryAction] = useState<{ message: TranscriptItem; retry: boolean } | null>(null)
   const [folderOpen, setFolderOpen] = useState(false), [folderHost, setFolderHost] = useState(""), [folderPath, setFolderPath] = useState("")
   const [projectChoices, setProjectChoices] = useState(false)
@@ -108,13 +110,22 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), search = useRef<HTMLInputElement>(null)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const navigationPanel = useRef<HTMLElement>(null)
-  const projectPopover = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
+  const projectPopover = useRef<HTMLDivElement>(null), agentDetailsRoot = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
   useAgentPopover(projectPopover, projectChoices, "start", true)
   const navigation = useRef(0), mounted = useRef(true), prefsRef = useRef(prefs)
   const folderOperation = useRef(0)
   const callbacks = useRef({ onCheck, onCatalog, onStart }); callbacks.current = { onCheck, onCatalog, onStart }; prefsRef.current = prefs
   const host = session ? hostKey(session) : ""
-  const discovery = useAgentDiscovery(host)
+  const executableSelections = prefs.executables[host] || {}
+  const discoverySelectionKey = agentDiscoverySelectionKey(transportId, executableSelections, AGENTS.map(agent => agent.id))
+  const discovery = useAgentDiscovery(host, discoverySelectionKey)
+  const discoveryCurrent = !discovery.stale && discovery.selectionKey === discoverySelectionKey
+  const discoveryStatus = (info?: AgentAvailability) => {
+    const status = info?.installed
+      ? info.available ? info.runtime === "acp" ? "Installed · ACP connection" : "Installed · native connection" : info.message || "Integration unavailable"
+      : discovery.checking ? "Checking installation…" : info ? "Not found" : "Select a server to check"
+    return discovery.stale && info ? `Cached · ${status}` : status
+  }
   const libraryThreads = allThreads.filter(row => !row.meta.prepared || row.state === "saved" || !!row.meta.draft || row.transcript.some(event => event.type === "userMessage"))
   const current = libraryThreads.find(row => row.meta.id === selected) || null
   const context = current ? { host: current.meta.hostKey, folder: current.meta.folder } : project
@@ -156,10 +167,18 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const draftKey = project ? projectKey(project) : "unassigned"
   const configurationKey = JSON.stringify([contextKey, agentId, executable])
   const startScreen = !current && !archived && view !== "settings"
-  const preparing = hydrated && startScreen && connectedHere && available?.available === true && !discovery.checking
+  const preparing = hydrated && startScreen && connectedHere && discoveryCurrent && available?.available === true && !discovery.checking
   const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable }, context?.host || "", onStart)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
+  const capabilityProviderLabel = activeAgent?.agentName || AGENTS.find(agent => agent.id === activeAgent?.agentId)?.label || activeAgent?.agentId || definition.label
+  const capabilityState: "connecting" | "live" | "offline" | "unavailable" = !activeAgent
+    ? "unavailable"
+    : activeAgent.state === "connecting" ? "connecting"
+      : !connectedHere || ["saved", "detached"].includes(activeAgent.state) ? "offline"
+        : ["error", "submissionUnknown"].includes(activeAgent.state) ? "unavailable" : "live"
+  const capabilityRefreshAvailable = !!activeAgent && connectedHere && !["saved", "detached", "error", "submissionUnknown"].includes(activeAgent.state)
+  const agentDetailsScopeKey = activeAgent ? JSON.stringify([activeAgent.executionId, activeAgent.agentId, activeAgent.agentSessionId, activeAgent.cwd, contextKey, transportId]) : "no-agent"
   const draft = current ? current.meta.draft : prefs.drafts[draftKey] || ""
   const fields = activeAgent?.configOptions || []
   const modelControl = fields.find(option => option.category === "model")
@@ -290,6 +309,16 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const hydrate = () => loadAgentThreads().then(() => { if (mounted.current) { setPrefs(readLibraryPreferences()); setHydrated(true) } }).catch(e => setError(messageOf(e)))
   useEffect(() => { void hydrate() }, [])
   useEffect(() => { if (hydrated) saveAgentWorkspace("library", prefs) }, [prefs, hydrated])
+  const checkDiscovery = () => {
+    const currentHost = host
+    const paths = { ...(prefsRef.current.executables[currentHost] || {}) }
+    const selectedCheck = callbacks.current.onCheck
+    return discoverAgents(currentHost, discoverySelectionKey, () => {
+      return AGENTS.some(agent => paths[agent.id]?.trim())
+        ? Promise.all(AGENTS.map(agent => selectedCheck(agent.id, paths[agent.id]?.trim() || undefined))).then(rows => rows.flat())
+        : selectedCheck()
+    })
+  }
   useEffect(() => {
     if (!hydrated || !session) return
     const profile = agentServerProfile(session)
@@ -297,16 +326,14 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   }, [hydrated, host, session?.authMethod, session?.keyId])
   useEffect(() => { for (const server of hosts) claimAgentThreads(server, sessions.filter(s => hostKey(s) === hostKey(server)).map(s => s.id)) }, [hydrated, allThreads.length, sessions])
   useEffect(() => {
-    if (!host || !connected) return
-    void discoverAgents(host, () => {
-      const paths = prefsRef.current.executables[host] || {}
-      return Object.values(paths).some(Boolean) ? Promise.all(AGENTS.map(agent => callbacks.current.onCheck(agent.id, paths[agent.id]))).then(rows => rows.flat()) : callbacks.current.onCheck()
-    })
-  }, [host, connected])
+    if (!hydrated || !host || !connected) return
+    void checkDiscovery()
+  }, [host, connected, transportId, hydrated])
   useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
   useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setCommandOpen(false) }, [selected, current?.executionId])
   useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
   useEffect(() => { if (!current?.todos?.items.length) setTodosOpen(false) }, [current?.meta.id, current?.todos?.items.length])
+  useLayoutEffect(() => { setAgentDetailsOpen(false) }, [contextKey, agentId, activeAgent?.executionId, activeAgent?.agentId, activeAgent?.agentSessionId, activeAgent?.cwd, transportId, view])
   useEffect(() => {
     const input = textarea.current
     if (!input) return
@@ -336,6 +363,14 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     document.addEventListener("pointerdown", outside)
     return () => document.removeEventListener("pointerdown", outside)
   }, [projectChoices])
+  useEffect(() => {
+    if (!agentDetailsOpen) return
+    const outside = (event: PointerEvent) => {
+      if (!agentDetailsRoot.current?.contains(event.target as Node)) setAgentDetailsOpen(false)
+    }
+    document.addEventListener("pointerdown", outside)
+    return () => document.removeEventListener("pointerdown", outside)
+  }, [agentDetailsOpen])
 
   const setDraft = (text: string) => current ? updateThreadMeta(current.executionId, { draft: text }) : setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: text } }))
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
@@ -383,7 +418,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     })
   }
   const start = () => {
-    if (!context || !connectedHere || !prepared || !preparation.ready) throw new Error("Wait for the selected agent to finish connecting.")
+    if (!context || !connectedHere || !discoveryCurrent || available?.available !== true || !prepared || !preparation.ready) throw new Error("Wait for the selected agent to finish connecting.")
     preparation.claim()
     updateThreadMeta(prepared.executionId, { prepared: false, draft })
     setSelected(prepared.meta.id); setProject({ host: context.host, folder: prepared.cwd }); setView("draft")
@@ -489,7 +524,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     setView("draft")
     requestAnimationFrame(() => { textarea.current?.focus(); textarea.current?.setSelectionRange(prompt.length, prompt.length) })
   }
-  const check = () => discoverAgents(host, () => Promise.all(AGENTS.map(agent => onCheck(agent.id, prefs.executables[host]?.[agent.id]?.trim() || undefined))).then(rows => rows.flat()))
+  const check = checkDiscovery
   const refreshCatalog = async () => {
     if (!activeAgent) return
     if (!connectedHere || !onCatalog || agentId !== "opencode") { setCatalogError("Connect this conversation's server to refresh its command inventory."); return }
@@ -522,17 +557,17 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const nativeShell = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
   return <section ref={surface} className="agent-workspace" data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
-    onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices')) returnFocus.current = e.target as HTMLElement }}
+    onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-capabilities-popover')) returnFocus.current = e.target as HTMLElement }}
     onPointerDown={e => { if (!(e.target as HTMLElement).closest(".agent-thread-menu,.agent-thread-more")) setMenu(null) }}
     onKeyDown={e => {
       e.stopPropagation()
-      if (!dialogOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") { e.preventDefault(); setSidebar(false); setProjectChoices(false); setModelMenu(null); if (!showComposer) newThread(); setCommandQuery(""); setCommandOpen(true) }
+      if (!dialogOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") { e.preventDefault(); setSidebar(false); setProjectChoices(false); setModelMenu(null); setAgentDetailsOpen(false); if (!showComposer) newThread(); setCommandQuery(""); setCommandOpen(true) }
       if (!folderOpen && !timelineOpen && !deleting && !historyAction && (e.ctrlKey || e.metaKey) && e.key === "\\") {
         e.preventDefault()
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
       if (e.key === "Tab") {
         const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || (review && matchMedia("(max-width: 1000px)").matches ? surface.current?.querySelector(".agent-review") : null) || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
@@ -619,7 +654,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         {session && connectionNotice}
         <div className="agent-settings-list">{AGENTS.map(provider => {
           const info = discovery.agents.find(row => row.agentId === provider.id)
-          return <details className="agent-provider-setting" key={provider.id}><summary><span className="agent-provider-logo"><AgentProviderMark id={provider.id} size={23} /></span><span><strong>{provider.label}</strong><small>{info?.installed ? info.available ? info.runtime === "acp" ? "Installed · ACP connection" : "Installed · native connection" : info.message || "Integration unavailable" : discovery.checking ? "Checking installation…" : info ? "Not found" : "Select a server to check"}</small></span><AgentIcon name="chevron" size={14} /></summary><div className="agent-provider-details"><p>{provider.note}</p><label className="agent-field">Executable path<input aria-label={`${provider.label} executable path`} disabled={!host} value={prefs.executables[host]?.[provider.id] || ""} placeholder={info?.executable || provider.executable} onChange={e => setPrefs(old => ({ ...old, executables: { ...old.executables, [host]: { ...old.executables[host], [provider.id]: e.target.value } } }))} /></label>{!info?.installed && <><span>Install on the server</span><code className="agent-install-command">{provider.installCommand}</code></>}<span>Sign in on the server</span><code className="agent-install-command">{provider.loginCommand}</code></div></details>
+          const checkedAt = info?.checkedAt ?? discovery.checkedAt
+          const checkedLabel = Number.isSafeInteger(checkedAt) ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(checkedAt) : "Not checked"
+          return <details className="agent-provider-setting" key={provider.id}><summary><span className="agent-provider-logo"><AgentProviderMark id={provider.id} size={23} /></span><span><strong>{provider.label}</strong><small>{discoveryStatus(info)}</small></span><AgentIcon name="chevron" size={14} /></summary><div className="agent-provider-details"><p>{provider.note}</p><dl className="agent-provider-runtime"><div><dt>Version</dt><dd>{info?.providerRuntime?.version || "Version not reported"}</dd></div><div><dt>Transport</dt><dd>{agentProviderTransportLabel(info?.providerRuntime?.transport)}</dd></div><div><dt>Last checked</dt><dd>{discovery.stale ? "Cached · " : ""}{checkedLabel}</dd></div></dl><label className="agent-field">Executable path<input aria-label={`${provider.label} executable path`} disabled={!host} value={prefs.executables[host]?.[provider.id] || ""} placeholder={info?.executable || provider.executable} onChange={e => setPrefs(old => ({ ...old, executables: { ...old.executables, [host]: { ...old.executables[host], [provider.id]: e.target.value } } }))} /></label>{!info?.installed && <><span>Install on the server</span><code className="agent-install-command">{provider.installCommand}</code></>}<span>Sign in on the server</span><code className="agent-install-command">{provider.loginCommand}</code></div></details>
         })}</div>
         <div className="agent-inline-actions"><button className="agent-button" disabled={!host || !connected || discovery.checking} onClick={() => void check()}><AgentIcon name="refresh" />{discovery.checking ? "Checking…" : "Refresh"}</button><button className="agent-button" onClick={home}>Back to conversations</button></div>
         {discovery.error && <p className="agent-error" role="alert">{discovery.error}</p>}
@@ -643,7 +680,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
            {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span></div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
-          {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} expanded={todosOpen} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
+          {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} sync={current.todoSync} expanded={todosOpen} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
           <form className={`agent-composer${composerCollapsed ? " is-collapsed" : ""}`} onFocusCapture={e => {
             if ((e.target as HTMLElement).tagName === "TEXTAREA") setComposerExpanded(true)
           }} onBlurCapture={e => {
@@ -660,7 +697,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current ? <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} /> : <span className="agent-composer-provider"><AgentProviderMark id={current.agentId} size={20} />{current.agentName}</span>}
-                 <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
+                  <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
                 {agentModeControl && <ConfigPicker key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
@@ -668,7 +705,10 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           </form>
           {configError && !extraControl && <p className="agent-model-error" role="alert">{configError}</p>}
           <div className="agent-composer-footnote">
-            {context ? <div className="agent-context-line"><AgentIcon name="folder" size={13} /><span title={context.folder}>{context.folder}</span><small title={hostLabel(context.host)}>{hostLabel(context.host)}</small>{!current && <button type="button" data-agent-popover-trigger aria-label="Change project" title="Change project" aria-haspopup="dialog" aria-expanded={projectChoices} onClick={() => { setCommandOpen(false); setProjectChoices(!projectChoices) }}><AgentIcon name="chevron" size={11} /></button>}</div> : <button type="button" className="agent-choose-project" data-agent-popover-trigger aria-haspopup="dialog" aria-expanded={projectChoices || folderOpen} onClick={() => { setCommandOpen(false); if (projects.length) setProjectChoices(!projectChoices); else chooseFolder() }}><AgentIcon name="folder" size={14} /><span>Choose project</span><AgentIcon name="chevron" size={11} style={{ transform: "rotate(90deg)" }} /></button>}
+            {context ? <div className="agent-context-line"><AgentIcon name="folder" size={13} /><span title={context.folder}>{context.folder}</span><small title={hostLabel(context.host)}>{hostLabel(context.host)}</small>{!current && <button type="button" data-agent-popover-trigger aria-label="Change project" title="Change project" aria-haspopup="dialog" aria-expanded={projectChoices} onClick={() => { setAgentDetailsOpen(false); setCommandOpen(false); setProjectChoices(!projectChoices) }}><AgentIcon name="chevron" size={11} /></button>}{activeAgent && <div className="agent-capabilities-anchor" ref={agentDetailsRoot}>
+              <button type="button" className="agent-details-trigger" aria-label="Agent details: Supported by this agent" aria-haspopup="dialog" aria-controls="agent-capabilities-popover" aria-expanded={agentDetailsOpen} onClick={() => { setCommandOpen(false); setProjectChoices(false); setModelMenu(null); setAgentDetailsOpen(open => !open) }}>Agent details</button>
+              <AgentCapabilities key={agentDetailsScopeKey} open={agentDetailsOpen} report={activeAgent.capabilities} providerLabel={capabilityProviderLabel} state={capabilityState} refresh={capabilityRefreshAvailable ? () => refreshAgentThread(activeAgent.executionId) : undefined} close={() => setAgentDetailsOpen(false)} />
+            </div>}</div> : <button type="button" className="agent-choose-project" data-agent-popover-trigger aria-haspopup="dialog" aria-expanded={projectChoices || folderOpen} onClick={() => { setAgentDetailsOpen(false); setCommandOpen(false); if (projects.length) setProjectChoices(!projectChoices); else chooseFolder() }}><AgentIcon name="folder" size={14} /><span>Choose project</span><AgentIcon name="chevron" size={11} style={{ transform: "rotate(90deg)" }} /></button>}
             {composerNotice && <span className="agent-composer-status" role="status">{composerNotice}</span>}
           </div>
         </div>}

@@ -111,11 +111,10 @@ body.still-resizing-temp * {
 
 /* Card preview: the real headless xterm DOM, laid out at the session's
    live grid and scaled to fit the card viewport (LiveScreen measures the
-   screen element and sets the transform). The host fills the fixed-height
-   viewport so the flex parent can center the shrunken screen; absolute
-   positioning keeps the terminal box out of that flow. Text centering
-   rules from the main surface (theme above) also apply here, which is why
-   the left edge is zeroed for the miniature. */
+   screen element and sets the transform). The host fills the available
+   viewport; absolute positioning keeps the terminal box out of that flow.
+   Reset the main surface's auto margins so the measured fit can center
+   the miniature inside its own card. */
 .card-term {
   position: relative;
   width: 100%;
@@ -128,9 +127,17 @@ body.still-resizing-temp * {
   left: 0;
 }
 .card-term .xterm .xterm-screen,
-.card-term.xterm .xterm-screen {
+.card-term.xterm .xterm-screen,
+.card-frozen-screen {
   margin: 0;
   transform-origin: top left;
+}
+.card-frozen-screen {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  white-space: pre;
 }
 .card-term .xterm-viewport {
   overflow: hidden;

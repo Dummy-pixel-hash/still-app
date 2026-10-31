@@ -11,26 +11,30 @@ export default function AgentAurora() {
   useEffect(() => {
     const element = canvas.current
     if (!element) return
-    const isNativeWindows = navigator.userAgent.includes("Windows") &&
-      ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
-    const renderer = createAuroraRenderer(element, isNativeWindows ? { maxParticles: 6000 } : undefined)
+    const isNativeShell = "__TAURI_INTERNALS__" in window || "__TAURI__" in window
+    const isNativeWindows = isNativeShell && navigator.userAgent.includes("Windows")
+    const renderer = createAuroraRenderer(element, isNativeShell ? { maxParticles: 4000 } : undefined)
     if (!renderer) { setRendered(false); return }
     const glass = createGlassBackdrop(element)
     const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)")
-    let width = 0, height = 0, frame = 0, lastFrame = 0, elapsed = 0, stopped = true
+    let width = 0, height = 0, frame = 0, lastFrame = 0, elapsed = 0, lastGlassTime = -Infinity, stopped = true
 
     const draw = () => {
       if (!width || !height) return
       renderer.draw(elapsed)
-      // The shared native glass texture updates at its own lower cadence.
-      glass?.draw()
+      // Refresh the shared native texture independently from the particle
+      // frame rate. Browser preview keeps CSS backdrop-filter only.
+      if (glass && (!isNativeShell || elapsed - lastGlassTime >= (isNativeWindows ? 1 / 3 : 1 / 2))) {
+        lastGlassTime = elapsed
+        glass.draw()
+      }
     }
 
     // One visible canvas; the static SVG is only a fallback, not a second live layer.
     const tick = (now: number) => {
       if (stopped) return
       if (!lastFrame) lastFrame = now
-      if (now - lastFrame >= 1000 / (isNativeWindows ? 20 : 30)) {
+      if (now - lastFrame >= 1000 / (isNativeWindows ? 20 : isNativeShell ? 15 : 30)) {
         elapsed += Math.min((now - lastFrame) / 1000, .1)
         lastFrame = now
         draw()

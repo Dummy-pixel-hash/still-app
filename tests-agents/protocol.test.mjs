@@ -131,6 +131,16 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
     const ready = frames.find(frame => frame.id === 2)
     assert.equal(ready.error, undefined); assert.ok(ready.result.sessionId); assert.ok(ready.result.configOptions.length)
     assert.deepEqual(ready.result._meta.historyCapabilities, { revert: provider !== "claude", retry: provider !== "claude" })
+    // A transport and executable are launch facts; a version is only claimed when read.
+    assert.ok(ready.result._meta.providerRuntime.transport)
+    assert.equal(ready.result._meta.providerRuntime.executable, executable)
+    assert.notEqual(ready.result._meta.providerRuntime.version, "native", "\"native\" is not a provider version")
+    if (provider === "opencode") {
+      assert.equal(ready.result._meta.providerRuntime.version, "2.0.0", "the running server version outranks the executable probe")
+      assert.equal(ready.result._meta.providerRuntime.versionSource, "runtime")
+    } else {
+      assert.equal(ready.result._meta.providerRuntime.version, undefined, "an unobserved version stays absent")
+    }
     const commands = frames.filter(frame => frame.params?.update?.sessionUpdate === "available_commands_update").at(-1).params.update.availableCommands
     if (provider === "opencode") {
       assert.equal(commands.filter(command => command.route === "command").length, 24)
@@ -178,6 +188,31 @@ for (const provider of ["pi", "claude", "codex", "opencode"]) test(`native ${pro
       assert.equal(frames.find(frame => frame.id === 11).result?.stopReason, "end_turn")
     }
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test("launch-time runtime metadata is echoed, and malformed metadata cannot invent facts", async () => {
+  if (process.platform === "win32") return
+  const dir = await mkdtemp("/tmp/opencode/still-runtime-")
+  const executable = `${dir}/pi`
+  await writeFile(executable, `#!/bin/sh\nexec env STILL_TEST_PEER=pi ${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(new URL("./protocol-peer.mjs", import.meta.url)))} "$@"\n`, { mode: 0o700 })
+  const previous = process.env.STILL_PROVIDER_RUNTIME
+  const launch = async () => {
+    const frames = []
+    const host = createHost(frame => frames.push(frame), "pi", executable)
+    try { await host.handle({ id: 1, method: "initialize" }); await host.handle({ id: 2, method: "session/new" }) }
+    finally { await host.close() }
+    return frames.find(frame => frame.id === 2).result._meta.providerRuntime
+  }
+  try {
+    process.env.STILL_PROVIDER_RUNTIME = JSON.stringify({ transport: "pi-rpc", executable, version: "0.9.1", versionSource: "executable", versionObservedAt: 1234 })
+    assert.deepEqual(await launch(), { transport: "pi-rpc", executable, version: "0.9.1", versionSource: "executable", versionObservedAt: 1234 })
+    process.env.STILL_PROVIDER_RUNTIME = "{not json"
+    assert.deepEqual(await launch(), { transport: "pi-rpc", executable }, "invalid metadata leaves only launch facts")
+  } finally {
+    if (previous === undefined) delete process.env.STILL_PROVIDER_RUNTIME
+    else process.env.STILL_PROVIDER_RUNTIME = previous
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 for (const provider of ["pi", "codex", "opencode"]) test(`${provider} history uses provider checkpoints and rejects stale or declined boundaries`, async () => {

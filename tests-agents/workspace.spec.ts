@@ -234,6 +234,11 @@ test("small windows retain the composer and keyboard focus", async ({ page }) =>
   await page.getByLabel("Message agent").fill("Draft")
   await page.getByRole("button", { name: "Send message" }).focus()
   await page.keyboard.press("Tab")
+  const details = page.getByRole("button", { name: "Agent details: Supported by this agent" })
+  if (await details.isVisible()) {
+    await expect(details).toBeFocused()
+    await page.keyboard.press("Tab")
+  }
   await expect(page.getByRole("button", { name: "Toggle projects" })).toBeFocused()
 })
 

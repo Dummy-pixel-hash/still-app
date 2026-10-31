@@ -1,0 +1,17 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Still",
+        "width": 1100,
+        "height": 720,
+        "decorations": false,
+        "shadow": false,
+        "transparent": false,
+        "backgroundColor": "#050505",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-color-profile=srgb"
+      }
+    ]
+  }
+}

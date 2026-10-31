@@ -1,5 +1,5 @@
 // One worker owns the list. UI requests, MCP, and Pi all use this same mutation path.
-import { openSync, closeSync, readFileSync, writeFileSync, fsyncSync, renameSync, unlinkSync, fstatSync, constants } from "node:fs"
+import { openSync, closeSync, readSync, writeFileSync, fsyncSync, renameSync, unlinkSync, fstatSync, lstatSync, constants } from "node:fs"
 import { createConnection } from "node:net"
 import { createHash, randomUUID } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
@@ -39,13 +39,79 @@ export function todoStorePath(home, conversationId) {
   return join(home, ".local", "state", "still", "agent-todos", createHash("sha256").update(conversationId).digest("hex"), "todos.json")
 }
 
+function readPrivateTodoJson(file, limit, label) {
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0))
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size > limit) throw new Error(`Unsafe or oversized ${label}.`)
+    // Bound the read too: a file can grow between fstat and read.
+    const bytes = Buffer.alloc(limit + 1)
+    let length = 0, count
+    while (length < bytes.length && (count = readSync(fd, bytes, length, bytes.length - length, null)) > 0) length += count
+    if (length > limit) throw new Error(`Unsafe or oversized ${label}.`)
+    return JSON.parse(bytes.subarray(0, length).toString("utf8"))
+  } finally { closeSync(fd) }
+}
+
+function describeTodoOwner(lockFile) {
+  try {
+    const owner = readPrivateTodoJson(lockFile, 1024, "Todo owner lock")
+    if (typeof owner.executionId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(owner.executionId) && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+      return `Conversation Todos are owned by execution ${owner.executionId} (PID ${owner.pid}). Attach to that execution or perform explicit owner recovery.`
+    }
+  } catch { /* An unreadable or malformed owner is deliberately not reaped. */ }
+  return "Conversation Todo ownership is ambiguous or unsafe. Inspect the existing owner lock; Still will not remove it automatically."
+}
+
+/** Exclusive conversation-level write ownership; stale locks require explicit recovery. */
+export function acquireTodoOwner(directory, executionId, pid = process.pid) {
+  if (typeof directory !== "string" || !directory || typeof executionId !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(executionId) || !Number.isSafeInteger(pid) || pid < 1) {
+    throw new Error("Invalid conversation Todo owner identity.")
+  }
+  const lockFile = join(directory, "owner.lock")
+  let fd
+  let ownStat
+  let ownsFile = false
+  let initialized = false
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    if (!ownsFile) return
+    try { ownStat = ownStat || fstatSync(fd) } catch { /* Leave an ambiguous lock for explicit recovery. */ }
+    try { closeSync(fd) } catch { /* Closing an already closed descriptor is harmless here. */ }
+    if (!ownStat) return
+    try {
+      const current = lstatSync(lockFile)
+      if (!current.isSymbolicLink() && current.isFile() && current.uid === process.getuid?.() && current.dev === ownStat.dev && current.ino === ownStat.ino) {
+        if (!initialized) { unlinkSync(lockFile); return }
+        const owner = readPrivateTodoJson(lockFile, 1024, "Todo owner lock")
+        if (owner.executionId === executionId && owner.pid === pid) unlinkSync(lockFile)
+      }
+    } catch { /* Leave an ambiguous path for explicit recovery. */ }
+  }
+  try {
+    fd = openSync(lockFile, "wx", 0o600)
+    ownsFile = true
+    ownStat = fstatSync(fd)
+    writeFileSync(fd, JSON.stringify({ executionId, pid }))
+    fsyncSync(fd)
+    initialized = true
+  } catch (error) {
+    try { release() } catch { /* Preserve the original startup error. */ }
+    if (error.code === "EEXIST") throw new Error(describeTodoOwner(lockFile))
+    throw error
+  }
+  return { lockFile, release }
+}
+
 export function validateTodoState(value) {
   if (!object(value) || !revisionOf(value.revision) || !Array.isArray(value.items) || value.items.length > maxItems) throw new Error("Invalid saved todo list.")
   const ids = new Set()
   const items = value.items.map(item => {
     if (!object(item) || typeof item.id !== "string" || !idPattern.test(item.id) || ids.has(item.id) || !statuses.includes(item.status) || !actors.includes(item.createdBy) || !actors.includes(item.updatedBy)) throw new Error("Invalid or duplicate saved todo.")
     ids.add(item.id)
-    if (item.detail !== undefined && (typeof item.detail !== "string" || item.detail.length > 500 || /\p{Cc}/u.test(item.detail))) throw new Error("Invalid todo progress detail.")
+    if (item.detail !== undefined && (typeof item.detail !== "string" || [...item.detail].length > 500 || Buffer.byteLength(item.detail) > 2000 || /\p{Cc}/u.test(item.detail))) throw new Error("Invalid todo progress detail.")
     for (const time of ["createdAt", "startedAt", "completedAt", "durationMs"]) if (item[time] !== undefined && !revisionOf(item[time])) throw new Error("Invalid todo timestamp.")
     return { id: item.id, title: titleOf(item.title), status: item.status, createdBy: item.createdBy, updatedBy: item.updatedBy,
       ...(item.createdAt !== undefined ? { createdAt:item.createdAt } : {}), ...(item.startedAt !== undefined ? { startedAt:item.startedAt } : {}),
@@ -59,17 +125,15 @@ export function validateTodoState(value) {
 
 export function createTodoStore(file, seed) {
   let stored
-  let input
+  let missing = false
+  const seedState = seed === undefined ? undefined : validateTodoState(seed)
   try {
-    const fd=openSync(file,constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
-    try {
-      const stat=fstatSync(fd)
-      if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size > 1024 * 1024) throw new Error("Unsafe or oversized todo storage file.")
-      input=readFileSync(fd,"utf8")
-    } finally { closeSync(fd) }
-    stored=JSON.parse(input)
-  } catch (error) { if (error.code !== "ENOENT") throw error; stored = seed || { revision: 0, items: [] } }
+    stored = readPrivateTodoJson(file, 1024 * 1024, "todo storage file")
+  } catch (error) { if (error.code !== "ENOENT") throw error; missing = true; stored = seedState || { revision: 0, items: [] } }
   let state = validateTodoState(stored)
+  if (!missing && seedState && (seedState.revision > state.revision || seedState.revision === state.revision && JSON.stringify(seedState) !== JSON.stringify(state))) {
+    throw new Error("Saved and remote Todo lists conflict. Inspect both before continuing; neither list was overwritten.")
+  }
   let receipts = Array.isArray(stored.receipts) ? stored.receipts.slice(-256).filter(receipt => object(receipt) && typeof receipt.id === "string" && typeof receipt.input === "string") : []
   const snapshot = () => validateTodoState(state)
   const persist = (next, nextReceipts) => {
@@ -90,7 +154,7 @@ export function createTodoStore(file, seed) {
       try { unlinkSync(temporary) } catch (error) { if (error.code !== "ENOENT") throw error }
     }
   }
-  persist(state, receipts)
+  if (missing) persist(state, receipts)
   return {
     snapshot,
     apply(input, actor, requestId) {
@@ -112,12 +176,15 @@ export function createTodoStore(file, seed) {
       }
       if (!revisionOf(input.expectedRevision) || input.expectedRevision !== state.revision) throw new Error("The todo list changed. Refresh it and retry your change.")
       if (state.revision === Number.MAX_SAFE_INTEGER) throw new Error("Todo revision limit reached.")
+      // Build the whole candidate before writing: a failed persistence attempt must
+      // leave the committed list (including the focused task) exactly as it was.
       const items = structuredClone(state.items)
+      let activeId = state.activeId
       if (input.status !== undefined && !statuses.includes(input.status)) throw new Error("Choose a supported todo status.")
       if (input.action === "add") {
         if (items.length >= maxItems) throw new Error("This conversation already has 100 todos.")
         const now=Date.now(), item={ id: randomUUID(), title: titleOf(input.title), status: input.status || "pending", createdBy: actor, updatedBy: actor, createdAt:now }
-        if (item.status === "pending" && !state.activeId) { item.startedAt=now; state={...state,activeId:item.id} }
+        if (item.status === "pending" && !activeId) { item.startedAt=now; activeId=item.id }
         items.push(item)
       } else {
         const index = items.findIndex(item => item.id === input.id)
@@ -126,24 +193,24 @@ export function createTodoStore(file, seed) {
           if (items[index].status !== "pending") throw new Error("Only an unfinished todo can be focused.")
           const now=Date.now()
           items[index]={...items[index],startedAt:items[index].startedAt || now,...(input.detail!==undefined?{detail:titleOf(input.detail)}:{}),updatedBy:actor}
-          state={...state,activeId:items[index].id}
+          activeId=items[index].id
         } else if (input.action === "update") {
           if (input.title === undefined && input.status === undefined) throw new Error("Provide a todo title or status to update.")
           const previous=items[index], now=Date.now()
           items[index] = { ...previous, ...(input.title !== undefined ? { title: titleOf(input.title) } : {}), ...(input.status !== undefined ? { status: input.status } : {}), updatedBy: actor,
             ...(input.status === "completed" && previous.status !== "completed" ? { completedAt:now, ...(previous.startedAt!==undefined?{durationMs:Math.max(0,now-previous.startedAt)}:{}) } : {}),
             ...(input.status === "pending" && previous.status === "completed" ? { startedAt:now, completedAt:undefined, durationMs:undefined } : {}) }
-          if (previous.id === state.activeId && input.status === "completed") {
+          if (previous.id === activeId && input.status === "completed") {
             const next=items.find(item=>item.status==="pending")
-            state={...state,activeId:next?.id}
+            activeId=next?.id
             if(next && next.startedAt===undefined) next.startedAt=now
-          } else if (input.status === "pending" && !state.activeId) {
-            state={...state,activeId:previous.id}
+          } else if (input.status === "pending" && !activeId) {
+            activeId=previous.id
             items[index].startedAt ??= now
           }
         } else if (input.action === "remove") {
           const [removed]=items.splice(index,1)
-          if(removed.id===state.activeId){const next=items.find(item=>item.status==="pending");state={...state,activeId:next?.id};if(next&&next.startedAt===undefined)next.startedAt=Date.now()}
+          if(removed.id===activeId){const next=items.find(item=>item.status==="pending");activeId=next?.id;if(next&&next.startedAt===undefined)next.startedAt=Date.now()}
         }
         else {
           if (input.beforeId !== null && (!items.some(item => item.id === input.beforeId) || input.beforeId === input.id)) throw new Error("Choose another todo as the move destination, or null for the end.")
@@ -151,10 +218,19 @@ export function createTodoStore(file, seed) {
           items.splice(input.beforeId === null ? items.length : items.findIndex(item => item.id === input.beforeId), 0, { ...item, updatedBy: actor })
         }
       }
-      const next = { ...state, revision: state.revision + 1, items }
+      const next = { ...state, revision: state.revision + 1, items, activeId }
       persist(next, [...receipts, { id: requestId, input: fingerprint }].slice(-256))
       return snapshot()
     },
+  }
+}
+
+/** Fixed private bootstrap basename only; never a renderer-provided file path. */
+export function readTodoSeed(directory) {
+  try { return validateTodoState(readPrivateTodoJson(join(directory, "todo-seed.json"), 1024 * 1024, "Todo seed file")) }
+  catch (error) {
+    if (error.code === "ENOENT") throw new Error("The declared Todo seed file is missing")
+    throw error
   }
 }
 
@@ -169,7 +245,7 @@ function lines(stream, onLine, onError) {
   let buffer = ""
   stream.on("data", chunk => {
     buffer += decoder.write(chunk)
-    if (Buffer.byteLength(buffer) > 256 * 1024) { buffer = ""; onError(new Error("Todo protocol frame is too large.")); return }
+    if (Buffer.byteLength(buffer) > 1024 * 1024) { buffer = ""; onError(new Error("Todo protocol frame is too large.")); return }
     let end
     while ((end = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)

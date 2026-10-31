@@ -1,45 +1,81 @@
 import {
   memo,
-  useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   type PointerEvent as ReactPointerEvent,
 } from "react"
+import "@xterm/xterm/css/xterm.css"
 import { type ConnState, type Session } from "../types"
 import {
   frozenPreview,
   openPreview,
   snapshotPreviewLines,
   snapshotPreviewScreen,
+  TERMINAL_LINE_HEIGHT,
   useTranscriptVersion,
+  type FrozenScreen,
 } from "../session/connections"
 
 export type CardConn = ConnState | "never"
 
-/** Height of the miniature screen viewport; the terminal grid is scaled
- *  to fit inside this box (width comes from the card layout). */
-const PREVIEW_VIEWPORT_HEIGHT = 104
-// The fit is measured for a card at its max grid width; a slightly smaller
-// scale keeps the clamped geometry (e.g. 120 cols) inside the viewport.
-const PREVIEW_FIT_MARGIN = 0.98
-
-/** Scale the emulator's screen DOM to fit the card viewport. Reads layout
- *  (offsetWidth/Height), so callers batch it into a frame, not a render. */
+/** Fit the rendered screen to this card, without changing its terminal grid. */
 function fitPreview(host: HTMLElement) {
-  const screen = host.querySelector<HTMLElement>(".xterm-screen")
+  const screen = host.querySelector<HTMLElement>(".xterm-screen, [data-frozen-screen]")
   if (!screen) return
   const sw = screen.offsetWidth
   const sh = screen.offsetHeight
-  if (sw <= 0 || sh <= 0) return
-  // The card grid clips overflow, so fit against the widest column the
-  // layout allows (previews never exceed the real cols, so the clamp and
-  // the fit stay consistent).
-  const grid = host.closest("[data-card-grid]") as HTMLElement | null
-  const fitW = grid?.clientWidth ?? host.clientWidth
-  screen.style.transform = `scale(${Math.max(
-    0.05,
-    Math.min(PREVIEW_VIEWPORT_HEIGHT / sh, fitW / sw) * PREVIEW_FIT_MARGIN,
-  )})`
+  const width = host.clientWidth
+  const height = host.clientHeight
+  if (sw <= 0 || sh <= 0 || width <= 0 || height <= 0) return
+  const scale = Math.min(1, width / sw, height / sh)
+  screen.style.transform = `scale(${scale})`
+  screen.style.left = `${(width - sw * scale) / 2}px`
+  screen.style.top = `${(height - sh * scale) / 2}px`
+}
+
+/** Live and saved screens use the same fit, including after a DOM replacement. */
+function usePreviewFit(prepare?: (host: HTMLElement) => void) {
+  const hostRef = useRef<HTMLDivElement>(null)
+  const observerRef = useRef<ResizeObserver | null>(null)
+  const screenRef = useRef<HTMLElement | null>(null)
+
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => fitPreview(host))
+    observerRef.current = observer
+    observer?.observe(host)
+    let cancelled = false
+    const fit = () => {
+      if (!cancelled) fitPreview(host)
+    }
+    void document.fonts.ready.then(fit)
+    document.fonts.addEventListener("loadingdone", fit)
+    return () => {
+      cancelled = true
+      observer?.disconnect()
+      observerRef.current = null
+      screenRef.current = null
+      document.fonts.removeEventListener("loadingdone", fit)
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    prepare?.(host)
+    const screen = host.querySelector<HTMLElement>(".xterm-screen, [data-frozen-screen]")
+    if (screen !== screenRef.current) {
+      if (screenRef.current) observerRef.current?.unobserve(screenRef.current)
+      if (screen) observerRef.current?.observe(screen)
+      screenRef.current = screen
+    }
+    fitPreview(host)
+  })
+  return hostRef
 }
 const statusMeta: Record<CardConn,
   { label: string; dot: string; pulse: boolean }
@@ -102,12 +138,12 @@ function usePreview(
     if (screen !== null) return { kind: "screen", lines: screen }
 
     // If xterm is unavailable, retain a safe plain-text fallback rather than
-    // exposing raw escape sequences. Snapshot() returns null mid-rebuild, so
-    // the frozen copy would be the PREVIOUS session's last screen — only
+    // exposing raw escape sequences. Without a current screen, the frozen
+    // copy could be the PREVIOUS connection's last screen — only
     // prefer it once the session is actually detached. While connected, the
     // live tail is the honest thing to show.
-    const frozen = frozenPreview(sessionId)
-    if (frozen && frozen.lines.length > 0)
+    const frozen = live ? null : frozenPreview(sessionId)
+    if (frozen)
       return {
         kind: "frozen",
         lines: frozen.lines,
@@ -136,55 +172,36 @@ function LiveScreen({
   sessionId: string
   fontSize: number
 }) {
-  const hostRef = useRef<HTMLDivElement>(null)
-  // Re-run when parsed frames land: terminal rebuilds (geometry change, ring
-  // wrap) create a NEW instance, and xterm open() is a no-op on an
-  // already-opened instance — so a stale host keeps the dead DOM without this.
-  const version = useTranscriptVersion(sessionId)
-
-  // Mount-level: open/re-home the emulator DOM and observe the hosts that
-  // decide the fit. Rebuilding this per output frame would disconnect and
-  // re-observe three elements, then force a layout read, on every parsed
-  // burst — once per card.
-  useEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-    const grid = host.closest("[data-card-grid]") as HTMLElement | null
-    openPreview(sessionId, host, fontSize)
-    const ro =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(() => fitPreview(host))
-    if (ro) {
-      ro.observe(host)
-      if (grid) ro.observe(grid)
-      // Re-fit when the grid itself relayouts (webfont metrics landing, a
-      // replayed frame changing the row set). scale() changes no layout
-      // box, so this cannot feed back into itself.
-      const screen = host.querySelector<HTMLElement>(".xterm-screen")
-      if (screen) ro.observe(screen)
-    }
-    fitPreview(host)
-    return () => ro?.disconnect()
-  }, [sessionId, fontSize])
-
-  // Per-frame: a rebuild (geometry change, ring wrap) creates a NEW terminal
-  // instance, and xterm open() is a no-op on an already-opened one — so the
-  // host must be re-homed and the fit recomputed. The observer is NOT rebuilt
-  // here: it already watches the host and grid, so this is one layout read
-  // per parsed frame instead of tearing down and re-observing three elements.
-  useEffect(() => {
-    const host = hostRef.current
-    if (!host) return
-    openPreview(sessionId, host, fontSize)
-    fitPreview(host)
-  }, [sessionId, fontSize, version])
+  useTranscriptVersion(sessionId)
+  const hostRef = usePreviewFit((host) => openPreview(sessionId, host, fontSize))
   return (
     <div
       ref={hostRef}
       aria-hidden
       className="card-term pointer-events-none overflow-hidden select-none"
     />
+  )
+}
+
+function SavedScreen({ screen, fontSize }: { screen: FrozenScreen; fontSize: number }) {
+  const hostRef = usePreviewFit()
+  return (
+    <div ref={hostRef} className="card-term pointer-events-none overflow-hidden select-none" aria-hidden>
+      <div
+        data-frozen-screen
+        data-cols={screen.cols}
+        data-rows={screen.rows}
+        className="card-mini card-frozen-screen text-[#b0aab8]"
+        style={{
+          width: `${screen.cols}ch`,
+          height: `${screen.rows * TERMINAL_LINE_HEIGHT}em`,
+          fontSize,
+          lineHeight: TERMINAL_LINE_HEIGHT,
+        }}
+      >
+        {screen.lines.map((line, i) => <div key={i}>{line || "\u00a0"}</div>)}
+      </div>
+    </div>
   )
 }
 
@@ -417,9 +434,9 @@ function CardPreview({
   // placeholder when nothing ever rendered.
   const preview = usePreview(session.id, fontSize, live)
   return (
-    <div className="relative mt-4 flex-1 overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
+    <div className="relative mt-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
-      <div className="flex items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
         <span className="h-[7px] w-[7px] rounded-full bg-[#ff5f57]/80" />
         <span className="h-[7px] w-[7px] rounded-full bg-[#febc2e]/70" />
         <span className="h-[7px] w-[7px] rounded-full bg-[#28c840]/70" />
@@ -433,25 +450,11 @@ function CardPreview({
           </span>
         ) : null}
       </div>
-      <div
-        className="card-preview-body relative flex items-center justify-center overflow-hidden px-2"
-        style={{ height: PREVIEW_VIEWPORT_HEIGHT }}
-      >
+      <div className="card-preview-body relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
         {preview.kind === "screen" ? (
           <LiveScreen sessionId={session.id} fontSize={fontSize} />
         ) : preview.kind === "frozen" ? (
-          <div
-            className="card-mini text-[#b0aab8]"
-            data-cols={preview.cols}
-            data-rows={preview.rows}
-            aria-hidden
-          >
-            {preview.lines.map((line, i) => (
-              <div key={i} className="truncate whitespace-pre">
-                {line}
-              </div>
-            ))}
-          </div>
+          <SavedScreen screen={preview} fontSize={fontSize} />
         ) : preview.kind === "lines" ? (
           <div className="card-mini text-[#b0aab8]" aria-hidden>
             {preview.lines.map((line, i) => (

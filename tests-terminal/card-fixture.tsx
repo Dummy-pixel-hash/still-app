@@ -1,7 +1,7 @@
 // Preview-card fixture: renders the REAL SessionCard inside the workspace's
 // grid container so the miniature-screen fit can be verified end-to-end in a
 // browser (geometry, transform, remount re-homing, frozen snapshot).
-import React, { useState } from "react"
+import React from "react"
 import { createRoot } from "react-dom/client"
 import { Terminal } from "@xterm/xterm"
 import "../src/styles/theme.css"
@@ -9,8 +9,8 @@ import SessionCard from "../src/components/SessionCard"
 import { mockBridge } from "../src/bridge/mockBridge"
 import { registerNativeBridge, type NativeSessionEvent } from "../src/bridge/nativeBridge"
 import {
-  __testPersistFrozenNow,
   connectSession,
+  connectionState,
   disconnectSession,
   frozenPreview,
   noteSurfaceDims,
@@ -18,6 +18,7 @@ import {
   previewDimsFor,
   snapshotPreviewScreen,
   subscribeSessionData,
+  useConnections,
 } from "../src/session/connections"
 import type { Session } from "../src/types"
 
@@ -25,6 +26,8 @@ let sink: ((event: NativeSessionEvent) => void) | undefined
 let generation = 0
 let root: ReturnType<typeof createRoot>
 let remounts = 0
+let fontSize = 14
+let visible = true
 // ?no-boot=1 skips the startup emit and skips connecting: the card then shows
 // only what persisted (the frozen snapshot), exactly like a real reload.
 const NO_BOOT = new URLSearchParams(location.search).has("no-boot")
@@ -105,17 +108,30 @@ const h = {
   emit: (text: string) =>
     sink?.({ type: "data", data: Array.from(new TextEncoder().encode(text)) }),
   disconnect: () => disconnectSession(session.id),
+  connect: () => connectSession({
+    localId: session.id,
+    host: session.host,
+    port: session.port,
+    username: session.username,
+    authKind: "password",
+    tmuxSession: session.tmuxSession,
+  }),
+  status: (status: "disconnected" | "error") => sink?.({ type: "status", status }),
   dims: () => previewDimsFor(session.id),
   surface: (cols: number, rows: number) => noteSurfaceDims(session.id, cols, rows),
-  font: (px: number) => noteSurfaceFontSize(px),
+  font: (px: number) => {
+    fontSize = px
+    noteSurfaceFontSize(px)
+    renderFixture()
+  },
   /** Parsed frozen snapshot (same reader the card uses after a reload). */
   frozen: () => frozenPreview(session.id),
-  /** Persist the CURRENT screen now, past the production throttle (tests). */
-  freezeNow: () => __testPersistFrozenNow(session.id),
   stats: () => {
     const host = document.querySelector<HTMLElement>("[data-preview-host] .card-term")
-    const screen = host?.querySelector<HTMLElement>(".xterm-screen")
+    const screen = host?.querySelector<HTMLElement>(".xterm-screen, [data-frozen-screen]")
     const rows = host?.querySelector<HTMLElement>(".xterm-rows")
+    const hostRect = host?.getBoundingClientRect()
+    const screenRect = screen?.getBoundingClientRect()
     return {
       hasHost: !!host,
       hasScreen: !!screen,
@@ -124,52 +140,41 @@ const h = {
       screenH: screen?.offsetHeight ?? 0,
       hostW: host?.clientWidth ?? 0,
       hostH: host?.clientHeight ?? 0,
-      cardText: rows?.textContent ?? "",
-      snapshotText: (snapshotPreviewScreen(session.id, 14) ?? []).join("\n"),
+      withinHost: !!hostRect && !!screenRect &&
+        screenRect.left >= hostRect.left - 1 && screenRect.top >= hostRect.top - 1 &&
+        screenRect.right <= hostRect.right + 1 && screenRect.bottom <= hostRect.bottom + 1,
+      cardText: rows?.textContent ?? screen?.textContent ?? "",
+      snapshotText: (snapshotPreviewScreen(session.id, fontSize) ?? []).join("\n"),
       referenceText: referenceText(),
       cols: previewDimsFor(session.id).cols,
       rows: previewDimsFor(session.id).rows,
     }
   },
   remount: () => {
-    root.render(<Fixture key={++remounts} />)
+    remounts += 1
+    renderFixture()
+  },
+  show: (show: boolean) => {
+    visible = show
+    renderFixture()
+  },
+  layout: (columns: number, width: number) => {
+    document.querySelector<HTMLElement>("[data-card-grid]")!.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`
+    document.querySelector<HTMLElement>("[data-fixture]")!.style.width = `${width}px`
   },
 }
 
 function Fixture() {
-  const [conn, setConn] = useState<"never" | "connected">("never")
-  React.useEffect(() => {
-    let alive = true
-    void connectSession({
-      localId: session.id,
-      host: session.host,
-      port: session.port,
-      username: session.username,
-      authKind: "password",
-      tmuxSession: session.tmuxSession,
-    }).then(() => {
-      if (alive) setConn("connected")
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
-  React.useEffect(() => {
-    if (conn !== "connected") return
-    // Boot bytes so the live screen mounts before tests assert on it. Gated
-    // off for frozen-reload checks (a reconnect would otherwise repopulate
-    // the transcript and mask the persisted snapshot).
-    if (!NO_BOOT) h.emit("boot\r\n")
-  }, [conn])
+  useConnections()
   return (
-    <div style={{ width: 340, padding: 8 }}>
-      <div data-card-grid style={{ display: "grid", gridTemplateColumns: "1fr" }}>
-        <div data-preview-host>
+    <div data-fixture style={{ width: 340, padding: 8 }}>
+      <div data-card-grid style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+        {visible ? <div data-preview-host>
           <SessionCard
             session={session}
-            conn={conn}
+            conn={connectionState(session.id)}
             index={0}
-            fontSize={14}
+            fontSize={fontSize}
             dragging={false}
             dropHighlight={false}
             menuOpen={false}
@@ -179,13 +184,35 @@ function Fixture() {
             onToggleMenu={() => {}}
             onCardPointerDown={() => {}}
           />
-        </div>
+        </div> : null}
+        {[1, 2].map((i) => (
+          <SessionCard
+            key={i}
+            session={{ ...session, id: `idle-${i}`, name: `Idle ${i}` }}
+            conn="never"
+            index={0}
+            fontSize={fontSize}
+            dragging={false}
+            dropHighlight={false}
+            menuOpen={false}
+            onOpen={() => {}}
+            onEdit={() => {}}
+            onRemove={() => {}}
+            onToggleMenu={() => {}}
+            onCardPointerDown={() => {}}
+          />
+        ))}
       </div>
     </div>
   )
 }
 
+function renderFixture() {
+  root.render(<Fixture key={remounts} />)
+}
+
 root = createRoot(document.getElementById("root")!)
 initReference()
-root.render(<Fixture />)
+renderFixture()
 Object.assign(window, { harness: h })
+if (!NO_BOOT) void h.connect().then(() => h.emit("boot\r\n"))

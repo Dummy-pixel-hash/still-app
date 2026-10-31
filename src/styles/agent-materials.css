@@ -543,9 +543,9 @@
 .agent-workspace .agent-toast > button:not(.agent-icon-button) { color: #ecd3e2; }
 .agent-workspace .agent-confirm-backdrop { background: rgba(0, 0, 0, .68); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 
-/* On Windows WebView2, backdrop-filter can be present in computed style but
-   fail to sample the canvas layer behind the app's glass. Native mode uses one
-   bounded, shared Aurora texture; browser preview keeps real CSS backdrop blur. */
+/* Packaged Linux/Windows WebViews don't consistently blur the canvas layer
+   behind glass. Native mode uses one bounded, shared Aurora texture; normal
+   browser previews keep engine-provided backdrop-filter. */
 .agent-workspace[data-frost-rendered="true"] [data-agent-frost]:not(.agent-composer),
 .agent-workspace[data-frost-rendered="true"] .agent-composer[data-agent-frost]::before,
 .agent-workspace[data-frost-rendered="true"] .agent-chat.is-launch.has-recents .agent-recents {

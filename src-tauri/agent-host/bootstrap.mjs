@@ -1,7 +1,7 @@
 // Keep the SSH exec command short: Linux limits each argument to 128 KiB.
 // Configuration (including bundled worker sources) arrives as the first stdin line.
 import { spawn } from "node:child_process"
-import { mkdirSync, chmodSync, lstatSync, writeFileSync } from "node:fs"
+import { mkdirSync, chmodSync, lstatSync, openSync, closeSync, fsyncSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 const READY = "STILL_BOOTSTRAP_READY"
@@ -46,6 +46,16 @@ try {
   const stat = lstatSync(directory)
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid()) throw new Error("Unsafe remote agent directory")
   chmodSync(directory, 0o700)
+  if (config.todoSeed !== undefined) {
+    if (!config.create) throw new Error("Todo seed is only valid for a new execution")
+    const bytes = Buffer.from(JSON.stringify(config.todoSeed))
+    if (bytes.length > 1024 * 1024) throw new Error("Todo seed is too large for private bootstrap storage")
+    const fd = openSync(join(directory, "todo-seed.json"), "wx", 0o600)
+    try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
+  }
+  const hasTodoSeed = config.todoSeed !== undefined
+  delete config.todoSeed
+  config.hasTodoSeed = hasTodoSeed
   if (config.create) {
     for (const [name, source] of [["transport.mjs", config.source], ["todos.mjs", config.todosSource], ["todo-pi.mjs", config.todoPiSource]]) {
       if (typeof source !== "string") throw new Error(`Missing remote source: ${name}`)

@@ -48,6 +48,7 @@ function makeDust(count: number): Dust {
 /** Bounded 2D rendering: a tiny cached gas pass, plus four batched dust fills. */
 export function createAuroraRenderer(canvas: HTMLCanvasElement, options: { maxParticles?: number } = {}) {
   const maxParticles = Math.min(MAX_PARTICLES, Math.max(1, options.maxParticles ?? MAX_PARTICLES))
+  const gasFps = options.maxParticles ? 8 : 15
   const context = canvas.getContext("2d")
   if (!context) return null
   const gas = document.createElement("canvas")
@@ -111,8 +112,8 @@ export function createAuroraRenderer(canvas: HTMLCanvasElement, options: { maxPa
     draw(time: number) {
       if (!width || !height) return
       context.clearRect(0, 0, width, height)
-      // Gas is low-frequency: refresh at 15fps, not at device resolution or 60fps.
-      if (time - lastGasTime >= 1 / 15 || time < lastGasTime) drawGas(time)
+      // Gas is low-frequency; native builds refresh less often to reduce CPU.
+      if (time - lastGasTime >= 1 / gasFps || time < lastGasTime) drawGas(time)
       context.drawImage(gas, 0, 0, width, height)
       for (let group = 0; group < dust.groups.length; group++) {
         context.beginPath()

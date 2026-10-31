@@ -33,6 +33,7 @@ export type AgentEventType =
   | "agentRequest"
   | "requestOutcome"
   | "todos"
+  | "capabilities"
 
 export interface AgentHistoryCapabilities { revert: boolean; retry: boolean }
 export type AgentTodoStatus = "pending" | "completed"
@@ -49,6 +50,36 @@ export interface AgentTodoItem {
   detail?: string
 }
 export interface AgentTodoSnapshot { protocolVersion: number; revision: number; items: AgentTodoItem[]; activeId?: string; toolAvailable: boolean; available: boolean }
+/** Observation of the shared list; never an agent turn or execution status. */
+export interface AgentTodoSync { state: "current" | "stale" | "conflict" | "unavailable"; reason?: string }
+
+/** Provider protocol the worker actually speaks; never inferred from the display name. */
+export type AgentProviderTransport = "http-v2+sse" | "codex-app-server" | "claude-stream-json" | "pi-rpc" | "acp-v1"
+export interface AgentProviderRuntime {
+  transport: AgentProviderTransport
+  executable?: string
+  version?: string
+  versionSource?: "runtime" | "executable"
+  versionObservedAt?: number
+}
+/** `unsupported` describes the integration, not the provider's general ability. */
+export type AgentCapabilityKey = "sharedTodos" | "providerPlans" | "providerTaskProjection" | "clientTodoWrite"
+export type AgentFeatureStatus = "supported" | "unsupported" | "unverified"
+/** `advertised` proves a connected route; only `observed` reflects an acknowledged operation. */
+export type AgentFeatureEvidence = "adapter" | "advertised" | "observed"
+export interface AgentFeatureSupport { status: AgentFeatureStatus; reason: string; evidence?: AgentFeatureEvidence }
+/** Worker wire reports omit `freshness`; only the native observer may call an observation current. */
+export interface AgentCapabilityReport {
+  schemaVersion: 1
+  executionId: string
+  agentSessionId: string
+  cwd: string
+  configGeneration: number
+  observedAt: number
+  providerRuntime: AgentProviderRuntime
+  features: Record<AgentCapabilityKey, AgentFeatureSupport>
+  freshness: "current" | "stale"
+}
 
 export interface AgentPermissionOption {
   optionId: string
@@ -122,6 +153,8 @@ export interface AgentThreadEvent {
   request?: AgentRequestSummary
   requestOutcome?: AgentRequestOutcome
   todos?: AgentTodoSnapshot
+  todoSync?: AgentTodoSync
+  capabilities?: AgentCapabilityReport
   remoteCursor?: number
   turnActive?: boolean
 }
@@ -153,7 +186,7 @@ export type AgentToolContent =
   | { type: "diff"; path: string; oldText?: string | null; newText: string }
   | { type: "patch"; path: string; patch: string }
 export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string }
-export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string }
+export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string; providerRuntime?: AgentProviderRuntime; checkedAt?: number }
 
 export interface AgentThreadSnapshot {
   conversationId?: string
@@ -181,6 +214,8 @@ export interface AgentThreadSnapshot {
   remoteCursor?: number
   promptId?: string | number
   todos?: AgentTodoSnapshot
+  todoSync?: AgentTodoSync
+  capabilities?: AgentCapabilityReport
 }
 
 export interface AgentLibrary {

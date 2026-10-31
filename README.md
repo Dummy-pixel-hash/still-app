@@ -79,6 +79,8 @@ changed host keys are refused, never silently overwritten.
 
 Windows ARM64 → [latest Release](https://github.com/Dummy-pixel-hash/still-app/releases/latest)
 
+Linux x64 / ARM64 → use the matching `.AppImage` or `.deb` package from the [Linux workflow artifacts](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/linux.yml). Launch the AppImage with `chmod +x Still_*.AppImage && ./Still_*.AppImage`; the standalone `still-app` ELF in the build artifact is for architecture verification, not the normal packaged launch path.
+
 ## Quick start
 
 1. Open Still and choose **New session** (or pick a preset to skip a few steps).

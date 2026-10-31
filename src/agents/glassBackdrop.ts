@@ -41,10 +41,10 @@ export function blurOpaquePixels(data: Uint8ClampedArray, width: number, height:
 /** One small blurred scene texture shared by every native glass pane. It samples
  * the real particle canvas, not a decorative gradient or a second simulation. */
 export function createGlassBackdrop(source: HTMLCanvasElement) {
-  // CSS backdrop-filter works in browser preview and other native webviews.
-  // Limit this extra work to Tauri on Windows, where WebView2's compositor
-  // fails to blur the canvas layer in our packaged app.
-  if (!navigator.userAgent.includes("Windows")) return null
+  // Browser previews use the engine's native CSS backdrop-filter. In Tauri
+  // apps, use this shared canvas fallback: WebView2 can report blur support
+  // without actually blurring its backing layer, and Linux WebKitGTK may not
+  // composite CSS backdrop-filter reliably in app windows either.
   const root = source.closest<HTMLElement>('.agent-workspace[data-native-shell="true"]')
   if (!root) return null
   const buffer = document.createElement("canvas")
@@ -55,7 +55,7 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   const canvasFilter = Reflect.get(context, "filter") !== undefined
   let scratch = new Uint8ClampedArray(0), disposed = false, busy = false, dirty = false
   let frame = 0, resizeTimer = 0, revision = 0, lastDraw = -Infinity, currentUrl = ""
-  const maxFps = 3
+  const maxFps = 1
   const minFrameInterval = 1000 / maxFps
   const urls = new Set<string>(), panes = new Set<HTMLElement>()
 
@@ -70,6 +70,7 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
     }
   }
 
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)")
   const draw = (force = false) => {
     if (disposed || document.hidden) return
     if (busy) { dirty ||= force; return }
@@ -88,11 +89,12 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
     if (!bounds.width || !bounds.height || !source.width || !source.height) return
     lastDraw = now; busy = true
     // Bound the shared blur surface to ~0.05 megapixels even on high-DPI
-    // displays. One downsampled texture serves every pane; a 3fps cap and
+    // displays. One downsampled texture serves every pane; a 1fps cap and
     // this pixel budget bound blur, PNG encoding, and image decode work.
     const scale = Math.min(.2, Math.sqrt(48_000 / (bounds.width * bounds.height)))
     // Floor instead of ceil so rounding cannot push the texture past budget.
-    const width = Math.max(1, Math.floor(bounds.width * scale)), height = Math.max(1, Math.floor(bounds.height * scale))
+    const width = Math.max(1, Math.floor(bounds.width * scale))
+    const height = Math.max(1, Math.min(Math.floor(bounds.height * scale), Math.floor(48_000 / width)))
     if (buffer.width !== width || buffer.height !== height) { buffer.width = width; buffer.height = height }
     source.dataset.frostPixels = String(width * height)
     if (!canvasFilter && scratch.length !== width * height * 4) scratch = new Uint8ClampedArray(width * height * 4)
@@ -133,7 +135,7 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   }
 
   const requestDraw = () => {
-    if (disposed || document.hidden || frame || resizeTimer) return
+    if (disposed || document.hidden || reduceMotion.matches || frame || resizeTimer) return
     frame = requestAnimationFrame(() => {
       frame = 0
       draw(true)
@@ -153,8 +155,15 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
   resize.observe(root)
   discover()
   root.addEventListener("scroll", position, true)
-  const visibility = () => { if (document.hidden) { cancelAnimationFrame(frame); frame = 0; window.clearTimeout(resizeTimer); resizeTimer = 0 } else requestDraw() }
+  // A source canvas can explicitly request a one-off snapshot even when motion
+  // is reduced (e.g. after static content or a diagnostic redraw).
+  const sourceFrame = () => draw(true)
+  source.addEventListener("still:backdrop-frame", sourceFrame)
+  const stopPendingDraw = () => { cancelAnimationFrame(frame); frame = 0; window.clearTimeout(resizeTimer); resizeTimer = 0 }
+  const visibility = () => { if (document.hidden) stopPendingDraw(); else requestDraw() }
+  const motionChange = () => { if (reduceMotion.matches) stopPendingDraw(); else requestDraw() }
   document.addEventListener("visibilitychange", visibility)
+  reduceMotion.addEventListener("change", motionChange)
 
   return {
     draw,
@@ -162,7 +171,9 @@ export function createGlassBackdrop(source: HTMLCanvasElement) {
       disposed = true; cancelAnimationFrame(frame); window.clearTimeout(resizeTimer)
       mutations.disconnect(); resize.disconnect()
       root.removeEventListener("scroll", position, true)
+      source.removeEventListener("still:backdrop-frame", sourceFrame)
       document.removeEventListener("visibilitychange", visibility)
+      reduceMotion.removeEventListener("change", motionChange)
       delete root.dataset.frostRendered
       delete source.dataset.frostManaged
       delete source.dataset.frostFrame

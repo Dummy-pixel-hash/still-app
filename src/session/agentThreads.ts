@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from "react"
 import { nativeBridge, type Unsubscribe } from "../bridge/nativeBridge"
-import type { AgentCatalog, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentCapabilityReport, AgentCatalog, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import { hostKey, normalizeFolder, type ConversationMeta } from "../agents/workspace"
+import { reconcileTodos, restoreTodos, todoStaleReason } from "../agents/todos"
 import type { Session } from "../types"
 import { discardAgentSave, flushAgentSaves, initializeAgentStorage, scheduleAgentSave, useAgentStorage } from "./agentStorage"
 
@@ -15,11 +16,41 @@ const tombstones = new Set<string>()
 const historyOperations = new Set<string>()
 const requestOperations = new Set<string>()
 const unconfirmedRequests = new Set<string>()
+const todoRefreshRevisions = new Map<string, number>()
 const INDEX_KEY = "still.agents.index.v2"
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
   const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
   if (!row.meta || typeof row.meta !== "object") return defaults
   return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title: typeof row.meta.title === "string" ? row.meta.title : "", folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "" }
+}
+function withoutObservationEvents(events: AgentThreadEvent[]) { return events.filter(event => event.type !== "capabilities" && event.type !== "todos") }
+function invalidateObservations(row: AgentThreadRow) {
+  if (row.capabilities?.freshness === "current") row.capabilities = { ...row.capabilities, freshness: "stale" }
+  if (row.todos && (!row.todoSync || row.todoSync.state === "current")) row.todoSync = { state: "stale", reason: todoStaleReason }
+}
+function scheduleTodoReconciliation(id: string, revision?: number) {
+  if (revision === undefined) return
+  if ((todoRefreshRevisions.get(id) ?? -1) >= revision) return
+  // Accepted revisions never decrease, so a watermark is enough to deduplicate
+  // the lifetime of this execution without retaining every revision forever.
+  todoRefreshRevisions.set(id, revision)
+  void refreshAgentThread(id).catch(() => { /* Keep the readable conflict; no automatic retry loop. */ })
+}
+function matchesCapabilityScope(row: Pick<AgentThreadSnapshot, "executionId" | "agentSessionId" | "cwd">, report?: AgentCapabilityReport): report is AgentCapabilityReport {
+  return !!report && report.schemaVersion === 1 && report.executionId === row.executionId && report.agentSessionId === row.agentSessionId
+    && report.cwd === row.cwd && Number.isSafeInteger(report.configGeneration) && report.configGeneration >= 0
+    && (report.freshness === "current" || report.freshness === "stale")
+}
+function mergeCapabilities(scope: AgentThreadSnapshot, previous?: AgentCapabilityReport, incoming?: AgentCapabilityReport, staleIfMissing = false) {
+  const old = matchesCapabilityScope(scope, previous) ? previous : undefined
+  if (!incoming) return old && staleIfMissing ? { ...old, freshness: "stale" as const } : old
+  if (!matchesCapabilityScope(scope, incoming)) return old
+  if (old && incoming.configGeneration < old.configGeneration) return old
+  return incoming
+}
+function restoredCapabilities(row: AgentThreadSnapshot) {
+  const report = mergeCapabilities(row, undefined, row.capabilities)
+  return report ? { ...report, freshness: "stale" as const } : undefined
 }
 let version = 0
 const emit = () => { version++; for (const listener of listeners) listener() }
@@ -50,10 +81,12 @@ export function loadAgentThreads() {
       const row = value as AgentThreadRow & { previousEventCount?: number }
       if (!row || typeof row.executionId !== "string" || typeof row.localSessionId !== "string" || !Array.isArray(row.transcript)) continue
       if (tombstones.has(row.executionId) || rows.has(row.executionId)) continue
-      const firstCurrent = row.transcript.findIndex(event => event.attemptId === row.executionId)
-      const previousCount = firstCurrent > 0 ? firstCurrent : row.previousEventCount || (firstCurrent < 0 && row.transcript.some(event => event.attemptId) ? row.transcript.length : 0)
+      const transcript = withoutObservationEvents(row.transcript)
+      const firstCurrent = transcript.findIndex(event => event.attemptId === row.executionId)
+      const previousCount = firstCurrent > 0 ? firstCurrent : row.previousEventCount ? withoutObservationEvents(row.transcript.slice(0, row.previousEventCount)).length : firstCurrent < 0 && transcript.some(event => event.attemptId) ? transcript.length : 0
       rows.set(row.executionId, { ...row, meta: metadata(row), configOptions: Array.isArray(row.configOptions) ? row.configOptions : [],
-        previousTranscript: previousCount ? row.transcript.slice(0, previousCount) : undefined,
+        ...restoreTodos(row.todos, row.todoSync), capabilities: restoredCapabilities(row), transcript,
+        previousTranscript: previousCount ? transcript.slice(0, previousCount) : undefined,
         state: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? "submissionUnknown" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? row.lastError || "The last operation was not confirmed. Inspect the provider session before continuing." : undefined })
       if (!library.liveExecutions?.includes(row.executionId)) restored.add(row.executionId)
     }
@@ -68,6 +101,25 @@ export function loadAgentThreads() {
 }
 function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (!Number.isSafeInteger(event.sequence) || event.sequence <= row.lastSequence) return
+  if (event.attemptId && event.attemptId !== row.executionId) return
+  if (event.type === "todos") {
+    row.lastSequence = event.sequence
+    if (event.remoteCursor !== undefined) row.remoteCursor = Math.max(row.remoteCursor || 0, event.remoteCursor)
+    const merged = reconcileTodos(row.todos, row.todoSync, event.todos, event.todoSync, { stale: ["saved", "detached", "connecting"].includes(row.state) })
+    if (JSON.stringify([row.todos, row.todoSync]) !== JSON.stringify([merged.todos, merged.todoSync])) {
+      row.todos = merged.todos; row.todoSync = merged.todoSync; emit()
+    }
+    if (merged.refresh) scheduleTodoReconciliation(row.executionId, row.todos?.revision)
+    return
+  }
+  if (event.type === "capabilities") {
+    if (event.attemptId && event.attemptId !== row.executionId) return
+    row.lastSequence = event.sequence
+    if (event.remoteCursor !== undefined) row.remoteCursor = event.remoteCursor
+    const capabilities = mergeCapabilities(row, row.capabilities, event.capabilities)
+    if (capabilities && capabilities !== row.capabilities) { row.capabilities = capabilities; emit() }
+    return
+  }
   row.lastSequence = event.sequence
   if (event.remoteCursor !== undefined) row.remoteCursor = event.remoteCursor
   if (event.turnActive !== undefined) row.turnActive = event.turnActive
@@ -75,6 +127,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "" } }
   if (event.type === "threadState" && event.state) {
     row.state = event.state
+    if (["saved", "detached", "connecting"].includes(event.state)) invalidateObservations(row)
     if (event.state === "detached") row.lastError = event.text || "The agent continues on the server. Reconnecting to catch up."
     else if (event.state === "working" || event.state === "connecting") row.lastError = undefined
     if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined }
@@ -89,7 +142,6 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "threadStopped") { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = true; row.state = "working"; row.lastError = event.text || "Waiting for remote cancellation confirmation." }
   if (event.type === "configOptions" && event.configOptions) row.configOptions = event.configOptions
   if (event.type === "historyCapabilities" && event.historyCapabilities) row.historyCapabilities = event.historyCapabilities
-  if (event.type === "todos" && event.todos) row.todos = event.todos
   if (event.type === "messageCheckpoint") row.transcript = row.transcript.map(message => message.type === "userMessage" && message.messageId === event.messageId ? { ...message, checkpoint: event.checkpoint } : message)
   if (event.type === "historyReverted") {
     row.transcript = revertHistory(row.transcript, event.messageId)
@@ -98,6 +150,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   }
   if (event.type === "commands" && event.commands) row.commands = event.commands
   if (event.type === "threadError") {
+    invalidateObservations(row)
     row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false
     row.state = row.meta.submissionUnknown ? "submissionUnknown" : event.state || "error"; row.lastError = event.text || "Remote agent error."
     if (row.state === "submissionUnknown") row.meta = { ...row.meta, submissionUnknown: true }
@@ -118,6 +171,7 @@ function revertHistory(events: AgentThreadEvent[], messageId?: string) {
 function reconcileHistory(events: AgentThreadEvent[]) {
   let result: AgentThreadEvent[] = []
   for (const event of events) {
+    if (event.type === "capabilities" || event.type === "todos") continue
     if (event.type === "historyReverted") result = revertHistory(result, event.messageId)
     if (event.type === "messageCheckpoint") result = result.map(message => message.type === "userMessage" && message.messageId === event.messageId ? { ...message, checkpoint: event.checkpoint } : message)
     result.push(event)
@@ -137,18 +191,25 @@ let renderFrame = 0
 function scheduleRender() { if (!renderFrame) renderFrame = requestAnimationFrame(() => { renderFrame = 0; emit() }) }
 export async function refreshAgentThread(id: string) {
   const current = await nativeBridge.agentSnapshot(id)
-  if (!current || typeof current.executionId !== "string") throw new Error("This remote agent process is no longer available.")
+  if (!current || current.executionId !== id) throw new Error("This remote agent process is no longer available.")
   const old = rows.get(id)
+  if (old && (current.agentId !== old.agentId || current.cwd !== old.cwd
+    || current.conversationId && old.conversationId && current.conversationId !== old.conversationId
+    || current.hostKey && old.hostKey && current.hostKey !== old.hostKey)) {
+    throw new Error("This snapshot belongs to another conversation, server, folder, or agent.")
+  }
   // A newer live event can arrive while the snapshot request is in flight.
   if (tombstones.has(id)) return
   if (!old || current.lastSequence >= old.lastSequence) {
     const previous = old?.previousTranscript || []
     const live = old?.transcript.slice(previous.length) || []
-    const first = current.transcript[0]?.sequence
+    const currentTranscript = withoutObservationEvents(current.transcript)
+    const first = currentTranscript[0]?.sequence
     const prefix = first === undefined ? live : live.filter(event => (event.endSequence || event.sequence) < first)
     const unresolved = current.state === "submissionUnknown" || old?.meta.submissionUnknown && !current.turnActive && current.lastSequence <= old.lastSequence
-    const transcript = activeHistory(reconcileHistory([...previous, ...prefix, ...current.transcript]), current.activeMessageIds)
-    rows.set(id, { ...current, ...(unresolved ? { state: "submissionUnknown" as const, lastError: current.lastError || old?.lastError } : {}), previousTranscript: old?.previousTranscript ? transcript.filter(event => event.attemptId !== id) : undefined, transcript, meta: old?.meta ? { ...old.meta, submissionUnknown: !!unresolved } : metadata(current), touchedAt: old?.touchedAt || Date.now() })
+    const transcript = activeHistory(reconcileHistory([...previous, ...prefix, ...currentTranscript]), current.activeMessageIds)
+    const todos = reconcileTodos(old?.todos, old?.todoSync, current.todos, current.todoSync, { authoritative: true, stale: ["saved", "detached", "connecting"].includes(current.state) })
+    rows.set(id, { ...current, todos: todos.todos, todoSync: todos.todoSync, capabilities: mergeCapabilities(current, old?.capabilities, current.capabilities, true), ...(unresolved ? { state: "submissionUnknown" as const, lastError: current.lastError || old?.lastError } : {}), previousTranscript: old?.previousTranscript ? transcript.filter(event => event.attemptId !== id) : undefined, transcript, meta: old?.meta ? { ...old.meta, submissionUnknown: !!unresolved } : metadata(current), touchedAt: old?.touchedAt || Date.now() })
   }
   restored.delete(id)
   emit()
@@ -160,7 +221,11 @@ export function reattachAgentThread(id: string, nativeId: string): Promise<void>
   const row = rows.get(id)
   if (!row?.persistent || !nativeId) return Promise.reject(new Error("Connect this conversation’s server before reattaching."))
   const task = (async () => {
-    await nativeBridge.agentAttach(nativeId,id,row.meta.id)
+    invalidateObservations(row); emit()
+    const attached = await nativeBridge.agentAttach(nativeId,id,row.meta.id)
+    if (attached.executionId !== id) throw new Error("The attached execution does not match this conversation.")
+    // The handshake is not catch-up. Reconcile through the existing native
+    // snapshot after subscribing, so a late handshake cannot replace live facts.
     restored.delete(id)
     if (!subscriptions.has(id)) await subscribeRemoteAgent(id)
     await refreshAgentThread(id)
@@ -186,6 +251,7 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
       subscriptions.get(id)?.(); subscriptions.delete(id)
       const row = rows.get(id)
       if (row) {
+        invalidateObservations(row)
         row.state = row.persistent ? "detached" : "submissionUnknown"
         if (!row.persistent) { row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false }
         row.lastError = restored.has(id) ? row.resumable ? "This conversation is saved. Select it to connect and continue." : "This thread belonged to a previous Still process. Its transcript is read-only; start a new thread." : error instanceof Error ? error.message : "Remote process is unavailable. Inspect the server before retrying."
@@ -251,9 +317,12 @@ export async function startRemoteAgent(nativeId: string, localId: string, agentI
   const previous = options?.conversationId ? [...rows.values()].find(row => row.meta.id === options.conversationId) : undefined
   if (previous) {
     rows.delete(previous.executionId); restored.delete(previous.executionId); tombstones.add(previous.executionId)
+    todoRefreshRevisions.delete(previous.executionId)
     subscriptions.get(previous.executionId)?.(); subscriptions.delete(previous.executionId)
   }
-  rows.set(current.executionId, { ...current, meta: previous?.meta || metadata(current), previousTranscript: previous?.transcript, transcript: [...(previous?.transcript || []), ...current.transcript], touchedAt: Date.now() }); emit()
+  const transcript = withoutObservationEvents([...(previous?.transcript || []), ...current.transcript])
+  const todos = reconcileTodos(previous?.todos, previous?.todoSync, current.todos, current.todoSync, { authoritative: true, stale: current.state === "connecting" })
+  rows.set(current.executionId, { ...current, todos: todos.todos, todoSync: todos.todoSync, capabilities: mergeCapabilities(current, undefined, current.capabilities), meta: previous?.meta || metadata(current), previousTranscript: previous ? withoutObservationEvents(previous.transcript) : undefined, transcript, touchedAt: Date.now() }); emit()
   // Failed startup still belongs to its server/folder and remains inspectable.
   if (owner) { rows.get(current.executionId)!.meta.hostKey = hostKey(owner); persist(rows.get(current.executionId)); emit() }
   onCreated?.(rows.get(current.executionId)!)
@@ -304,6 +373,7 @@ export async function deleteAgentThread(id: string) {
   await nativeBridge.agentDeleteSaved(row.meta.id)
   discardAgentSave(row.meta.id)
   tombstones.add(id); rows.delete(id); restored.delete(id)
+  todoRefreshRevisions.delete(id)
   subscriptions.get(id)?.(); subscriptions.delete(id)
   emit()
 }
@@ -324,7 +394,7 @@ export async function resumeAgentThread(id: string, start: (agent: string, optio
   await flushAgentSaves()
   const next = await start(row.agentId, { cwd: row.cwd, resumeSessionId: row.agentSessionId, conversationId: row.meta.id, executable })
   if (!idleState(next)) throw new Error(next.lastError || "The saved agent session could not be resumed.")
-  if (!next.previousTranscript) { next.previousTranscript = row.transcript; next.transcript = [...row.transcript, ...next.transcript] }
+  if (!next.previousTranscript) { next.previousTranscript = withoutObservationEvents(row.transcript); next.transcript = withoutObservationEvents([...row.transcript, ...next.transcript]) }
   tombstones.add(id); rows.delete(id); restored.delete(id)
   subscriptions.get(id)?.(); subscriptions.delete(id)
   persist(next); emit(); return next

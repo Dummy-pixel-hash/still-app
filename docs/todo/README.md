@@ -1,6 +1,12 @@
 # Agents roadmap and todo
 
-Updated: **2026-10-30**. Status: **AG-11a audit complete; capability work active**.
+Updated: **2026-10-30**. Status: **AG-11a audit complete; capability and Todo
+follow-ups scheduled; next-milestone execution pack imported**.
+
+The remote agent startup regression is resolved. Commit `4c30626` streams the
+bootstrap configuration over SSH stdin, and the user confirmed the fix works
+against a real server. That confirmation covers startup only; provider-generated
+Todo calls and the wider capability matrix still need their own evidence.
 
 This is the implementation tracker for the Agents feature-gap review. The goal is
 to complete the **request → supervise → review → ship** workflow around Still's
@@ -32,6 +38,7 @@ publisher whose lifetime depends on the selected conversation being visible.
 
 | Document | Purpose |
 | --- | --- |
+| [Next milestone execution pack](next/README.md) | Bounded AG-11a.1/AG-11b/AG-18/AG-02a specs, ordered tasks, verification matrix, and delegation handoffs |
 | [Feature implementation plan](agents-roadmap.md) | Scope, tasks, dependencies, code entry points, and acceptance criteria for every feature |
 | [Provider capability audit](provider-capabilities.md) | AG-11a results: installed versions, real startup probes, status/todo contracts, and integration gaps |
 | [Agent-driven orb](agent-orb.md) | First milestone: signal semantics, background lifecycle, native IPC, conversation routing, and verification |
@@ -94,6 +101,12 @@ prerequisite for the orb.
 **Active override:** start with AG-11a and its capability follow-ups, then AG-18 todo
 foundations. AG-01 and orb-dependent sequencing below are deferred until the user
 resumes that work. The original phase grouping remains for long-term planning.
+
+The concrete order, owned files, and acceptance IDs for the next two milestones are
+in the [execution pack](next/TASKS.md): capability publication and its explanatory
+UI (`CAP-*`, `UI-01`), Todo reliability (`TD-*`), then read-only Git review
+(`GIT-*`). Feature status here stays authoritative; a task checkbox in the pack is
+not a completion record on its own.
 
 1. **Foundation:** AG-11a inventories real provider support. AG-01a preserves typed
    turn outcomes and stable event identities needed for truthful statuses.

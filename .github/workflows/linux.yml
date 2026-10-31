@@ -14,8 +14,9 @@
 # building on 24.04. Do NOT replace the ARM64 job with QEMU or a cross-compile:
 # that would not validate the real platform.
 #
-# Build success here proves compile+package for Linux only. It does NOT prove
-# GUI/WebView/SSH/keyring runtime behaviour — those remain UNVERIFIED here.
+# The packaged AppImage also receives a short Xvfb/WebKitGTK smoke test for
+# blank-window and native frost regressions. SSH/keyring interactions are not
+# exercised by this workflow.
 
 name: still-linux
 
@@ -127,7 +128,8 @@ jobs:
             patchelf \
             pkg-config \
             rpm \
-            wget
+            wget \
+            xvfb
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -179,6 +181,15 @@ jobs:
 
       - name: Build Tauri app (Linux ${{ matrix.arch }})
         run: npx tauri build --target ${{ matrix.target }}
+
+      - name: Smoke-test packaged AppImage in real WebKitGTK under Xvfb
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          appimage="$(find "src-tauri/target/${{ matrix.target }}/release/bundle/appimage" -type f -name '*.AppImage' | head -n1)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          xvfb-run -a -s '-screen 0 1280x900x24' node tests-agents/native-linux-smoke.mjs "$appimage"
 
       - name: Verify ELF architecture + collect metadata
         env:

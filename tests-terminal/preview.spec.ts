@@ -8,6 +8,7 @@ interface Stats {
   screenH: number
   hostW: number
   hostH: number
+  withinHost: boolean
   cardText: string
   snapshotText: string
   referenceText: string
@@ -50,7 +51,7 @@ test("miniature is a geometric shrink that fits the card viewport", async ({ pag
   const s = await stats(page)
   const scale = scaled(s.transform)
   expect(scale).toBeGreaterThan(0.05)
-  // The scaled grid fits both the fixed viewport height and the card width.
+  // The scaled grid fits the card's actual available height and width.
   expect(s.screenH * scale).toBeLessThanOrEqual(s.hostH + 1)
   expect(s.screenW * scale).toBeLessThanOrEqual(s.hostW + 1)
   // And it fills a meaningful part of the viewport, not a postage stamp.
@@ -62,12 +63,88 @@ test("card remount re-homes the live terminal instead of rendering blank", async
   await expect
     .poll(async () => (await stats(page)).snapshotText)
     .toContain("READY")
+  const before = (await stats(page)).snapshotText
   await page.evaluate(() => (window as any).harness.remount())
   // Filter/sort/move remounts every card: the preview must still paint.
   await expect.poll(async () => (await stats(page)).cardText).toContain("READY")
   const s = await stats(page)
   expect(s.hasScreen).toBe(true)
   expect(s.transform).not.toBeNull()
+  expect(s.snapshotText).toBe(before)
+})
+
+for (const columns of [1, 2, 3]) {
+  test(`wide, short screen fits its own card in a ${columns}-column grid`, async ({ page }) => {
+    await page.evaluate((columns) => {
+      const h = (window as any).harness
+      h.layout(columns, columns === 1 ? 340 : 1000)
+      h.surface(120, 5)
+    }, columns)
+    await emit(page, "\x1b[2J\x1b[H" + "x".repeat(120))
+    await expect.poll(async () => (await stats(page)).cardText).toContain("x".repeat(120))
+    await expect.poll(async () => {
+      const s = await stats(page)
+      const scale = scaled(s.transform)
+      return scale > 0 && s.withinHost && s.screenW * scale <= s.hostW + 1 && s.screenH * scale <= s.hostH + 1
+    }).toBe(true)
+    const s = await stats(page)
+    expect(s.screenW * scaled(s.transform)).toBeGreaterThan(s.hostW * 0.95)
+  })
+}
+
+test("card refits when grid columns change without new output", async ({ page }) => {
+  await page.evaluate(() => (window as any).harness.surface(120, 5))
+  await emit(page, "\x1b[2J\x1b[H" + "x".repeat(120))
+  await expect.poll(async () => (await stats(page)).cardText).toContain("x".repeat(120))
+  for (const columns of [3, 2, 1]) {
+    await page.evaluate((n) => (window as any).harness.layout(n, 1000), columns)
+    await expect.poll(async () => {
+      const s = await stats(page)
+      return Math.abs(s.screenW * scaled(s.transform) - s.hostW)
+    }).toBeLessThan(1)
+  }
+})
+
+test("output continues while a card is filtered out", async ({ page }) => {
+  await page.evaluate(() => (window as any).harness.show(false))
+  await expect(page.locator("[data-preview-host]")).toHaveCount(0)
+  await emit(page, "\r\nBACKGROUND READY")
+  await page.evaluate(() => (window as any).harness.show(true))
+  await expect(page.locator("[data-preview-host] .xterm-rows")).toContainText("BACKGROUND READY")
+})
+
+test("silent geometry changes rebuild without blanking the last frame", async ({ page }) => {
+  await emit(page, "x".repeat(120) + "\r\nREADY")
+  const rows = page.locator("[data-preview-host] .xterm-rows")
+  await expect(rows).toContainText("READY")
+  const during = await page.evaluate(() => {
+    const before = document.querySelector("[data-preview-host] .xterm-rows")?.textContent
+    ;(window as any).harness.surface(60, 16)
+    return { before, after: document.querySelector("[data-preview-host] .xterm-rows")?.textContent }
+  })
+  expect(during.after).toBe(during.before)
+  await expect(rows.locator(":scope > div")).toHaveCount(16)
+  await expect(rows).toContainText("READY")
+  expect((await stats(page)).snapshotText.split("\n").slice(1, 3)).toEqual(["x".repeat(60), "x".repeat(60)])
+  // A later font change must refit the replacement screen, not observe the
+  // disposed terminal's DOM forever.
+  const before = await stats(page)
+  await page.evaluate(() => (window as any).harness.font(20))
+  await expect.poll(async () => (await stats(page)).screenH).toBeGreaterThan(before.screenH)
+  await expect.poll(async () => {
+    const s = await stats(page)
+    return s.screenW * scaled(s.transform) <= s.hostW + 1 && s.screenH * scaled(s.transform) <= s.hostH + 1
+  }).toBe(true)
+})
+
+test("alternate-screen cursor redraws and Unicode remain live", async ({ page }) => {
+  await emit(page, "\x1b[?1049h\x1b[2J\x1b[H┌─ 状态 🚀 ─┐\x1b[3;8Hprogress 10%\x1b[3;8H\x1b[Kprogress 90%\x1b[20;90HEND")
+  await expect(page.locator("[data-preview-host] .xterm-rows")).toContainText("progress 90%")
+  const s = await stats(page)
+  expect(s.snapshotText).toContain("状态 🚀")
+  expect(s.snapshotText).toContain("END")
+  expect(s.snapshotText).not.toContain("progress 10%")
+  expect(s.snapshotText).toBe(s.referenceText)
 })
 
 test("geometry change rebuilds and re-wraps at the new size", async ({ page }) => {
@@ -109,17 +186,13 @@ test("huge surfaces are capped to the preview maximum", async ({ page }) => {
   expect(s.rows).toBe(32)
 })
 
-test("disconnect keeps the frozen screen at its original layout", async ({ page }) => {
-  // The boot persist claims the throttle window first, so the interesting
-  // snapshot lands on the NEXT window — emit a cue and wait for it.
+test("disconnect saves the latest screen inside the persistence throttle window", async ({ page }) => {
   await emit(page, wide())
   await expect
     .poll(async () => (await stats(page)).snapshotText)
     .toContain("READY")
   const before = await stats(page)
-  // Force the persist gate open (the boot snapshot otherwise owns the 2s
-  // throttle window) and confirm the CURRENT screen was snapshotted.
-  await page.evaluate(() => (window as any).harness.freezeNow())
+  await page.evaluate(() => (window as any).harness.disconnect())
   await expect
     .poll(async () => {
       const f = (await page.evaluate(() => (window as any).harness.frozen())) as
@@ -136,7 +209,6 @@ test("disconnect keeps the frozen screen at its original layout", async ({ page 
   // Same wrap as the live screen (same grid), not a 64-col miniature reflow.
   expect(frozen.lines.join("\n")).toContain("x".repeat(50))
   expect(frozen.cols).toBe(before.cols)
-  await page.evaluate(() => (window as any).harness.disconnect())
   // Reload with no reconnect: only the persisted snapshot can paint, and it
   // must use the ORIGINAL grid, not the classic 80x24 miniature.
   await page.goto("/tests-terminal/card-fixture.html?no-boot=1")
@@ -145,4 +217,45 @@ test("disconnect keeps the frozen screen at its original layout", async ({ page 
   expect(frozenText).toContain("x".repeat(50))
   const frozenEl = page.locator("[data-preview-host] [data-cols]")
   expect(await frozenEl.getAttribute("data-cols")).toBe(String(before.cols))
+  await expect.poll(async () => {
+    const s = await stats(page)
+    return scaled(s.transform) > 0 && s.withinHost && s.screenW * scaled(s.transform) <= s.hostW + 1 && s.screenH * scaled(s.transform) <= s.hostH + 1
+  }).toBe(true)
+})
+
+test("remote disconnect flushes the latest snapshot too", async ({ page }) => {
+  await emit(page, "\r\nREMOTE FINAL")
+  await expect(page.locator("[data-preview-host] .xterm-rows")).toContainText("REMOTE FINAL")
+  await page.evaluate(() => (window as any).harness.status("disconnected"))
+  await expect.poll(() => page.evaluate(() => (window as any).harness.frozen()?.lines.join("\n"))).toContain("REMOTE FINAL")
+})
+
+test("disconnect during parsing persists the completed final frame", async ({ page }) => {
+  await page.evaluate(async () => {
+    const h = (window as any).harness
+    h.emit("\x1b[2J\x1b[H" + "working\r\n".repeat(3000) + "FINAL FRAME")
+    await h.disconnect()
+  })
+  await expect.poll(() => page.evaluate(() => (window as any).harness.frozen()?.lines.join("\n"))).toContain("FINAL FRAME")
+  await page.goto("/tests-terminal/card-fixture.html?no-boot=1")
+  await expect(page.locator("[data-preview-host] [data-frozen-screen]")).toContainText("FINAL FRAME")
+})
+
+test("a cleared screen stays blank after disconnect and reload", async ({ page }) => {
+  await emit(page, "\x1b[2J\x1b[H")
+  await expect.poll(async () => (await stats(page)).snapshotText).toBe("")
+  await page.evaluate(() => (window as any).harness.disconnect())
+  await expect.poll(() => page.evaluate(() => (window as any).harness.frozen()?.lines)).toEqual([])
+  await page.goto("/tests-terminal/card-fixture.html?no-boot=1")
+  await expect(page.locator("[data-preview-host] [data-frozen-screen]")).toBeEmpty()
+})
+
+test("a connected session with no output does not show an old saved screen", async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem("still.preview.screen.v2.card-fixture", "still-frozen:1 100x20\nOLD SESSION"))
+  await page.goto("/tests-terminal/card-fixture.html?no-boot=1")
+  await expect(page.locator("[data-preview-host] [data-frozen-screen]")).toContainText("OLD SESSION")
+  await page.evaluate(() => (window as any).harness.connect())
+  await expect(page.locator("[data-preview-host] .card-preview-body")).not.toContainText("OLD SESSION")
+  await emit(page, "NEW SESSION")
+  await expect(page.locator("[data-preview-host] .xterm-rows")).toContainText("NEW SESSION")
 })

@@ -111,9 +111,10 @@ interface PreviewTerminalState {
   parsedTotal: number
   /** Grid the emulator was built at (capped live dims). */
   dims: PreviewDims
-  /** False while a full replay is in flight: snapshot reads return null so
-   *  the card shows its fallback instead of the previous (stale) frame. */
+  /** False while a full replay is in flight; keep the last complete frame. */
   ready: boolean
+  /** Keep the last complete screen mounted until its replacement has parsed. */
+  previous?: PreviewTerminalState
 }
 
 /** Latest surface geometry per session (capped), persisted for reloads. */
@@ -164,11 +165,14 @@ function persistDimsSoon() {
  * survive a reload before the session is ever reopened.
  */
 export function noteSurfaceDims(localId: string, cols: number, rows: number) {
+  loadPersistedDims()
   const dims = clampPreviewDims(cols, rows)
   const prev = surfaceDims.get(localId)
   if (prev && sameDims(prev, dims)) return
   surfaceDims.set(localId, dims)
   persistDimsSoon()
+  syncPreviewTerminal(localId, previewFontSize(localId))
+  requestPreviewUpdate(localId)
 }
 
 /** Effective preview geometry: last surface dims, else persisted, else 80x24. */
@@ -272,6 +276,15 @@ function setEntry(localId: string, patch: Partial<Entry>) {
     updatedAt: 0,
   }
   entries.set(localId, { ...prev, ...patch, updatedAt: Date.now() })
+  if (
+    patch.state && patch.state !== prev.state &&
+    (patch.state === "disconnected" || patch.state === "error")
+  ) {
+    // The final frame must not be lost to the periodic storage throttle.
+    previewFrozenLastPersist.delete(localId)
+    frozenLastPersist.delete(localId)
+    requestPreviewUpdate(localId)
+  }
   emit()
 }
 
@@ -363,6 +376,7 @@ function disposePreviewTerminal(localId: string) {
   const state = previewTerminals.get(localId)
   if (!state) return
   state.terminal.dispose()
+  state.previous?.terminal.dispose()
   previewTerminals.delete(localId)
 }
 
@@ -393,10 +407,6 @@ function syncPreviewTerminal(
       if (state.terminal.options.fontSize !== fontSize) {
         state.terminal.options.fontSize = fontSize
       }
-      if (!sameDims(state.dims, dims)) {
-        disposePreviewTerminal(localId)
-        state = undefined
-      }
     }
 
     // The ring's first byte has this absolute transcript offset. If the
@@ -405,16 +415,24 @@ function syncPreviewTerminal(
     const retainedStart = total - bytes.length
     if (
       !state ||
+      !sameDims(state.dims, dims) ||
       state.queuedTotal < retainedStart ||
       state.queuedTotal > total
     ) {
-      if (state) state.terminal.dispose()
+      const terminal = newPreviewTerminal(dims, fontSize)
+      const previous = state?.ready ? state : state?.previous
+      if (state) {
+        if (state !== previous) state.terminal.dispose()
+        else state.previous?.terminal.dispose()
+        state.previous = undefined
+      }
       state = {
-        terminal: newPreviewTerminal(dims, fontSize),
+        terminal,
         queuedTotal: 0,
         parsedTotal: 0,
         dims,
         ready: bytes.length === 0,
+        previous,
       }
       previewTerminals.set(localId, state)
       if (bytes.length > 0) {
@@ -426,6 +444,10 @@ function syncPreviewTerminal(
           if (previewTerminals.get(localId) !== writeState) return
           writeState.parsedTotal = total
           writeState.ready = true
+          if (!writeState.previous?.terminal.element?.isConnected) {
+            writeState.previous?.terminal.dispose()
+            writeState.previous = undefined
+          }
           emitTranscript(localId)
           flushPreviewUpdate(localId)
         })
@@ -467,14 +489,21 @@ export function openPreview(
   fontSize = 14,
 ): boolean {
   try {
-    const state = syncPreviewTerminal(localId, fontSize)
+    const current = syncPreviewTerminal(localId, fontSize)
+    const state = current?.ready ? current : current?.previous
     if (!state) return false
+    const moved = state.terminal.element?.parentElement !== host
     state.terminal.open(host)
     // xterm.open() is a documented no-op on an already-opened terminal, so a
     // card remount (filter/sort/move) would otherwise leave the live DOM on
     // the detached host and render an empty box. Re-home the element instead.
     const el = state.terminal.element
-    if (el && el.parentElement !== host) host.appendChild(el)
+    if (el && (el.parentElement !== host || host.childElementCount > 1)) host.replaceChildren(el)
+    if (moved) state.terminal.refresh(0, state.terminal.rows - 1)
+    if (current?.ready && current.previous) {
+      current.previous.terminal.dispose()
+      current.previous = undefined
+    }
     return true
   } catch {
     return false
@@ -502,23 +531,12 @@ function persistRenderedFrozenPreview(localId: string) {
   if (now - (previewFrozenLastPersist.get(localId) ?? 0) < PREVIEW_FROZEN_MIN_MS) return
   previewFrozenLastPersist.set(localId, now)
   try {
-    if (sameDims(state.dims, previewDimsFor(localId))) {
-      // v2: the emulator runs at exactly the interesting grid (nothing was
-      // capped), so its buffer IS the round-trippable screen — persist it
-      // with the grid header so a reload rebuilds the same layout.
-      const lines = previewRows(state)
-      if (lines.length > 0) {
-        localStorage.setItem(
-          PREVIEW_FROZEN_SCREEN_PREFIX + localId,
-          `still-frozen:1 ${state.dims.cols}x${state.dims.rows}\n${lines.join("\n")}`,
-        )
-      }
-    } else {
-      // Capped geometry (enormous live window): the emulator saw the tail of
-      // an even larger line set, so a grid-anchored snapshot would claim a
-      // layout the buffer never held. Keep the plain-text tail instead.
-      persistFrozenPreview(localId, snapshotPreviewLines(localId, 4))
-    }
+    // Persist cleared screens too, otherwise a reload resurrects old output.
+    const lines = previewRows(state)
+    localStorage.setItem(
+      PREVIEW_FROZEN_SCREEN_PREFIX + localId,
+      `still-frozen:1 ${state.dims.cols}x${state.dims.rows}\n${lines.join("\n")}`,
+    )
   } catch {
     // Private mode / quota: the in-memory emulator still serves the card.
   }
@@ -606,12 +624,11 @@ export function snapshotPreviewScreen(
   try {
     const state = syncPreviewTerminal(localId, fontSize)
     if (!state) return null
-    // A rebuild is still parsing its replay: null lets the card keep the
-    // frozen/plain fallback instead of flashing the stale or blank frame
-    // that the new emulator holds before the write callback lands.
+    // Keep this session's last complete frame during a rebuild, never an
+    // unrelated persisted snapshot or a not-yet-parsed blank screen.
     if (!state.ready) {
       requestPreviewUpdate(localId)
-      return null
+      return state.previous ? previewRows(state.previous) : null
     }
     if (state.parsedTotal !== state.queuedTotal) {
       // Keep showing the last parsed screen while a new frame is queued;
@@ -736,11 +753,8 @@ function parseFrozenScreen(rendered: string): FrozenScreen | null {
     if (m) {
       const lines = body.split("\n")
       while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
-      if (lines.length > 0) {
-        const dims = clampPreviewDims(Number(m[1]), Number(m[2]))
-        return { cols: dims.cols, rows: dims.rows, lines }
-      }
-      return null
+      const dims = clampPreviewDims(Number(m[1]), Number(m[2]))
+      return { cols: dims.cols, rows: dims.rows, lines: lines.slice(0, dims.rows) }
     }
   }
   // v1 (legacy plain text) and anything unheadered: classic 80x24 fallback.
@@ -772,18 +786,6 @@ export function frozenPreview(localId: string): FrozenScreen | null {
   } catch {
     return null
   }
-}
-
-// Test-only persistence hook for the frozen-snapshot assertions. It forces
-// one persist past the production 2s throttle by nudging ONLY the gate
-// timestamp; the write itself still runs the real readiness checks.
-export function __testPersistFrozenNow(localId: string) {
-  const state = previewTerminals.get(localId)
-  if (!state || !state.ready) return
-  state.queuedTotal = transcripts.get(localId)?.totalBytes ?? state.queuedTotal
-  state.parsedTotal = state.queuedTotal
-  previewFrozenLastPersist.delete(localId)
-  persistRenderedFrozenPreview(localId)
 }
 
 export function discardFrozenPreview(localId: string) {

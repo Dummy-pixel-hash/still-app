@@ -46,7 +46,7 @@ ok("attach-time dims estimate scales with the font size",
 // preview terminal (that is the smear bug).
 ok("preview rebuilds on geometry change instead of resizing",
   /!sameDims\(state\.dims, dims\)/.test(conns) &&
-  /disposePreviewTerminal\(localId\)[\s\S]{0,120}state = undefined/.test(conns));
+  conns.includes("const previous = state?.ready ? state : state?.previous"));
 ok("preview terminal is never resized in place",
   !/terminal\.resize\(/.test(conns));
 ok("persisted dims survive reloads",
@@ -57,22 +57,27 @@ ok("persisted dims survive reloads",
 // REMOUNT: xterm.open is a no-op on an already-opened terminal, so the card
 // must re-home the live element instead of assuming open() moved it.
 ok("card remount re-homes the live xterm element",
-  /el\.parentElement !== host\) host\.appendChild\(el\)/.test(conns) &&
+  conns.includes("host.replaceChildren(el)") &&
   conns.includes("xterm.open() is a documented no-op"));
 
 // FIT: the miniature is a geometric shrink of the real grid (transform),
 // measured from the actual screen element — not a tiny font.
 ok("screen fit uses a measured CSS transform",
-  card.includes('querySelector<HTMLElement>(".xterm-screen")') &&
+  card.includes('querySelector<HTMLElement>(".xterm-screen, [data-frozen-screen]")') &&
   /screen\.style\.transform = `scale\(/.test(card) &&
-  /PREVIEW_VIEWPORT_HEIGHT \/ sh/.test(card));
+  card.includes("Math.min(1, width / sw, height / sh)"));
+ok("fit uses the individual card's available bounds, not the grid",
+  card.includes("const width = host.clientWidth") &&
+  card.includes("const height = host.clientHeight") &&
+  !card.includes('closest("[data-card-grid]")') &&
+  !card.includes("PREVIEW_VIEWPORT_HEIGHT"));
 ok("theme scales via transform-origin, not a 5px font",
   theme.includes("transform-origin: top left") &&
   !/\.card-term \{[\s\S]{0,80}font-size: 5px/.test(theme));
 
 // FRAME READINESS: an unparsed replay must not surface as an empty screen.
 ok("unparsed rebuild never surfaces as a blank screen frame",
-  /if \(!state\.ready\)[\s\S]{0,160}return null/.test(conns));
+  /if \(!state\.ready\)[\s\S]{0,160}return state\.previous \? previewRows\(state\.previous\) : null/.test(conns));
 
 // FROZEN SNAPSHOT: v2 header carries the grid; the legacy plain key is still
 // read so old snapshots keep rendering.

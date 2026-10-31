@@ -5,7 +5,8 @@ import AgentWorkspace from "../src/components/AgentWorkspace"
 import { AGENTS, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
 import { nativeBridge, registerNativeBridge } from "../src/bridge/nativeBridge"
 import { mockBridge } from "../src/bridge/mockBridge"
-import { reattachAgentThread, startRemoteAgent } from "../src/session/agentThreads"
+import { reattachAgentThread, refreshAgentThread, startRemoteAgent, useAgentThreads } from "../src/session/agentThreads"
+import { reconcileTodos } from "../src/agents/todos"
 import Workspace from "../src/screens/Workspace"
 import { hostKey } from "../src/agents/workspace"
 import { flushAgentSaves } from "../src/session/agentStorage"
@@ -34,6 +35,13 @@ const h = {
   external: [] as string[],
   attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
+  snapshotReads: [] as string[],
+  refreshThread: refreshAgentThread,
+  rawTodoEvent(id: string, event: Omit<AgentThreadEvent, "sequence">) {
+    const row = snapshots.get(id)!
+    sinks.get(id)?.(structuredClone({ ...event, attemptId: event.attemptId || id, sequence: ++row.lastSequence }))
+  },
+  setSnapshotTodos(id: string, todos: AgentThreadSnapshot["todos"]) { snapshots.get(id)!.todos = todos; snapshots.get(id)!.todoSync = { state: "current" } },
   flush: flushAgentSaves,
   saved: library,
   trimSnapshot: (count: number) => { const row = snapshots.get(h.current)!; row.transcript = row.transcript.slice(-count) },
@@ -42,9 +50,15 @@ const h = {
   closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], deferStartup: false, startupFail: false,
   releaseStartup: () => {},
+  deferChecks: false,
+  pendingChecks: [] as Array<() => void>,
+  releaseChecks(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingChecks[index]?.() },
+  replaceTransport: () => {},
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
-    const value = { ...event, attemptId: row.executionId, sequence: ++row.lastSequence }
+    const value = { ...event, attemptId: event.attemptId || row.executionId, sequence: ++row.lastSequence }
+    if (event.type === "capabilities" && event.capabilities && (!event.attemptId || event.attemptId === row.executionId)
+      && (!row.capabilities || event.capabilities.configGeneration >= row.capabilities.configGeneration)) row.capabilities = event.capabilities
     const apply = (events: AgentThreadEvent[]) => {
       if (event.type === "historyReverted") { const index = events.findIndex(message => message.type === "userMessage" && message.messageId === event.messageId); if (index >= 0) events.splice(index) }
       if (event.type === "messageCheckpoint") { const message = events.find(message => message.type === "userMessage" && message.messageId === event.messageId); if (message) message.checkpoint = event.checkpoint }
@@ -61,7 +75,10 @@ const h = {
     if (event.type === "requestOutcome") { if (event.requestOutcome?.kind === "question") row.pendingInput = undefined; else row.pendingPermission = undefined }
     if (event.type === "configOptions") row.configOptions = event.configOptions!
     if (event.type === "commands") row.commands = event.commands
-    if (event.type === "todos" && event.todos) row.todos = event.todos
+    if (event.type === "todos" && (!event.attemptId || event.attemptId === row.executionId)) {
+      const merged = reconcileTodos(row.todos, row.todoSync, event.todos, event.todoSync)
+      row.todos = merged.todos; row.todoSync = merged.todoSync
+    }
     value.turnActive = row.turnActive
     const data = library(), saved = data.rows.find((item: any) => item.conversationId === row.conversationId)
     if (saved) {
@@ -111,7 +128,12 @@ registerNativeBridge({
   async openExternal(url) { h.external.push(url) },
   agentCheck: async (_native, agentId, executable) => {
     h.checks.push({ agentId, executable })
-    return (agentId ? AGENTS.filter(a => a.id === agentId) : AGENTS).map(a => ({ agentId: a.id, available: true, installed: true, runtime: a.id === "gemini" ? "acp" as const : "native" as const, runtimeAvailable: true, executable: executable || `/home/dev/.local/bin/${a.executable}` }))
+    const result = (agentId ? AGENTS.filter(a => a.id === agentId) : AGENTS).map(a => {
+      const path = executable || `/home/dev/.local/bin/${a.executable}`
+      const transport = ({ opencode: "http-v2+sse", codex: "codex-app-server", claude: "claude-stream-json", pi: "pi-rpc", gemini: "acp-v1" } as const)[a.id]
+      return { agentId: a.id, available: true, installed: true, runtime: a.id === "gemini" ? "acp" as const : "native" as const, runtimeAvailable: true, executable: path, checkedAt: Date.now(), providerRuntime: { transport, executable: path, version: `${a.label} fixture`, versionSource: "executable" as const, versionObservedAt: Date.now() } }
+    })
+    return h.deferChecks ? new Promise(resolve => h.pendingChecks.push(() => resolve(result))) : result
   },
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
@@ -121,7 +143,7 @@ registerNativeBridge({
     row.hostKey = hostKey(session)
     snapshots.set(row.executionId, row)
     const data = library(), prior = data.rows.find((item: any) => item.conversationId === row.conversationId)
-    if (prior) { row.activeMessageIds = prior.transcript.filter((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId).map((event: AgentThreadEvent) => event.messageId!); Object.assign(prior, row, { meta: prior.meta, transcript: prior.transcript }) }
+    if (prior) { row.todos = prior.todos; row.todoSync = { state: "current" }; row.activeMessageIds = prior.transcript.filter((event: AgentThreadEvent) => event.type === "userMessage" && event.messageId).map((event: AgentThreadEvent) => event.messageId!); Object.assign(prior, row, { meta: prior.meta, transcript: prior.transcript }) }
     else data.rows.push({ ...row, meta: { id: row.conversationId, hostKey: row.hostKey, folder: row.cwd, title: "", pinned: false, createdAt: Date.now(), activityAt: Date.now(), order: Date.now(), draft: "" }, touchedAt: Date.now() })
     saveLibrary(data)
     h.releaseStartup = () => {
@@ -134,8 +156,8 @@ registerNativeBridge({
     h.releaseStartups.set(row.executionId, h.releaseStartup)
     return structuredClone(row)
   },
-  agentSnapshot: async id => { if (h.failSnapshot) throw new Error("Agent connection unavailable"); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row) throw new Error("Agent execution unavailable"); snapshots.set(id, row); return structuredClone(row) },
-  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
+  agentSnapshot: async id => { h.snapshotReads.push(id); if (h.failSnapshot) throw new Error("Agent connection unavailable"); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row) throw new Error("Agent execution unavailable"); snapshots.set(id, row); return structuredClone(row) },
+  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
     if (h.rejectSend) throw new Error("SSH disconnected. Submission is uncertain.")
@@ -251,7 +273,17 @@ if (preview && scenario) {
 }
 const fullWorkspace = new URLSearchParams(location.search).has("workspace")
 if (fullWorkspace) localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{id:"still",name:"Still",note:"",order:0}],sessions: new URLSearchParams(location.search).has("empty") ? [] : [session],order:{still:[session.id]},keys:[],settings:{confirmRemove:true,terminal:{fontSize:14,cursorStyle:"block",scrollback:5000}} }))
- createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <AgentWorkspace session={session} sessions={[session]} transportId="ssh-fixture" onReattach={row => reattachAgentThread(row.executionId,"ssh-fixture")} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} />}</React.StrictMode>)
+function AgentThreadProbe() {
+  const rows = useAgentThreads()
+  React.useEffect(() => { (window as any).agentThreadRows = rows }, [rows])
+  return null
+}
+function FixtureWorkspace() {
+  const [transportId, setTransportId] = React.useState("ssh-fixture")
+  h.replaceTransport = () => setTransportId(id => `${id}-replaced`)
+  return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
+}
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
 if (preview && scenario) {
   const observer = new MutationObserver(() => {
     const row = document.querySelector<HTMLButtonElement>('.agent-thread-open')

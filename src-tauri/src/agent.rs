@@ -23,6 +23,45 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 const FRAME_LIMIT: usize = 2 * 1024 * 1024;
 const HISTORY_LIMIT: usize = 1200;
+/// Prints the remote Node version and one bounded `--version` result per provider.
+/// Runs only where Node exists; a missing/failing probe simply omits version data.
+const VERSION_PROBE: &str = r#"import { spawn } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
+const entries = JSON.parse(Buffer.from(process.argv[1] || "", "base64").toString("utf8"));
+console.log("STILL_NODE:" + process.versions.node);
+const clean = value => [...value.replace(/\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g, "").replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "").replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim()].slice(0, 200).join("");
+const executablePath = command => {
+  const paths = isAbsolute(command) ? [command] : (process.env.PATH || "").split(delimiter).map(directory => resolvePath(join(directory, command)));
+  for (const path of paths) { try { accessSync(path, constants.X_OK); if (statSync(path).isFile()) return path } catch {} }
+};
+const probe = entry => new Promise(resolve => {
+  let settled = false, retained = 0, child, timer;
+  const stdout = [], stderr = [];
+  const finish = value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value === "native" ? "" : value) } };
+  const stop = () => {
+    try { if (process.platform !== "win32" && child?.pid) process.kill(-child.pid, "SIGKILL"); else child?.kill("SIGKILL") } catch {}
+  };
+  try {
+    const executable = executablePath(entry.executable);
+    if (!executable) { finish(""); return }
+    console.log("STILL_EXECUTABLE:" + entry.id + ":" + executable);
+    child = spawn(executable, ["--version"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" });
+    timer = setTimeout(() => { stop(); finish("") }, 2000);
+    const retain = (destination, chunk) => {
+      if (settled) return;
+      const bytes = Buffer.from(chunk);
+      if (retained + bytes.length > 16 * 1024) { stop(); finish(""); return }
+      retained += bytes.length; destination.push(bytes);
+    };
+    child.stdout.on("data", chunk => retain(stdout, chunk)); child.stderr.on("data", chunk => retain(stderr, chunk));
+    child.once("error", () => finish(""));
+    child.once("close", code => finish(code === 0 ? clean(Buffer.concat(stdout).toString("utf8").trim() || Buffer.concat(stderr).toString("utf8")) : ""));
+  } catch { finish("") }
+});
+const versions = await Promise.all(entries.map(probe));
+entries.forEach((entry, index) => { if (versions[index]) console.log("STILL_VERSION:" + entry.id + ":" + versions[index]) });
+"#;
 static IDS: AtomicU64 = AtomicU64::new(1);
 static THREADS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Thread>>>>> = OnceLock::new();
 fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<Thread>>>> {
@@ -97,6 +136,10 @@ pub struct Event {
     pub turn_active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_todo_sync")]
+    pub todo_sync: Option<TodoSync>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Value>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -130,6 +173,8 @@ impl Event {
             remote_cursor: None,
             turn_active: None,
             todos: None,
+            todo_sync: None,
+            capabilities: None,
         }
     }
 }
@@ -170,6 +215,10 @@ pub struct Snapshot {
     pub recovery_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_todo_sync")]
+    pub todo_sync: Option<TodoSync>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_capabilities")]
+    pub capabilities: Option<CapabilityReport>,
 }
 impl Snapshot {
     fn history_header(&self) -> Self {
@@ -184,9 +233,25 @@ impl Snapshot {
             active_message_ids: None,
             persistent: self.persistent, remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
             todos: self.todos.clone(),
+            todo_sync: self.todo_sync.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoSync {
+    pub(crate) state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+fn deserialize_optional_todo_sync<'de, D>(deserializer: D) -> Result<Option<TodoSync>, D::Error>
+where D: serde::Deserializer<'de> {
+    let raw = Option::<Value>::deserialize(deserializer)?;
+    Ok(raw.as_ref().and_then(valid_todo_sync))
+}
+
 struct PendingPermission {
     id: Value,
     options: Vec<Value>,
@@ -212,6 +277,10 @@ struct Thread {
     history_lease: Option<std::fs::File>,
     messages: Vec<Event>,
     history_request: Option<PendingHistory>,
+    load_session: bool,
+    capability_notice: Option<String>,
+    awaiting_catch_up: bool,
+    capability_remote_cursor: u64,
 }
 struct PendingHistory {
     request_id: u64,
@@ -222,6 +291,9 @@ struct PendingHistory {
 struct PendingConfig {
     id: String,
     value: Value,
+    previous_capabilities: Option<CapabilityReport>,
+    previous_config: String,
+    previous_capability_cursor: u64,
     reply: oneshot::Sender<Result<(), String>>,
 }
 struct PendingResponse {
@@ -357,6 +429,460 @@ fn directory_script(cwd: &str) -> Result<String, StillError> {
     ))
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRuntime {
+    transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_observed_at: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityFeature {
+    status: String,
+    reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityFeatures {
+    shared_todos: CapabilityFeature,
+    provider_plans: CapabilityFeature,
+    provider_task_projection: CapabilityFeature,
+    client_todo_write: CapabilityFeature,
+}
+
+/// Validated worker facts plus the native freshness decision. Never provider JSON.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityReport {
+    schema_version: u64,
+    execution_id: String,
+    agent_session_id: String,
+    cwd: String,
+    config_generation: u64,
+    observed_at: u64,
+    provider_runtime: ProviderRuntime,
+    features: CapabilityFeatures,
+    pub(crate) freshness: String,
+}
+
+fn deserialize_optional_capabilities<'de, D>(deserializer: D) -> Result<Option<CapabilityReport>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// Protocol the worker actually runs. A display name never establishes this.
+fn agent_transport(agent_id: &str) -> &'static str {
+    match agent_id {
+        "opencode" => "http-v2+sse",
+        "codex" => "codex-app-server",
+        "claude" => "claude-stream-json",
+        "pi" => "pi-rpc",
+        _ => "acp-v1",
+    }
+}
+
+fn parse_versions(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("STILL_VERSION:"))
+        .filter_map(|rest| rest.split_once(':'))
+        .filter(|(id, version)| definition(id).is_some() && !version.is_empty() && *version != "native"
+            && version.chars().count() <= 200 && version.len() <= 800 && !version.chars().any(char::is_control))
+        .map(|(id, version)| (id.to_owned(), version.to_owned()))
+        .collect()
+}
+
+#[derive(Default)]
+struct VersionProbeResult {
+    versions: HashMap<String, String>,
+    executables: HashMap<String, String>,
+}
+
+fn parse_version_probe(text: &str) -> VersionProbeResult {
+    let executables = text.lines().filter_map(|line| line.strip_prefix("STILL_EXECUTABLE:"))
+        .filter_map(|rest| rest.split_once(':'))
+        .filter(|(id, path)| definition(id).is_some() && path.starts_with('/') && path.len() <= 4096 && !path.chars().any(char::is_control))
+        .map(|(id, path)| (id.to_owned(), path.to_owned())).collect();
+    VersionProbeResult { versions: parse_versions(text), executables }
+}
+
+async fn collect_exec(channel: &mut Channel<client::Msg>, limit: usize) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { data } => {
+                output.extend_from_slice(&data);
+                if output.len() > limit {
+                    return Err("Remote shell output exceeded the detection limit.".into());
+                }
+            }
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok(output)
+}
+
+/// Bounded version lookup on the already-verified SSH connection. Never starts inference.
+async fn probe_versions(
+    session_id: &str,
+    entries: &[(String, String)],
+    deadline: tokio::time::Instant,
+) -> Result<VersionProbeResult, StillError> {
+    if entries.is_empty() {
+        return Ok(VersionProbeResult::default());
+    }
+    let list = Value::Array(
+        entries
+            .iter()
+            .map(|(id, path)| json!({ "id": id, "executable": path }))
+            .collect(),
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&list)
+            .map_err(|error| StillError::friendly("agent_check_failed", error.to_string()))?,
+    );
+    let script = format!(
+        "if command -v node >/dev/null 2>&1; then node --input-type=module -e {} {} 2>/dev/null; fi; ",
+        quote(VERSION_PROBE),
+        quote(&encoded),
+    );
+    let command = login_command(&script);
+    let mut channel = tokio::time::timeout_at(deadline, ssh_worker::open_agent_exec(session_id, &command))
+        .await.map_err(|_| StillError::friendly("agent_check_timeout", "Reading the installed provider version timed out."))?
+        .map_err(|error| StillError::friendly("agent_check_failed", error.to_string()))?;
+    let output = tokio::time::timeout_at(deadline, collect_exec(&mut channel, 32 * 1024)).await;
+    let _ = channel.close().await;
+    let output = output.map_err(|_| {
+        StillError::friendly("agent_check_timeout", "Reading the installed provider version timed out.")
+    })?;
+    let output = output.map_err(|error| StillError::friendly("agent_check_failed", error))?;
+    Ok(parse_version_probe(&String::from_utf8_lossy(&output)))
+}
+
+/// Launch-time runtime identity. A failed probe leaves version unknown; it never blocks launch.
+async fn probe_runtime(session_id: &str, agent_id: &str, executable: &str) -> Option<ProviderRuntime> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let observed = probe_versions(session_id, &[(agent_id.to_owned(), executable.to_owned())], deadline)
+        .await
+        .unwrap_or_default();
+    let version = observed.versions.get(agent_id).cloned();
+    let version_observed_at = version.as_ref().map(|_| agent_store::timestamp() as u64);
+    Some(ProviderRuntime {
+        transport: agent_transport(agent_id).into(),
+        executable: Some(observed.executables.get(agent_id).cloned().unwrap_or_else(|| executable.to_owned())),
+        version_source: version.as_ref().map(|_| "executable".to_owned()),
+        version,
+        version_observed_at,
+    })
+}
+
+/// Validated worker facts plus the native freshness decision. Never provider JSON.
+const CAPABILITY_LIMIT: usize = 16 * 1024;
+
+/// Reject a value that cannot be shown and persisted verbatim.
+fn bounded_text(value: Option<&Value>, label: &str, max_chars: usize, max_bytes: usize) -> Result<String, String> {
+    let text = value.and_then(Value::as_str).ok_or_else(|| format!("{label} is not text."))?;
+    if text.is_empty()
+        || text.chars().count() > max_chars
+        || text.len() > max_bytes
+        || text.chars().any(char::is_control)
+    {
+        return Err(format!("{label} is not a bounded printable value."));
+    }
+    Ok(text.to_owned())
+}
+
+fn capability_count(value: Option<&Value>, label: &str) -> Result<u64, String> {
+    let count = value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{label} is not a nonnegative integer."))?;
+    if count > 9_007_199_254_740_991 {
+        return Err(format!("{label} exceeds the safe integer limit."));
+    }
+    Ok(count)
+}
+
+fn capability_feature(value: Option<&Value>, key: &str, fixed_unsupported: bool) -> Result<CapabilityFeature, String> {
+    let value = value.ok_or_else(|| format!("{key} is missing."))?;
+    let status = value.get("status").and_then(Value::as_str).unwrap_or_default();
+    if !matches!(status, "supported" | "unsupported" | "unverified") {
+        return Err(format!("{key} has an unknown status."));
+    }
+    if fixed_unsupported && status != "unsupported" {
+        return Err(format!("{key} cannot be claimed in this version."));
+    }
+    let evidence = match value.get("evidence") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => return Err(format!("{key} has unknown evidence.")),
+    };
+    match evidence {
+        Some("adapter" | "advertised" | "observed") => {}
+        Some(_) => return Err(format!("{key} has unknown evidence.")),
+        None if status != "unverified" => return Err(format!("{key} needs evidence for a {status} claim.")),
+        None => {}
+    }
+    if fixed_unsupported && evidence != Some("adapter") {
+        return Err(format!("{key} must remain an adapter-level unavailable feature."));
+    }
+    Ok(CapabilityFeature {
+        status: status.to_owned(),
+        reason: bounded_text(value.get("reason"), &format!("{key} reason"), 240, 960)?,
+        evidence: evidence.map(str::to_owned),
+    })
+}
+
+/// Validate once at the wire boundary; older generation ordering is checked by the caller.
+pub(crate) fn validate_capabilities(
+    raw: &Value,
+    execution_id: &str,
+    agent_id: &str,
+    agent_session_id: &str,
+    cwd: &str,
+) -> Result<CapabilityReport, String> {
+    let encoded = serde_json::to_vec(raw).map_err(|_| "Capability report is not JSON.".to_string())?;
+    if encoded.len() > CAPABILITY_LIMIT {
+        return Err("Capability report is too large.".into());
+    }
+    if definition(agent_id).is_none() {
+        return Err("Capability report has no recognized provider identity.".into());
+    }
+    let object = raw.as_object().ok_or("Capability report is not an object.")?;
+    if capability_count(object.get("schemaVersion"), "schemaVersion")? != 1 {
+        return Err("Capability report uses an unsupported schema version.".into());
+    }
+    if bounded_text(object.get("executionId"), "executionId", 160, 4096)? != execution_id {
+        return Err("Capability report belongs to another execution.".into());
+    }
+    if bounded_text(object.get("agentSessionId"), "agentSessionId", 4096, 4096)? != agent_session_id {
+        return Err("Capability report belongs to another provider session.".into());
+    }
+    if bounded_text(object.get("cwd"), "cwd", 4096, 4096)? != cwd {
+        return Err("Capability report belongs to another folder.".into());
+    }
+    let runtime = object
+        .get("providerRuntime")
+        .and_then(Value::as_object)
+        .ok_or("Capability report is missing its runtime identity.")?;
+    let transport = bounded_text(runtime.get("transport"), "transport", 32, 32)?;
+    if !matches!(
+        transport.as_str(),
+        "http-v2+sse" | "codex-app-server" | "claude-stream-json" | "pi-rpc" | "acp-v1"
+    ) {
+        return Err("Capability report has an unknown transport.".into());
+    }
+    if transport != agent_transport(agent_id) {
+        return Err("Capability report transport does not match the selected agent.".into());
+    }
+    let executable = runtime
+        .get("executable")
+        .map(|value| bounded_text(Some(value), "executable", 4096, 4096))
+        .transpose()?;
+    let version = runtime
+        .get("version")
+        .map(|value| bounded_text(Some(value), "version", 200, 800))
+        .transpose()?;
+    if version.as_deref() == Some("native") { return Err("The adapter label is not an installed provider version.".into()); }
+    let version_source = match runtime.get("versionSource") {
+        None => None,
+        Some(Value::String(value)) if matches!(value.as_str(), "runtime" | "executable") => Some(value.clone()),
+        Some(_) => return Err("Capability report has an unknown version source.".into()),
+    };
+    let version_observed_at = runtime
+        .get("versionObservedAt")
+        .map(|value| capability_count(Some(value), "versionObservedAt"))
+        .transpose()?;
+    if (version.is_some() && (version_source.is_none() || version_observed_at.is_none()))
+        || (version.is_none() && (version_source.is_some() || version_observed_at.is_some()))
+    {
+        return Err("Capability report version evidence is incomplete.".into());
+    }
+    let features = object
+        .get("features")
+        .and_then(Value::as_object)
+        .ok_or("Capability report is missing its features.")?;
+    let features = CapabilityFeatures {
+        shared_todos: capability_feature(features.get("sharedTodos"), "sharedTodos", false)?,
+        provider_plans: capability_feature(features.get("providerPlans"), "providerPlans", false)?,
+        provider_task_projection: capability_feature(features.get("providerTaskProjection"), "providerTaskProjection", true)?,
+        client_todo_write: capability_feature(features.get("clientTodoWrite"), "clientTodoWrite", true)?,
+    };
+    Ok(CapabilityReport {
+        schema_version: 1,
+        execution_id: execution_id.to_owned(),
+        agent_session_id: agent_session_id.to_owned(),
+        cwd: cwd.to_owned(),
+        config_generation: capability_count(object.get("configGeneration"), "configGeneration")?,
+        observed_at: capability_count(object.get("observedAt"), "observedAt")?,
+        provider_runtime: ProviderRuntime {
+            transport,
+            executable,
+            version,
+            version_source,
+            version_observed_at,
+        },
+        features,
+        // Only the native observer can decide this; an incoming value is ignored.
+        freshness: "current".into(),
+    })
+}
+
+fn mark_capabilities_stale(snapshot: &mut Snapshot) -> bool {
+    match snapshot.capabilities.as_mut() {
+        Some(report) if report.freshness != "stale" => {
+            report.freshness = "stale".into();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn effective_config_key(options: &[Value]) -> String {
+    let mut entries = options.iter().filter_map(|option| option["id"].as_str().map(|id|
+        (id.to_owned(), json!([id, option.get("type"), option.get("currentValue")])))).collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    serde_json::to_string(&entries.into_iter().map(|(_, value)| value).collect::<Vec<_>>()).unwrap_or_default()
+}
+
+fn restore_rejected_capability_report(snapshot: &mut Snapshot, pending: &PendingConfig, cursor: u64) -> bool {
+    let Some(previous) = pending.previous_capabilities.as_ref() else { return false };
+    if previous.freshness != "current" || previous.execution_id != snapshot.execution_id
+        || Some(previous.agent_session_id.as_str()) != snapshot.agent_session_id.as_deref() || previous.cwd != snapshot.cwd
+        || pending.previous_config != effective_config_key(&snapshot.config_options) || cursor != pending.previous_capability_cursor
+    { return false; }
+    let changed = snapshot.capabilities.as_ref() != Some(previous);
+    snapshot.capabilities = Some(previous.clone());
+    changed
+}
+
+fn confirm_config_capability_report(snapshot: &mut Snapshot, pending: &PendingConfig, cursor: u64) -> bool {
+    let same_config = pending.previous_config == effective_config_key(&snapshot.config_options);
+    if same_config && restore_rejected_capability_report(snapshot, pending, cursor) { return true; }
+    let Some(report) = snapshot.capabilities.as_mut() else { return false };
+    if report.execution_id != snapshot.execution_id || Some(report.agent_session_id.as_str()) != snapshot.agent_session_id.as_deref()
+        || report.cwd != snapshot.cwd || cursor <= pending.previous_capability_cursor
+        || !same_config && pending.previous_capabilities.as_ref().is_some_and(|previous| report.config_generation <= previous.config_generation)
+    { return false; }
+    let changed = report.freshness != "current";
+    report.freshness = "current".into();
+    changed
+}
+
+fn invalidate_for_provider_session(snapshot: &mut Snapshot, next_session: Option<&str>) -> bool {
+    if snapshot.agent_session_id.as_deref() == next_session { return false; }
+    mark_capabilities_stale(snapshot)
+}
+
+pub(crate) fn restore_capabilities(snapshot: &mut Snapshot) {
+    let Some(old) = snapshot.capabilities.as_ref() else { return };
+    let Ok(raw) = serde_json::to_value(old) else {
+        snapshot.capabilities = None;
+        return;
+    };
+    let Some(session) = snapshot.agent_session_id.as_deref() else {
+        snapshot.capabilities = None;
+        return;
+    };
+    match validate_capabilities(&raw, &snapshot.execution_id, &snapshot.agent_id, session, &snapshot.cwd) {
+        Ok(mut report) => {
+            report.freshness = "stale".into();
+            snapshot.capabilities = Some(report);
+        }
+        Err(_) => snapshot.capabilities = None,
+    }
+}
+
+fn capability_is_older(
+    current: Option<&CapabilityReport>,
+    next: &CapabilityReport,
+    current_cursor: u64,
+    next_cursor: u64,
+) -> bool {
+    current.is_some_and(|current| {
+        current.execution_id == next.execution_id && next.config_generation < current.config_generation
+    }) || next_cursor < current_cursor
+}
+
+fn provider_resumable(agent_id: &str, reported: Option<bool>, load_session: bool, session_id: &str) -> bool {
+    reported.unwrap_or(agent_id == "gemini" && load_session && !session_id.is_empty())
+}
+
+fn capability_observation_freshness(fresh: bool, transport_active: bool, awaiting_catch_up: bool, config_pending: bool, history_pending: bool) -> &'static str {
+    if fresh && transport_active && !awaiting_catch_up && !config_pending && !history_pending { "current" } else { "stale" }
+}
+
+/// Accept a worker report for this execution, session, and folder. Returns whether
+/// the stored report changed; older generations are ignored without downgrading.
+fn accept_capabilities(
+    thread: &mut Thread,
+    raw: &Value,
+    cursor: Option<u64>,
+    fresh: bool,
+) -> Result<bool, String> {
+    let session = thread
+        .snapshot
+        .agent_session_id
+        .clone()
+        .ok_or("Capability report arrived before the provider session identity.")?;
+    let mut report = validate_capabilities(
+        raw,
+        &thread.snapshot.execution_id,
+        &thread.snapshot.agent_id,
+        &session,
+        &thread.snapshot.cwd,
+    )?;
+    report.freshness = capability_observation_freshness(fresh, thread.transport_active, thread.awaiting_catch_up,
+        !thread.config_requests.is_empty(), thread.history_request.is_some()).into();
+    let cursor = cursor.unwrap_or(thread.snapshot.remote_cursor);
+    if capability_is_older(
+        thread.snapshot.capabilities.as_ref(),
+        &report,
+        thread.capability_remote_cursor,
+        cursor,
+    ) {
+        return Ok(false);
+    }
+    let changed = thread.snapshot.capabilities.as_ref() != Some(&report);
+    thread.snapshot.capabilities = Some(report);
+    thread.capability_remote_cursor = cursor;
+    Ok(changed)
+}
+
+async fn emit_capabilities(thread: &mut Thread) {
+    let Some(report) = thread.snapshot.capabilities.clone() else { return };
+    let Ok(value) = serde_json::to_value(report) else { return };
+    let mut event = Event::new("capabilities");
+    event.capabilities = Some(value);
+    emit(thread, event).await;
+}
+
+/// One bounded notice per distinct failure condition; a later valid report clears it.
+async fn note_capability_error(thread: &mut Thread, message: &str) {
+    let message = message.chars().take(240).collect::<String>();
+    if thread.capability_notice.as_deref() == Some(message.as_str()) {
+        return;
+    }
+    thread.capability_notice = Some(message.clone());
+    let mut event = Event::new("notice");
+    event.title = Some("Capability details unavailable".into());
+    event.text = Some(message);
+    emit(thread, event).await;
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckArgs {
@@ -374,9 +900,13 @@ pub struct Availability {
     runtime: String,
     runtime_available: bool,
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_runtime: Option<ProviderRuntime>,
+    checked_at: u64,
 }
 #[tauri::command]
 pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, StillError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let ids: Vec<&str> = args
         .agent_id
         .as_deref()
@@ -392,31 +922,16 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         let path = executable(&def, args.executable.as_deref())?;
         script.push_str(&format!("p=$(command -v {} 2>/dev/null) && [ -x \"$p\" ] && printf 'STILL_AGENT:%s:%s\\n' {} \"$p\"; ", quote(&path), quote(id)));
     }
-    let mut channel = ssh_worker::open_agent_exec(&args.native_session_id, &login_command(&script))
-        .await
+    let command = login_command(&script);
+    let mut channel = tokio::time::timeout_at(deadline, ssh_worker::open_agent_exec(&args.native_session_id, &command))
+        .await.map_err(|_| StillError::friendly("agent_check_timeout", "Remote detection timed out. Check the server terminal and login shell."))?
         .map_err(|e| {
             StillError::friendly(
                 "agent_check_failed",
                 &format!("Connect to the remote server first: {e}"),
             )
         })?;
-    let output = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut output = Vec::new();
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { data } => {
-                    output.extend_from_slice(&data);
-                    if output.len() > FRAME_LIMIT {
-                        return Err("Remote shell output exceeded the detection limit.");
-                    }
-                }
-                ChannelMsg::Eof | ChannelMsg::Close => break,
-                _ => {}
-            }
-        }
-        Ok(output)
-    })
-    .await;
+    let output = tokio::time::timeout_at(deadline, collect_exec(&mut channel, FRAME_LIMIT)).await;
     let _ = channel.close().await;
     let output = output
         .map_err(|_| {
@@ -432,6 +947,22 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         .find_map(|line| line.strip_prefix("STILL_NODE:"))
         .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
         .is_some_and(|major| major >= 20);
+    let installed: Vec<(String, String)> = ids
+        .iter()
+        .filter_map(|id| {
+            let prefix = format!("STILL_AGENT:{id}:");
+            text.lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .map(|path| ((*id).to_owned(), path.to_owned()))
+        })
+        .collect();
+    // Version lookup uses the remaining discovery budget; absence never changes install state.
+    let versions = if node_ready {
+        probe_versions(&args.native_session_id, &installed, deadline).await.unwrap_or_default().versions
+    } else {
+        std::collections::HashMap::new()
+    };
+    let observed_at = agent_store::timestamp() as u64;
     Ok(ids
         .into_iter()
         .map(|id| {
@@ -440,13 +971,30 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
                 .lines()
                 .find_map(|line| line.strip_prefix(&prefix))
                 .map(str::to_owned);
+            let version = versions.get(id).cloned();
+            let version_observed_at = version.as_ref().map(|_| observed_at);
+            let provider_runtime = path.as_ref().map(|executable| ProviderRuntime {
+                transport: agent_transport(id).into(),
+                executable: Some(executable.clone()),
+                version_source: version.as_ref().map(|_| "executable".to_owned()),
+                version,
+                version_observed_at,
+            });
             Availability {
                 agent_id: id.to_owned(),
                 available: path.is_some() && node_ready,
                 installed: path.is_some(),
                 runtime: if id == "gemini" { "acp" } else { "native" }.into(),
                 runtime_available: node_ready,
-                message: if path.is_some() && !node_ready { Some("Installed. Persistent agent sessions need Node.js 20 or newer on this server.".into()) } else { None },
+                message: if path.is_some() && !node_ready {
+                    Some("Installed. Persistent agent sessions need Node.js 20 or newer on this server.".into())
+                } else if provider_runtime.as_ref().is_some_and(|runtime| runtime.version.is_none()) {
+                    Some("Installed. The selected executable did not report a version.".into())
+                } else {
+                    None
+                },
+                provider_runtime,
+                checked_at: observed_at,
                 executable: path,
             }
         })
@@ -628,7 +1176,7 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64) -> Result<(String, String), StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -645,6 +1193,13 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
         payload["source"] = json!(include_str!("../agent-host/supervisor.mjs"));
         payload["todosSource"] = json!(include_str!("../agent-host/todos.mjs"));
         payload["todoPiSource"] = json!(include_str!("../agent-host/todo-pi.mjs"));
+        if let Some(seed) = todo_seed { payload["todoSeed"] = seed.clone(); }
+        if let Some(runtime) = runtime {
+            // The worker may replace the version with stronger runtime evidence;
+            // transport and executable stay those of the launch we actually made.
+            payload["providerRuntime"] = json!(runtime);
+            payload["env"]["STILL_PROVIDER_RUNTIME"] = json!(serde_json::to_string(runtime).unwrap_or_default());
+        }
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).map_err(|error| StillError::friendly("agent_launch", error.to_string()))?);
     let bootstrap = include_str!("../agent-host/bootstrap.mjs");
@@ -694,6 +1249,28 @@ async fn bootstrap_remote(channel: &mut Channel<client::Msg>, payload: &str) -> 
     }
 }
 
+fn validate_resume_scope(saved: &Snapshot, host: &str, agent: &str, cwd: &str, session_id: Option<&str>) -> Result<(), String> {
+    if saved.host_key != host || saved.agent_id != agent || saved.cwd != cwd {
+        return Err("The saved conversation belongs to another server, folder, or agent.".into());
+    }
+    if session_id.is_none_or(str::is_empty) || saved.agent_session_id.as_deref() != session_id || !saved.resumable {
+        return Err("Resume the saved provider session explicitly; its identity or resume support was not confirmed.".into());
+    }
+    if saved.turn_active || saved.recovery_required || matches!(saved.state.as_str(), "submissionUnknown" | "rewinding")
+        || saved.pending_input.is_some() || saved.pending_permission.is_some()
+    {
+        return Err("The saved execution is active or unconfirmed. Reattach and inspect it before starting a replacement.".into());
+    }
+    Ok(())
+}
+
+fn validate_replacement_execution(existing: &Snapshot, conversation_id: &str) -> Result<(), String> {
+    if existing.conversation_id == conversation_id {
+        return Err("This conversation already has a managed execution. Reattach to it, or explicitly stop and close it before resuming.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn still_agent_start(
     app: AppHandle,
@@ -732,13 +1309,35 @@ pub async fn still_agent_start(
     let path = executable(&def, args.executable.as_deref())?;
     let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
     let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
+    let host_key = json!([config.host.to_lowercase(), config.port, config.username]).to_string();
+    let managed = registry().lock().await.values().cloned().collect::<Vec<_>>();
+    for row in managed {
+        let thread = row.lock().await;
+        validate_replacement_execution(&thread.snapshot, &conversation_id)
+            .map_err(|error| StillError::friendly("agent_execution_exists", error))?;
+    }
+    let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let default_todos = || json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":true});
-    let saved_todos = if args.conversation_id.is_some() { agent_store::load_snapshot(&app, conversation_id.clone()).await?.todos } else { None };
-    let mut initial_todos = saved_todos.and_then(|todos| validate_todos(&todos).ok()).unwrap_or_else(default_todos);
+    let saved_todos = if args.conversation_id.is_some() {
+        let saved = agent_store::load_snapshot(&app, conversation_id.clone()).await?;
+        if saved.conversation_id != conversation_id {
+            return Err(StillError::friendly("agent_resume_identity", "The saved conversation identity does not match this resume request."));
+        }
+        validate_resume_scope(&saved, &host_key, &args.agent_id, &cwd, args.resume_session_id.as_deref())
+            .map_err(|error| StillError::friendly("agent_resume_identity", error))?;
+        saved.todos
+    } else { None };
+    let validated_saved_todos = saved_todos.and_then(|todos| validate_todos(&todos).ok());
+    let mut initial_todos = validated_saved_todos.clone().unwrap_or_else(default_todos);
     initial_todos["toolAvailable"] = json!(false);
     initial_todos["available"] = json!(true);
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0)?;
-    let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
+    let todo_seed = validated_saved_todos.as_ref().map(|todos| {
+        let mut seed = json!({"revision":todos["revision"],"items":todos["items"]});
+        if let Some(active_id) = todos["activeId"].as_str() { seed["activeId"] = json!(active_id); }
+        seed
+    });
+    let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
+    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -752,7 +1351,7 @@ pub async fn still_agent_start(
     let (close, close_rx) = mpsc::unbounded_channel();
     let snapshot = Snapshot {
         conversation_id,
-        host_key: json!([config.host.to_lowercase(), config.port, config.username]).to_string(),
+        host_key,
         execution_id: execution_id.clone(),
         local_session_id: args.local_session_id,
         agent_id: args.agent_id,
@@ -771,8 +1370,10 @@ pub async fn still_agent_start(
         resumable: args.resume_session_id.is_some(),
             history_capabilities: json!({"revert":false,"retry":false}),
             todos: Some(initial_todos),
+            todo_sync: Some(TodoSync { state: "stale".into(), reason: Some("Waiting for this execution to confirm the conversation Todo list.".into()) }),
         active_message_ids: None,
         persistent: true, remote_cursor: 0, prompt_id: None, recovery_required: false,
+        capabilities: None,
     };
     if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
         let _ = send(&channel,&json!({"jsonrpc":"2.0","id":"startup-cleanup","method":"_still/shutdown"})).await;
@@ -807,6 +1408,10 @@ pub async fn still_agent_start(
         history_lease: Some(history_lease),
         messages,
         history_request: None,
+        load_session: false,
+        capability_notice: None,
+        awaiting_catch_up: false,
+        capability_remote_cursor: 0,
     }));
     registry().lock().await.insert(execution_id, row.clone());
     tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd, bootstrap_data));
@@ -829,6 +1434,9 @@ async fn run(
     let mut thread = row.lock().await;
     if thread.transport_epoch == epoch {
         thread.transport_active = false;
+        thread.awaiting_catch_up = true;
+        if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+        if mark_todos_stale(&mut thread.snapshot) { emit_todos(&mut thread).await; }
         if let Some(pending) = thread.response_delivery.take() {
             let _ = pending.reply.send(Err("The agent connection closed before the response was sent.".into()));
         }
@@ -1003,8 +1611,13 @@ async fn handle(
             let message_id = params["messageId"].as_str().ok_or("Missing history boundary")?;
             let mut thread = row.lock().await;
             if thread.messages.iter().any(|message| message.message_id.as_deref() == Some(message_id)) {
-                thread.snapshot.agent_session_id = params["sessionId"].as_str().map(str::to_owned);
+                let next_session_id = params["sessionId"].as_str().map(str::to_owned);
+                let session_changed = thread.snapshot.agent_session_id != next_session_id;
+                thread.snapshot.agent_session_id = next_session_id;
                 *session_id = thread.snapshot.agent_session_id.clone();
+                if session_changed && mark_capabilities_stale(&mut thread.snapshot) {
+                    emit_capabilities(&mut thread).await;
+                }
                 thread.snapshot.state = "working".into(); thread.snapshot.last_error = None;
                 thread.recovering_uncertain = false;
                 thread.snapshot.recovery_required = false;
@@ -1012,34 +1625,55 @@ async fn handle(
             }
             return Ok(());
         }
+        if method == "_still/capabilities_changed" {
+            let mut thread = row.lock().await;
+            let Some(raw) = value.pointer("/params/capabilities") else {
+                if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+                note_capability_error(&mut thread, "Capability notification omitted its report.").await;
+                return Ok(());
+            };
+            let cursor = value.pointer("/_still/index").and_then(Value::as_u64);
+            let fresh = !thread.awaiting_catch_up;
+            match accept_capabilities(&mut thread, raw, cursor, fresh) {
+                Ok(true) => {
+                    thread.capability_notice = None;
+                    emit_capabilities(&mut thread).await;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+                    note_capability_error(&mut thread, &error).await;
+                }
+            }
+            return Ok(());
+        }
         if method == "_still/todos_changed" {
             let mut thread = row.lock().await;
-            let value = value.pointer("/params/todos").cloned().ok_or("Missing todo snapshot")?;
-            if value["protocolVersion"].as_u64() != Some(3) {
-                let old = thread.snapshot.todos.get_or_insert_with(|| json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":false}));
-                old["available"] = json!(false); old["toolAvailable"] = json!(false);
-                let mut event = Event::new("todos"); event.todos = Some(old.clone()); emit(&mut thread, event).await;
-                return Ok(());
-            }
-            if let Some(todos) = update_todos(&mut thread, value)? {
-                let mut event = Event::new("todos"); event.todos = Some(todos); emit(&mut thread, event).await;
-            }
+            let observation = if thread.awaiting_catch_up { TodoObservation::Replay } else { TodoObservation::Live };
+            if update_todos(&mut thread.snapshot, value.pointer("/params/todos"), observation) { emit_todos(&mut thread).await; }
             return Ok(());
         }
         if method == "_still/caught_up" {
             let mut thread = row.lock().await;
             let params = &value["params"];
-            thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(params["index"].as_u64().unwrap_or(0));
-            if let Some(raw) = params.get("todos").filter(|todos| todos["protocolVersion"].as_u64() == Some(3)) {
-                if let Some(todos) = update_todos(&mut thread, raw.clone())? {
-                    let mut event = Event::new("todos"); event.todos = Some(todos); emit(&mut thread, event).await;
+            let caught_up_index = params["index"].as_u64().unwrap_or(0);
+            thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(caught_up_index);
+            if update_todos(&mut thread.snapshot, params.get("todos"), TodoObservation::CatchUp) { emit_todos(&mut thread).await; }
+            thread.awaiting_catch_up = false;
+            if let Some(raw) = params.get("capabilities") {
+                match accept_capabilities(&mut thread, raw, Some(caught_up_index), true) {
+                    Ok(true) => {
+                        thread.capability_notice = None;
+                        emit_capabilities(&mut thread).await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+                        note_capability_error(&mut thread, &error).await;
+                    }
                 }
-            } else if let Some(old) = thread.snapshot.todos.as_mut() {
-                if old["available"] != false || old["toolAvailable"] != false {
-                    old["available"] = json!(false);
-                    old["toolAvailable"] = json!(false);
-                    let mut event = Event::new("todos"); event.todos = Some(old.clone()); emit(&mut thread, event).await;
-                }
+            } else if mark_capabilities_stale(&mut thread.snapshot) {
+                emit_capabilities(&mut thread).await;
             }
             let unconfirmed_prompt = thread.prompt.is_some() && params["busy"] == false;
             thread.snapshot.turn_active = params["busy"].as_bool().unwrap_or(false);
@@ -1169,11 +1803,16 @@ async fn handle(
                     let _ = pending.reply.send(Err(message.to_owned()));
                     return Ok(());
                 }
-                drop(thread);
-                if let Some(pending) = row.lock().await.config_requests.remove(&number) {
+                if let Some(pending) = thread.config_requests.remove(&number) {
+                    let cursor = thread.capability_remote_cursor;
+                    if thread.transport_active && !thread.awaiting_catch_up && thread.capability_notice.is_none()
+                        && restore_rejected_capability_report(&mut thread.snapshot, &pending, cursor) {
+                        emit_capabilities(&mut thread).await;
+                    }
                     let _ = pending.reply.send(Err(message.to_owned()));
                     return Ok(());
                 }
+                drop(thread);
             }
             if (*stage == 0 && id.as_u64() == Some(1)) || (*stage == 2 && id.as_u64() == Some(3)) {
                 return Err(message.into());
@@ -1215,6 +1854,12 @@ async fn handle(
         {
             let mut t = row.lock().await;
             t.snapshot.agent_name = name;
+            // Direct ACP providers advertise their own resume support; the wrapper's
+            // hard-coded loadSession is not evidence for every native provider.
+            t.load_session = result
+                .pointer("/agentCapabilities/loadSession")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let mut e = Event::new("threadState");
             e.state = Some("connecting".into());
             emit(&mut t, e).await
@@ -1249,16 +1894,28 @@ async fn handle(
         add_legacy_config(&mut configs, result);
         let mut t = row.lock().await;
         if let Some(maximum) = result.pointer("/_meta/maxRequestId").and_then(Value::as_u64) { IDS.fetch_max(maximum,Ordering::SeqCst); }
-        t.snapshot.agent_session_id = Some(sid);
-        t.snapshot.resumable = result
-            .pointer("/_meta/resumable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        t.snapshot.agent_session_id = Some(sid.clone());
+        let reported_resumable = result.pointer("/_meta/resumable").and_then(Value::as_bool);
+        t.snapshot.resumable = provider_resumable(&t.snapshot.agent_id, reported_resumable, t.load_session, &sid);
         let capabilities = result.pointer("/_meta/historyCapabilities");
         t.snapshot.history_capabilities = json!({"revert":capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),"retry":capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false)});
         let mut capability_event = Event::new("historyCapabilities");
         capability_event.history_capabilities = Some(t.snapshot.history_capabilities.clone());
         emit(&mut t, capability_event).await;
+        if !t.awaiting_catch_up && update_todos(&mut t.snapshot, result.pointer("/_meta/todos"), TodoObservation::Live) { emit_todos(&mut t).await; }
+        if !t.awaiting_catch_up {
+            if let Some(raw) = result.pointer("/_meta/capabilities") {
+                let cursor = t.snapshot.remote_cursor;
+                match accept_capabilities(&mut t, raw, Some(cursor), true) {
+                    Ok(true) => { t.capability_notice = None; emit_capabilities(&mut t).await; }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if mark_capabilities_stale(&mut t.snapshot) { emit_capabilities(&mut t).await; }
+                        note_capability_error(&mut t, &error).await;
+                    }
+                }
+            }
+        }
         t.snapshot.config_options = configs.clone();
         t.snapshot.turn_active = result.pointer("/_meta/busy").and_then(Value::as_bool).unwrap_or(t.snapshot.turn_active);
         let restored_prompt = result.pointer("/_meta/activePrompt").filter(|value| !value.is_null()).cloned();
@@ -1292,6 +1949,7 @@ async fn handle(
                 let _ = pending.reply.send(Err(thread.snapshot.last_error.clone().unwrap()));
                 return Ok(());
             }
+            if invalidate_for_provider_session(&mut thread.snapshot, sid) { emit_capabilities(&mut thread).await; }
             thread.snapshot.agent_session_id = sid.map(str::to_owned);
             *session_id = thread.snapshot.agent_session_id.clone();
             thread.snapshot.state = "working".into(); thread.snapshot.last_error = None;
@@ -1323,7 +1981,7 @@ async fn handle(
                     .iter_mut()
                     .find(|o| o.get("id").and_then(Value::as_str) == Some(pending.id.as_str()))
                 {
-                    option["currentValue"] = pending.value;
+                    option["currentValue"] = pending.value.clone();
                 }
             } else {
                 let _ = pending.reply.send(Err("Agent acknowledged the setting without configOptions. Refresh the thread before retrying.".into()));
@@ -1332,6 +1990,11 @@ async fn handle(
             let mut event = Event::new("configOptions");
             event.config_options = Some(thread.snapshot.config_options.clone());
             emit(&mut thread, event).await;
+            let cursor = thread.capability_remote_cursor;
+            if thread.transport_active && !thread.awaiting_catch_up && thread.capability_notice.is_none()
+                && confirm_config_capability_report(&mut thread.snapshot, &pending, cursor) {
+                emit_capabilities(&mut thread).await;
+            }
             let _ = pending.reply.send(Ok(()));
             return Ok(());
         }
@@ -1443,7 +2106,9 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
     if kind == "config_option_update" {
         if let Some(options) = u.get("configOptions").and_then(Value::as_array) {
             let options = options.clone();
+            let changed = effective_config_key(&options) != effective_config_key(&t.snapshot.config_options);
             t.snapshot.config_options = options.clone();
+            if changed && mark_capabilities_stale(&mut t.snapshot) { emit_capabilities(&mut t).await; }
             let mut event = Event::new("configOptions");
             event.config_options = Some(options);
             emit(&mut t, event).await;
@@ -1487,6 +2152,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
         }
         "current_mode_update" => {
             if let Some(value) = u.get("currentModeId") {
+                let previous_config = effective_config_key(&t.snapshot.config_options);
                 if let Some(option) = t
                     .snapshot
                     .config_options
@@ -1495,6 +2161,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
                 {
                     option["currentValue"] = value.clone();
                 }
+                if previous_config != effective_config_key(&t.snapshot.config_options) && mark_capabilities_stale(&mut t.snapshot) { emit_capabilities(&mut t).await; }
                 e.kind = "configOptions".into();
                 e.config_options = Some(t.snapshot.config_options.clone());
             }
@@ -1561,6 +2228,9 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
 }
 async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
     let mut t = row.lock().await;
+    t.awaiting_catch_up = true;
+    if mark_capabilities_stale(&mut t.snapshot) { emit_capabilities(&mut t).await; }
+    if mark_todos_stale(&mut t.snapshot) { emit_todos(&mut t).await; }
     t.snapshot.state = failure_state(&t).into();
     t.snapshot.last_error = Some(message.into());
     t.permission = None;
@@ -1593,6 +2263,9 @@ async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     thread.snapshot.recovery_required = thread.recovering_uncertain;
     thread.snapshot.state = "detached".into();
     thread.transport_active = false;
+    thread.awaiting_catch_up = true;
+    if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+    if mark_todos_stale(&mut thread.snapshot) { emit_todos(&mut thread).await; }
     thread.snapshot.last_error = Some(if detail.is_empty() {
         "Connection interrupted. The agent continues on the server; reconnect to catch up.".to_owned()
     } else { format!("Could not attach to the remote agent: {detail}") });
@@ -1605,6 +2278,64 @@ fn failure_state(thread: &Thread) -> &'static str {
     if thread.history_request.is_some() || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
 }
 
+const TODO_CONFLICT_REASON: &str = "Showing saved Todos; the remote list does not match.";
+const TODO_STALE_REASON: &str = "Showing saved Todos; updates may have continued on the server.";
+
+fn valid_todo_sync(value: &Value) -> Option<TodoSync> {
+    let state = value.get("state")?.as_str()?;
+    if !matches!(state, "current" | "stale" | "conflict" | "unavailable") { return None; }
+    let reason = value.get("reason").map(|reason| bounded_text(Some(reason), "Todo observation reason", 240, 960)).transpose().ok()?;
+    Some(TodoSync { state: state.into(), reason })
+}
+
+fn set_todo_sync(snapshot: &mut Snapshot, state: &str, reason: Option<&str>) {
+    snapshot.todo_sync = Some(TodoSync { state: state.into(), reason: reason.map(str::to_owned) });
+}
+
+fn mark_todos_stale(snapshot: &mut Snapshot) -> bool {
+    if snapshot.todos.is_none() || snapshot.todo_sync.as_ref().is_some_and(|sync| matches!(sync.state.as_str(), "stale" | "conflict" | "unavailable")) { return false; }
+    set_todo_sync(snapshot, "stale", Some(TODO_STALE_REASON));
+    true
+}
+
+pub(crate) fn restore_todos(snapshot: &mut Snapshot) {
+    let (todos, sync) = restore_todo_metadata(snapshot.todos.take(), snapshot.todo_sync.take());
+    snapshot.todos = todos;
+    snapshot.todo_sync = sync;
+}
+
+pub(crate) fn restore_todo_fields(row: &mut Value) {
+    let todos = row.get("todos").filter(|value| !value.is_null()).cloned();
+    let sync = row.get("todoSync").and_then(valid_todo_sync);
+    let (todos, sync) = restore_todo_metadata(todos, sync);
+    if let Some(object) = row.as_object_mut() {
+        object.remove("todos"); object.remove("todoSync");
+        if let Some(todos) = todos { object.insert("todos".into(), todos); }
+        if let Some(sync) = sync { object.insert("todoSync".into(), json!(sync)); }
+    }
+}
+
+fn restore_todo_metadata(todos: Option<Value>, sync: Option<TodoSync>) -> (Option<Value>, Option<TodoSync>) {
+    let todos = match todos.as_ref().map(validate_todos).transpose() {
+        Ok(todos) => todos,
+        Err(_) => return (None, Some(TodoSync { state: "unavailable".into(), reason: Some("The saved Todo list could not be validated.".into()) })),
+    };
+    if sync.as_ref().is_some_and(|sync| matches!(sync.state.as_str(), "conflict" | "unavailable")) { return (todos, sync); }
+    let sync = todos.as_ref().map(|todos| if todos["available"] == false {
+        TodoSync { state: "unavailable".into(), reason: Some("This execution cannot provide Todo updates. Saved tasks remain readable.".into()) }
+    } else {
+        TodoSync { state: "stale".into(), reason: Some(TODO_STALE_REASON.into()) }
+    });
+    (todos, sync)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TodoObservation { Live, Replay, CatchUp }
+
+fn todo_task_state(todos: &Value) -> Value {
+    json!({"revision":todos["revision"],"items":todos["items"],"activeId":todos.get("activeId")})
+}
+
 fn validate_todos(value: &Value) -> Result<Value, String> {
     if value.get("protocolVersion").and_then(Value::as_u64) != Some(3) { return Err("Unsupported shared todo protocol version".into()); }
     let revision = value.get("revision").and_then(Value::as_u64).filter(|revision| *revision <= 9_007_199_254_740_991).ok_or("Todo snapshot has no valid revision")?;
@@ -1613,6 +2344,7 @@ fn validate_todos(value: &Value) -> Result<Value, String> {
     let items = value.get("items").and_then(Value::as_array).ok_or("Todo snapshot has no item list")?;
     if items.len() > 100 { return Err("Todo list exceeds 100 items".into()); }
     let mut ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::with_capacity(items.len());
     for item in items {
         let id = item.get("id").and_then(Value::as_str).ok_or("Todo item has no ID")?;
         let title = item.get("title").and_then(Value::as_str).ok_or("Todo item has no title")?;
@@ -1624,21 +2356,69 @@ fn validate_todos(value: &Value) -> Result<Value, String> {
         if !["user", "agent"].contains(&item.get("createdBy").and_then(Value::as_str).unwrap_or("")) || !["user", "agent"].contains(&item.get("updatedBy").and_then(Value::as_str).unwrap_or("")) { return Err("Todo item has an invalid author".into()); }
         if item.get("detail").is_some_and(|detail| detail.as_str().is_none_or(|detail| detail.chars().count()>500 || detail.len()>2000 || detail.chars().any(char::is_control))) { return Err("Todo item has invalid progress detail".into()); }
         for field in ["createdAt","startedAt","completedAt","durationMs"] { if item.get(field).is_some_and(|value| value.as_u64().is_none_or(|time| time>9_007_199_254_740_991)) { return Err("Todo item has an invalid timestamp".into()); } }
+        let mut safe = json!({"id":id,"title":title.trim(),"status":item["status"],"createdBy":item["createdBy"],"updatedBy":item["updatedBy"]});
+        for field in ["createdAt","startedAt","completedAt","durationMs","detail"] {
+            if let Some(value) = item.get(field) { safe[field] = value.clone(); }
+        }
+        sanitized.push(safe);
     }
     let active_id=value.get("activeId").and_then(Value::as_str);
     if value.get("activeId").is_some_and(|id| !id.is_null() && (active_id.is_none() || !items.iter().any(|item| item["id"]==active_id.unwrap() && item["status"]=="pending"))) { return Err("Todo snapshot has an invalid active item".into()); }
-    let mut result=json!({"protocolVersion":3,"revision":revision,"items":items,"toolAvailable":available,"available":service_available});
+    let mut result=json!({"protocolVersion":3,"revision":revision,"items":sanitized,"toolAvailable":available,"available":service_available});
     if let Some(active_id)=active_id { result["activeId"]=json!(active_id); }
     Ok(result)
 }
 
-fn update_todos(thread: &mut Thread, value: Value) -> Result<Option<Value>, String> {
-    let next = validate_todos(&value)?;
-    let revision = next["revision"].as_u64().unwrap_or(0);
-    if thread.snapshot.todos.as_ref().and_then(|todos| todos["revision"].as_u64()).is_some_and(|current| revision < current) { return Ok(None); }
-    if thread.snapshot.todos.as_ref() == Some(&next) { return Ok(Some(next)); }
-    thread.snapshot.todos = Some(next.clone());
-    Ok(Some(next))
+fn update_todos(snapshot: &mut Snapshot, value: Option<&Value>, observation: TodoObservation) -> bool {
+    let before = (snapshot.todos.clone(), snapshot.todo_sync.clone());
+    let next = value.map(validate_todos).transpose();
+    match next {
+        Ok(Some(next)) => {
+            let prior = snapshot.todos.as_ref();
+            let lower = prior.is_some_and(|prior| next["revision"].as_u64() < prior["revision"].as_u64());
+            let divergent = prior.is_some_and(|prior| next["revision"] == prior["revision"] && todo_task_state(prior) != todo_task_state(&next));
+            if lower && observation != TodoObservation::CatchUp { return false; }
+            if lower || divergent {
+                set_todo_sync(snapshot, "conflict", Some(TODO_CONFLICT_REASON));
+            } else {
+                let available = next["available"] == true;
+                snapshot.todos = Some(next);
+                if !available {
+                    if !snapshot.todo_sync.as_ref().is_some_and(|sync| sync.state == "conflict") {
+                        set_todo_sync(snapshot, "unavailable", Some("This execution cannot provide Todo updates. Saved tasks remain readable."));
+                    }
+                } else if observation == TodoObservation::Replay {
+                    if !snapshot.todo_sync.as_ref().is_some_and(|sync| sync.state == "conflict") {
+                        set_todo_sync(snapshot, "stale", Some(TODO_STALE_REASON));
+                    }
+                } else {
+                    set_todo_sync(snapshot, "current", None);
+                }
+            }
+        }
+        Ok(None) => {
+            if !snapshot.todo_sync.as_ref().is_some_and(|sync| sync.state == "conflict") {
+                if let Some(todos) = snapshot.todos.as_mut() { todos["available"] = json!(false); todos["toolAvailable"] = json!(false); }
+                set_todo_sync(snapshot, "unavailable", Some("This execution does not report the Still Todo service."));
+            }
+        }
+        Err(_) => {
+            if !snapshot.todo_sync.as_ref().is_some_and(|sync| sync.state == "conflict") {
+                if value.and_then(|value| value["protocolVersion"].as_u64()).is_some_and(|protocol| protocol != 3) {
+                    if let Some(todos) = snapshot.todos.as_mut() { todos["available"] = json!(false); todos["toolAvailable"] = json!(false); }
+                }
+                set_todo_sync(snapshot, "unavailable", Some("Todo updates could not be verified. The last valid list is still shown."));
+            }
+        }
+    }
+    before != (snapshot.todos.clone(), snapshot.todo_sync.clone())
+}
+
+async fn emit_todos(thread: &mut Thread) {
+    let mut event = Event::new("todos");
+    event.todos = thread.snapshot.todos.clone();
+    event.todo_sync = thread.snapshot.todo_sync.clone();
+    emit(thread, event).await;
 }
 
 async fn queue_request_response(thread: &mut Thread, id: Value, response: Value, outcome: Value) -> Result<oneshot::Receiver<Result<(), String>>, StillError> {
@@ -1799,14 +2579,21 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
             json!({"jsonrpc":"2.0","id":request_id,"method":"session/set_config_option","params":{"sessionId":session,"configId":args.config_id,"value":args.value}})
         }
     };
+    let previous_capabilities = thread.snapshot.capabilities.clone();
+    let previous_config = effective_config_key(&thread.snapshot.config_options);
+    let previous_capability_cursor = thread.capability_remote_cursor;
     thread.config_requests.insert(
         request_id,
         PendingConfig {
             id: args.config_id,
             value: args.value,
+            previous_capabilities,
+            previous_config,
+            previous_capability_cursor,
             reply,
         },
     );
+    if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
     if thread.outbound.send(request).is_err() {
         thread.config_requests.remove(&request_id);
         return Err(StillError::friendly(
@@ -1856,7 +2643,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor)?;
+    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None)?;
     let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -1875,6 +2662,10 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
         thread.permission = None; thread.pending_input_id = None;
         thread.snapshot.pending_permission = None; thread.snapshot.pending_input = None;
         thread.snapshot.state = "connecting".into(); thread.snapshot.last_error = None;
+        thread.awaiting_catch_up = true;
+        thread.capability_remote_cursor = thread.snapshot.remote_cursor;
+        if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
+        if mark_todos_stale(&mut thread.snapshot) { emit_todos(&mut thread).await; }
         thread.transport_active = true;
         thread.transport_epoch = thread.transport_epoch.saturating_add(1);
         drop(thread); row
@@ -1884,12 +2675,23 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
         let recovering_uncertain = saved.recovery_required || matches!(saved.state.as_str(), "submissionUnknown" | "rewinding");
         let mut snapshot = saved;
         snapshot.state = "connecting".into(); snapshot.last_error = None;
-        Arc::new(Mutex::new(Thread {
+        let stale_changed = mark_capabilities_stale(&mut snapshot);
+        let todo_stale_changed = mark_todos_stale(&mut snapshot);
+        let capability_remote_cursor = snapshot.remote_cursor;
+        let row = Arc::new(Mutex::new(Thread {
             prompt: snapshot.prompt_id.clone(), snapshot, app, outbound, cancel, close,
             permission: None, pending_input_id: None, config_requests: HashMap::new(), response_delivery: None,
             transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
             unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None,
-        }))
+            load_session: false, capability_notice: None,
+            awaiting_catch_up: true, capability_remote_cursor,
+        }));
+        if stale_changed {
+            let mut thread = row.lock().await;
+            emit_capabilities(&mut thread).await;
+        }
+        if todo_stale_changed { let mut thread = row.lock().await; emit_todos(&mut thread).await; }
+        row
     };
     let snapshot = row.lock().await.snapshot.clone();
     registry().lock().await.insert(args.execution_id, row.clone());
@@ -2020,7 +2822,14 @@ mod tests {
     use super::*;
     #[test]
     fn persistent_agent_bootstrap_streams_large_sources_over_stdin() {
-        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0).unwrap();
+        let runtime = ProviderRuntime {
+            transport: "codex-app-server".into(),
+            executable: Some("/usr/local/bin/codex".into()),
+            version: Some("codex-cli 0.52.0".into()),
+            version_source: Some("executable".into()),
+            version_observed_at: Some(1_793_372_400_000),
+        };
+        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None).unwrap();
         assert!(command.len() < 8 * 1024, "SSH exec command must stay far below Linux's 128 KiB argument limit");
         assert!(!command.contains(&payload), "base64 configuration belongs on stdin, never in the SSH exec argument");
         assert!(payload.len() > 128 * 1024, "test fixture should exercise the Linux per-argument overflow boundary");
@@ -2029,13 +2838,229 @@ mod tests {
         assert_eq!(config["source"], include_str!("../agent-host/supervisor.mjs"));
         assert_eq!(config["todosSource"], include_str!("../agent-host/todos.mjs"));
         assert_eq!(config["command"][3], include_str!("../agent-host/bridge.mjs"));
+        assert_eq!(config["providerRuntime"]["transport"], "codex-app-server");
+        let worker_env: Value = serde_json::from_str(config["env"]["STILL_PROVIDER_RUNTIME"].as_str().unwrap()).unwrap();
+        assert_eq!(worker_env, config["providerRuntime"], "the worker must receive the same launch-time runtime facts");
 
-        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17).unwrap();
+        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None).unwrap();
         assert!(attach_command.len() < 8 * 1024);
         assert!(attach_payload.len() < 1024, "reattach does not need to retransmit bundled source code");
         let attach_config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(attach_payload).unwrap()).unwrap();
         assert!(attach_config.get("source").is_none());
+        assert!(attach_config.get("providerRuntime").is_none(), "reattach keeps the worker's existing facts");
         assert_eq!(attach_config["command"], json!([]));
+    }
+    #[test]
+    fn provider_runtime_transports_and_version_output_stay_bounded() {
+        for (id, transport) in [("opencode", "http-v2+sse"), ("codex", "codex-app-server"), ("claude", "claude-stream-json"), ("pi", "pi-rpc"), ("gemini", "acp-v1")] {
+            assert_eq!(agent_transport(id), transport);
+        }
+        let parsed = parse_versions("STILL_NODE:22.1.0\nSTILL_VERSION:codex:codex-cli 0.52.0\nSTILL_VERSION:pi:\nSTILL_VERSION::1.2.3\nSTILL_VERSION:claude:2.0.1 (Claude Code)");
+        assert_eq!(parsed.get("codex").map(String::as_str), Some("codex-cli 0.52.0"));
+        assert_eq!(parsed.get("claude").map(String::as_str), Some("2.0.1 (Claude Code)"));
+        assert_eq!(parsed.len(), 2, "empty ids/versions and the Node line are not provider versions");
+        let unknown = ProviderRuntime { transport: "pi-rpc".into(), executable: Some("pi".into()), version: None, version_source: None, version_observed_at: None };
+        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None).unwrap();
+        let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
+        assert!(config["providerRuntime"].get("version").is_none(), "an unknown version stays absent rather than guessed");
+        assert_eq!(config["providerRuntime"]["transport"], "pi-rpc");
+    }
+    #[test]
+    fn resumed_todo_seed_stays_in_stdin_config_and_never_in_the_ssh_command() {
+        let repeated_title = "😀".repeat(500);
+        let repeated_detail = "🧭".repeat(500);
+        let items = (0..100)
+            .map(|index| json!({
+                "id":format!("task-{index}"),"title":repeated_title,"status":"pending",
+                "createdBy":"agent","updatedBy":"agent","createdAt":1,"startedAt":1,
+                "detail":repeated_detail
+            }))
+            .collect::<Vec<_>>();
+        let seed = json!({"revision":12,"items":items,"activeId":"task-0"});
+        let seed_bytes = serde_json::to_vec(&seed).unwrap();
+        assert!(seed_bytes.len() > 128 * 1024, "fixture should exceed Linux's per-argument limit if copied into argv");
+        assert!(seed_bytes.len() < 1024 * 1024, "valid seed remains under the private file limit");
+        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed)).unwrap();
+        assert!(command.len() < 8 * 1024);
+        assert!(!command.contains("Resume the prior checklist") && !command.contains("task-0"));
+        let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
+        assert_eq!(config["todoSeed"], seed, "native passes only its validated snapshot through bootstrap stdin");
+        assert!(config["todoSeed"].get("toolAvailable").is_none());
+    }
+    #[test]
+    fn replacement_seed_requires_the_saved_host_folder_provider_and_explicit_session() {
+        let mut saved = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        assert!(validate_resume_scope(&saved, "host", "pi", "/srv/project", Some("session-1")).is_ok());
+        for (host, agent, cwd, session) in [
+            ("other-account", "pi", "/srv/project", Some("session-1")),
+            ("host", "codex", "/srv/project", Some("session-1")),
+            ("host", "pi", "/other-folder", Some("session-1")),
+            ("host", "pi", "/srv/project", Some("wrong-session")),
+            ("host", "pi", "/srv/project", None),
+        ] { assert!(validate_resume_scope(&saved, host, agent, cwd, session).is_err()); }
+        saved.resumable = false;
+        assert!(validate_resume_scope(&saved, "host", "pi", "/srv/project", Some("session-1")).is_err());
+        saved.resumable = true; saved.turn_active = true;
+        assert!(validate_resume_scope(&saved, "host", "pi", "/srv/project", Some("session-1")).is_err());
+    }
+    #[test]
+    fn legacy_managed_execution_must_be_explicitly_closed_before_replacement() {
+        let mut legacy = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        legacy.capabilities = None;
+        legacy.todos = None;
+        assert!(validate_replacement_execution(&legacy, "conversation-1").is_err(), "native ownership guard does not depend on the upgraded worker report");
+        assert!(validate_replacement_execution(&legacy, "another-conversation").is_ok());
+        assert!(validate_resume_scope(&legacy, "host", "pi", "/srv/project", Some("session-1")).is_ok(), "an explicitly resumed closed legacy snapshot remains compatible");
+    }
+    #[test]
+    fn discovery_availability_reports_identity_without_claiming_support() {
+        let runtime = ProviderRuntime { transport: "acp-v1".into(), executable: Some("/home/user/.local/bin/gemini".into()), version: None, version_source: None, version_observed_at: None };
+        assert_eq!(serde_json::to_value(&runtime).unwrap(), json!({"transport":"acp-v1","executable":"/home/user/.local/bin/gemini"}));
+    }
+    fn capability_fixture() -> Value {
+        json!({
+            "schemaVersion":1,"executionId":"execution-1","agentSessionId":"session-1","cwd":"/srv/project",
+            "configGeneration":2,"observedAt":1234,"freshness":"stale","ignoredMetadata":"drop me",
+            "providerRuntime":{"transport":"pi-rpc","executable":"/usr/bin/pi","version":"Pi 0.9.1","versionSource":"executable","versionObservedAt":1230,"ignoredRuntime":"drop me"},
+            "features":{
+                "sharedTodos":{"status":"supported","evidence":"observed","reason":"An authenticated tool call succeeded."},
+                "providerPlans":{"status":"unsupported","evidence":"adapter","reason":"This integration does not consume provider plans."},
+                "providerTaskProjection":{"status":"unsupported","evidence":"adapter","reason":"Native tasks are not synchronized."},
+                "clientTodoWrite":{"status":"unsupported","evidence":"adapter","reason":"The agent owns Todo changes."},
+                "unknownFeature":{"status":"supported","evidence":"observed","reason":"Ignored."}
+            }
+        })
+    }
+    fn capability_snapshot(report: CapabilityReport) -> Snapshot {
+        Snapshot {
+            conversation_id: "conversation-1".into(), host_key: "host".into(),
+            execution_id: "execution-1".into(), local_session_id: "local".into(),
+            agent_id: "pi".into(), agent_name: "Pi".into(), agent_session_id: Some("session-1".into()),
+            cwd: "/srv/project".into(), state: "detached".into(), transcript: Vec::new(),
+            pending_permission: None, last_error: None, last_sequence: 0, turn_active: false,
+            config_options: Vec::new(), commands: Vec::new(), pending_input: None, resumable: true,
+            history_capabilities: json!({"revert":false,"retry":false}), active_message_ids: None,
+            persistent: true, remote_cursor: 12, prompt_id: None, recovery_required: false,
+            todos: None, todo_sync: None, capabilities: Some(report),
+        }
+    }
+    #[test]
+    fn capability_wire_validation_binds_scope_drops_unknowns_and_owns_freshness() {
+        let report = validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap();
+        assert_eq!(report.freshness, "current", "worker-supplied freshness is never trusted");
+        assert_eq!(report.config_generation, 2);
+        assert_eq!(report.provider_runtime.transport, "pi-rpc");
+        let saved = serde_json::to_value(report).unwrap();
+        assert!(saved.get("ignoredMetadata").is_none());
+        assert!(saved["providerRuntime"].get("ignoredRuntime").is_none());
+        assert!(saved["features"].get("unknownFeature").is_none());
+        assert_eq!(saved["features"]["sharedTodos"]["evidence"], "observed");
+    }
+    #[test]
+    fn capability_wire_validation_rejects_scope_claim_and_size_violations() {
+        let raw = capability_fixture();
+        assert!(validate_capabilities(&raw, "another-execution", "pi", "session-1", "/srv/project").is_err());
+        assert!(validate_capabilities(&raw, "execution-1", "pi", "another-session", "/srv/project").is_err());
+        assert!(validate_capabilities(&raw, "execution-1", "pi", "session-1", "/another/project").is_err());
+        let mut wrong_transport = raw.clone();
+        wrong_transport["providerRuntime"]["transport"] = json!("acp-v1");
+        assert!(validate_capabilities(&wrong_transport, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut promoted = raw.clone();
+        promoted["features"]["clientTodoWrite"] = json!({"status":"supported","evidence":"observed","reason":"User editing is enabled."});
+        assert!(validate_capabilities(&promoted, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut missing_evidence = raw.clone();
+        missing_evidence["features"]["sharedTodos"].as_object_mut().unwrap().remove("evidence");
+        assert!(validate_capabilities(&missing_evidence, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut malformed_evidence = raw.clone();
+        malformed_evidence["features"]["sharedTodos"]["status"] = json!("unverified");
+        malformed_evidence["features"]["sharedTodos"]["evidence"] = json!(true);
+        assert!(validate_capabilities(&malformed_evidence, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut malformed_source = raw.clone();
+        malformed_source["providerRuntime"]["versionSource"] = json!(false);
+        assert!(validate_capabilities(&malformed_source, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut unsafe_generation = raw.clone();
+        unsafe_generation["configGeneration"] = json!(9_007_199_254_740_992u64);
+        assert!(validate_capabilities(&unsafe_generation, "execution-1", "pi", "session-1", "/srv/project").is_err());
+        let mut too_large = raw;
+        too_large["features"]["sharedTodos"]["reason"] = json!("r".repeat(241));
+        assert!(validate_capabilities(&too_large, "execution-1", "pi", "session-1", "/srv/project").is_err());
+    }
+    #[test]
+    fn restored_capabilities_are_stale_and_invalid_optional_data_is_discarded() {
+        let report = validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap();
+        let mut snapshot = capability_snapshot(report);
+        assert!(mark_capabilities_stale(&mut snapshot));
+        assert_eq!(snapshot.capabilities.as_ref().unwrap().freshness, "stale");
+        assert!(!mark_capabilities_stale(&mut snapshot), "stale transitions are idempotent");
+        let header = serde_json::to_value(snapshot.history_header()).unwrap();
+        assert_eq!(header["capabilities"]["freshness"], "stale");
+        assert_eq!(header["transcript"], json!([]));
+
+        let mut corrupted = capability_fixture();
+        corrupted["freshness"] = json!("current");
+        corrupted["features"]["sharedTodos"]["status"] = json!("invented");
+        let capability: CapabilityReport = serde_json::from_value(corrupted).unwrap();
+        let mut snapshot = capability_snapshot(capability);
+        restore_capabilities(&mut snapshot);
+        assert!(snapshot.capabilities.is_none(), "invalid optional capability data must not break conversation restoration");
+
+        let mut missing = serde_json::to_value(capability_snapshot(
+            validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap(),
+        )).unwrap();
+        missing["capabilities"] = json!({"schemaVersion":1,"broken":true});
+        let restored: Snapshot = serde_json::from_value(missing).unwrap();
+        assert!(restored.capabilities.is_none(), "malformed optional metadata does not reject the whole snapshot");
+    }
+    #[test]
+    fn capability_order_uses_generation_and_worker_event_cursor_not_remote_clocks() {
+        let base = validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap();
+        let mut old_generation = base.clone(); old_generation.config_generation = 1;
+        assert!(capability_is_older(Some(&base), &old_generation, 8, 12));
+        let mut later_generation = base.clone(); later_generation.config_generation = 3;
+        later_generation.observed_at = 1;
+        assert!(!capability_is_older(Some(&base), &later_generation, 8, 12));
+        assert!(capability_is_older(Some(&base), &later_generation, 13, 12));
+    }
+    #[test]
+    fn capability_freshness_requires_catch_up_and_no_pending_settings_or_history() {
+        assert_eq!(capability_observation_freshness(true, true, false, false, false), "current");
+        for (fresh, live, catching_up, config, history) in [
+            (false, true, false, false, false), (true, false, false, false, false),
+            (true, true, true, false, false), (true, true, false, true, false),
+            (true, true, false, false, true),
+        ] { assert_eq!(capability_observation_freshness(fresh, live, catching_up, config, history), "stale"); }
+    }
+    #[test]
+    fn config_acknowledgements_cannot_refresh_old_generation_capability_evidence() {
+        let report = validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap();
+        let mut snapshot = capability_snapshot(report);
+        snapshot.config_options = vec![json!({"id":"model","type":"select","currentValue":"a"})];
+        let (reply, _receive) = oneshot::channel();
+        let pending = PendingConfig {
+            id: "model".into(), value: json!("b"), previous_capabilities: snapshot.capabilities.clone(),
+            previous_config: effective_config_key(&snapshot.config_options), previous_capability_cursor: 12, reply,
+        };
+        mark_capabilities_stale(&mut snapshot);
+        assert!(restore_rejected_capability_report(&mut snapshot, &pending, 12), "a rejected unchanged setting may restore its previously current report");
+        mark_capabilities_stale(&mut snapshot);
+        snapshot.config_options[0]["currentValue"] = json!("b");
+        assert!(!restore_rejected_capability_report(&mut snapshot, &pending, 12));
+        assert!(!confirm_config_capability_report(&mut snapshot, &pending, 12));
+        assert!(!confirm_config_capability_report(&mut snapshot, &pending, 13), "a newer event cursor alone is not new-model evidence");
+        snapshot.capabilities.as_mut().unwrap().config_generation += 1;
+        assert!(confirm_config_capability_report(&mut snapshot, &pending, 13));
+        assert_eq!(snapshot.capabilities.as_ref().unwrap().freshness, "current");
+        assert_eq!(effective_config_key(&[json!({"id":"b","type":"select","currentValue":1}),json!({"id":"a","type":"select","currentValue":2})]),
+            effective_config_key(&[json!({"id":"a","type":"select","currentValue":2}),json!({"id":"b","type":"select","currentValue":1})]));
+        assert!(invalidate_for_provider_session(&mut snapshot, Some("forked-session")));
+    }
+    #[test]
+    fn only_direct_gemini_load_session_advertisement_fills_missing_resume_metadata() {
+        assert!(provider_resumable("gemini", None, true, "gemini-session"));
+        assert!(!provider_resumable("gemini", None, false, "gemini-session"));
+        assert!(!provider_resumable("pi", None, true, "pi-session"));
+        assert!(!provider_resumable("gemini", Some(false), true, "gemini-session"));
+        assert!(provider_resumable("pi", Some(true), false, "pi-session"));
     }
     #[test]
     fn todo_snapshots_reject_stale_revisions_invalid_status_and_duplicate_ids() {
@@ -2046,6 +3071,68 @@ mod tests {
         let duplicate=json!({"protocolVersion":3,"revision":1,"toolAvailable":false,"available":true,"items":[{"id":"same","title":"A","status":"pending","createdBy":"user","updatedBy":"user"},{"id":"same","title":"B","status":"pending","createdBy":"agent","updatedBy":"agent"}]});
         assert!(validate_todos(&duplicate).is_err());
         assert!(validate_todos(&json!({"protocolVersion":3,"revision":1,"activeId":"task-1","toolAvailable":false,"available":true,"items":[{"id":"task-1","title":"Finished","status":"completed","createdBy":"agent","updatedBy":"agent"}]})).is_err());
+    }
+    fn todo_fixture(revision: u64) -> Value {
+        json!({"protocolVersion":3,"revision":revision,"activeId":"task-1","toolAvailable":true,"available":true,
+            "items":[{"id":"task-1","title":"Keep the shared list","status":"pending","createdBy":"agent","updatedBy":"agent","startedAt":10,"detail":"Checking restore."}]})
+    }
+    #[test]
+    fn todo_revision_equality_separates_tasks_from_availability_and_deduplicates_updates() {
+        let mut snapshot = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        let original = todo_fixture(7);
+        assert!(update_todos(&mut snapshot, Some(&original), TodoObservation::Live));
+        assert!(!update_todos(&mut snapshot, Some(&original), TodoObservation::Live));
+        let mut readiness = original.clone(); readiness["toolAvailable"] = json!(false);
+        assert!(update_todos(&mut snapshot, Some(&readiness), TodoObservation::Live));
+        assert_eq!(todo_task_state(snapshot.todos.as_ref().unwrap()), todo_task_state(&original));
+        let mut conflict = original.clone(); conflict["items"][0]["title"] = json!("Divergent task at the same revision");
+        assert!(update_todos(&mut snapshot, Some(&conflict), TodoObservation::Live));
+        assert_eq!(snapshot.todos, Some(readiness));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "conflict");
+        assert!(!update_todos(&mut snapshot, Some(&conflict), TodoObservation::Live));
+        assert!(!update_todos(&mut snapshot, Some(&todo_fixture(6)), TodoObservation::Replay));
+        assert!(update_todos(&mut snapshot, Some(&original), TodoObservation::CatchUp));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "current");
+    }
+    #[test]
+    fn authoritative_lower_todo_revision_conflicts_without_rolling_back_the_saved_list() {
+        let mut snapshot = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        let original = todo_fixture(7);
+        update_todos(&mut snapshot, Some(&original), TodoObservation::Live);
+        assert!(!update_todos(&mut snapshot, Some(&todo_fixture(0)), TodoObservation::Replay));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "current");
+        assert!(update_todos(&mut snapshot, Some(&todo_fixture(0)), TodoObservation::CatchUp));
+        assert_eq!(snapshot.todos, Some(original.clone()));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().reason.as_deref(), Some(TODO_CONFLICT_REASON));
+        assert!(!update_todos(&mut snapshot, None, TodoObservation::CatchUp), "an absent report cannot clear a known conflict");
+        assert!(!update_todos(&mut snapshot, Some(&original), TodoObservation::Replay), "replay alone cannot claim catch-up completed");
+        assert!(update_todos(&mut snapshot, Some(&todo_fixture(8)), TodoObservation::Live));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "current");
+    }
+    #[test]
+    fn invalid_todo_metadata_is_nonfatal_and_offline_state_preserves_service_facts_and_turns() {
+        let mut snapshot = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        snapshot.state = "inputRequired".into(); snapshot.turn_active = true;
+        snapshot.pending_permission = Some(json!({"requestId":"approval","title":"Run checks"}));
+        let original = todo_fixture(7);
+        update_todos(&mut snapshot, Some(&original), TodoObservation::Live);
+        assert!(mark_todos_stale(&mut snapshot));
+        assert_eq!(snapshot.todos, Some(original.clone()), "disconnect observation cannot rewrite service/readiness flags");
+        let mut invalid = original.clone(); invalid["items"][0]["status"] = json!("in_progress");
+        assert!(update_todos(&mut snapshot, Some(&invalid), TodoObservation::Live));
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "unavailable");
+        assert!(!update_todos(&mut snapshot, Some(&invalid), TodoObservation::Live));
+        assert_eq!(snapshot.todos, Some(original));
+        assert_eq!(snapshot.state, "inputRequired");
+        assert!(snapshot.turn_active);
+        assert_eq!(snapshot.pending_permission.as_ref().unwrap()["requestId"], "approval");
+        let mut complete = todo_fixture(8); complete.as_object_mut().unwrap().remove("activeId"); complete["items"][0]["status"] = json!("completed");
+        update_todos(&mut snapshot, Some(&complete), TodoObservation::Live);
+        assert!(snapshot.turn_active, "a finished checklist is not a finished turn");
+        assert_eq!(snapshot.state, "inputRequired");
+        restore_todos(&mut snapshot);
+        assert_eq!(snapshot.todo_sync.as_ref().unwrap().state, "stale");
+        assert_eq!(snapshot.todos, Some(complete));
     }
     #[test]
     fn request_ids_do_not_reuse_prompt_receipts_after_reattachment() {

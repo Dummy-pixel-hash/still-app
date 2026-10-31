@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react"
-import type { AgentTodoSnapshot } from "../agents/types"
+import type { AgentTodoSnapshot, AgentTodoSync } from "../agents/types"
 import AgentIcon from "./AgentIcon"
 
 const statusText = (status: string) => status === "completed" ? "Done" : "Not done"
@@ -8,8 +8,9 @@ const durationText = (milliseconds: number) => {
   return seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m${seconds%60?` ${seconds%60}s`:""}`
 }
 
-export default function AgentTodos({ todos, expanded, expand, collapse }: {
+export default function AgentTodos({ todos, sync, expanded, expand, collapse }: {
   todos?: AgentTodoSnapshot
+  sync?: AgentTodoSync
   expanded: boolean
   expand: () => void
   collapse: () => void
@@ -21,6 +22,10 @@ export default function AgentTodos({ todos, expanded, expand, collapse }: {
   const activeId=todos?.activeId || items.find(item=>item.status==="pending")?.id
   const activeItem=items.find(item=>item.id===activeId&&item.status==="pending")
   const done=items.filter(item=>item.status==="completed").length
+  const observation = sync?.state === "conflict" ? sync.reason || "Showing saved Todos; the remote list does not match."
+    : sync?.state === "stale" ? sync.reason || "Showing saved Todos; updates may have continued on the server."
+      : sync?.state === "unavailable" ? sync.reason || "This execution cannot provide Todo updates. Saved tasks remain readable."
+        : todos?.available === false ? "This execution cannot provide Todo updates. Saved tasks remain readable." : undefined
   const durationFor=(item:typeof items[number])=>item.durationMs!==undefined?durationText(item.durationMs):item.startedAt!==undefined&&item.completedAt!==undefined?durationText(item.completedAt-item.startedAt):item.id===activeItem?.id&&item.startedAt!==undefined?durationText(now-item.startedAt):"…"
   const expandAndFocus = () => {
     expand()
@@ -62,13 +67,13 @@ export default function AgentTodos({ todos, expanded, expand, collapse }: {
               return <li className={`agent-todo-readonly is-${item.status}${current?" is-current":""}`} key={item.id}>
                 <span className={`agent-todo-status-mark is-${item.status}${current?" is-current":""}`} aria-label={statusText(item.status)}>{item.status === "completed" ? "✓" : ""}</span>
                 <div className="agent-todo-readonly-body">
-                  <div className="agent-todo-readonly-line"><span className="agent-todo-readonly-title">{item.title}</span><span className="agent-todo-readonly-meta">{statusText(item.status)} <time>{durationFor(item)}</time></span></div>
+                   <div className="agent-todo-readonly-line"><span className="agent-todo-readonly-title">{item.title}</span><span className="agent-todo-readonly-meta">{statusText(item.status)} <time title={item.status === "pending" && item.startedAt !== undefined ? "Elapsed since task start, not verified continuous work" : "Recorded task duration"}>{durationFor(item)}</time></span></div>
                   {current&&item.detail&&<p className="agent-todo-detail">{item.detail}</p>}
                 </div>
               </li>
             })}
           </ol>}
-          {todos?.available === false && <p className="agent-todos-offline" role="status">This saved Todo list cannot receive updates from this older agent execution.</p>}
+           {observation && <p className="agent-todos-offline" role="status">{observation}</p>}
         </div>
       </div>
     </div>

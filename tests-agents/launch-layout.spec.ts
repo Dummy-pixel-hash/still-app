@@ -276,14 +276,14 @@ test("native particle budget caps Windows animation work while preserving the sm
   const metrics = await page.evaluate(async () => {
     const { createAuroraRenderer } = await import("/src/agents/auroraRenderer.ts")
     const canvas = document.createElement("canvas")
-    const renderer = createAuroraRenderer(canvas, { maxParticles: 6000 })!
+    const renderer = createAuroraRenderer(canvas, { maxParticles: 4000 })!
     renderer.resize(1232, 323, 1)
     const wide = renderer.metrics().particles
     renderer.resize(405, 250, 1)
     const compact = renderer.metrics().particles
     return { wide, compact }
   })
-  expect(metrics.wide).toBe(6000)
+  expect(metrics.wide).toBe(4000)
   expect(metrics.compact).toBe(3600)
 })
 

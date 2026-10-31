@@ -61,10 +61,14 @@ if (type === "opencode") {
     const input = body ? JSON.parse(body) : {}
     const send = value => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)) }
     if (url.pathname === "/api/info") return send({ version: "2.0.0" })
-    if (url.pathname === "/openapi.json") return send({ paths: process.env.STILL_TEST_NO_HISTORY ? {} : {
+    if (url.pathname === "/openapi.json") return send({ paths: {
+      ...(process.env.STILL_TEST_ACCEPT_MCP ? { "/api/experimental/mcp/{server}": { put: {} } } : {}),
+      ...(process.env.STILL_TEST_NO_HISTORY ? {} : {
       "/api/session/{sessionID}/revert/stage": { post: { requestBody: { content: { "application/json": { schema: { properties: { files: { type: "boolean" } } } } } } } },
       "/api/session/{sessionID}/revert/commit": { post: {} },
+      }),
     } })
+    if (url.pathname === "/api/experimental/mcp/still-todos" && req.method === "PUT" && process.env.STILL_TEST_ACCEPT_MCP) return send({})
     if (url.pathname === "/api/session/active") return send({ data: running ? { "session-fixture": { type: "running" } } : {} })
     if (url.pathname === "/api/session") return send({ data: { id: "session-fixture", agent: "build", model: sessionModel } })
     if (url.pathname === "/api/session/session-fixture" && req.method === "GET") return send({ data: { id: "session-fixture", agent: "build", model: sessionModel, ...(revert ? { revert } : {}) } })

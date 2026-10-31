@@ -42,11 +42,14 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
   await page.locator('.agent-aurora[data-rendered="true"][data-paused="true"]').waitFor()
   await page.waitForFunction(() => {
     const source = document.querySelector(".agent-aurora canvas")
-    return !source.dataset.frostManaged || source.dataset.frostFrame
+    const workspace = document.querySelector(".agent-workspace")
+    return workspace.dataset.nativeShell !== "true" || source.dataset.frostFrame
   })
   await capture("normal", await page.screenshot({ animations: "disabled" }))
   const previousFrame = await page.evaluate(() => {
     const canvas = document.querySelector(".agent-aurora canvas")
+    const workspace = document.querySelector(".agent-workspace")
+    if (workspace.dataset.nativeShell !== "true") return null
     const context = canvas.getContext("2d")
     context.save()
     context.setTransform(1, 0, 0, 1, 0, 0)
@@ -55,11 +58,15 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
       context.fillRect(x, 0, 8, canvas.height)
     }
     context.restore()
-    const previous = canvas.dataset.frostFrame
+    if (workspace.dataset.nativeShell !== "true") return null
+    const revision = Number(canvas.dataset.frostFrame || 0)
     canvas.dispatchEvent(new Event("still:backdrop-frame"))
-    return previous
+    return revision
   })
-  if (previousFrame !== undefined) await page.waitForFunction(previous => document.querySelector(".agent-aurora canvas").dataset.frostFrame !== previous, previousFrame)
+  if (previousFrame !== null) await page.waitForFunction(previous => {
+    const canvas = document.querySelector(".agent-aurora canvas")
+    return Number(canvas?.dataset.frostFrame || 0) > previous
+  }, previousFrame)
   const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > *, .agent-composer > * { opacity: 0 !important; pointer-events: none !important; }" })
   let disable
   try {

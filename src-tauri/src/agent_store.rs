@@ -200,15 +200,18 @@ fn fields(snapshot: &Snapshot) -> Value {
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
         "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities,
-        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required,"todos":snapshot.todos})
+        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required,"todos":snapshot.todos,"todoSync":snapshot.todo_sync,"capabilities":snapshot.capabilities})
 }
 
 pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, StillError> {
-    disk(app, move |root| {
+    let mut snapshot = disk(app, move |root| {
         if file(root, &id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
         let row = replay(records(&file(root, &id, "jsonl")?, &mut Vec::new())?)?;
         serde_json::from_value(row).map_err(|error| error.to_string())
-    }).await
+    }).await?;
+    crate::agent::restore_capabilities(&mut snapshot);
+    crate::agent::restore_todos(&mut snapshot);
+    Ok(snapshot)
 }
 
 async fn disk<T: Send + 'static>(app: &AppHandle, operation: impl FnOnce(&Path) -> Result<T, String> + Send + 'static) -> Result<T, StillError> {
@@ -221,6 +224,27 @@ async fn disk<T: Send + 'static>(app: &AppHandle, operation: impl FnOnce(&Path) 
         operation(&root)
     }).await.map_err(|e| StillError::friendly("agent_storage", e.to_string()))?
         .map_err(|e| StillError::friendly("agent_storage", format!("Conversation changes could not be saved on this device: {e}")))
+}
+
+fn stale_library_capabilities(row: &mut Value) {
+    let Some(raw) = row.get("capabilities").filter(|value| value.is_object()).cloned() else { return };
+    let expected = (
+        row["executionId"].as_str(),
+        row["agentId"].as_str(),
+        row["agentSessionId"].as_str(),
+        row["cwd"].as_str(),
+    );
+    let validated = match expected {
+        (Some(execution), Some(agent), Some(session), Some(cwd)) =>
+            crate::agent::validate_capabilities(&raw, execution, agent, session, cwd).ok(),
+        _ => None,
+    };
+    if let Some(mut report) = validated {
+        report.freshness = "stale".into();
+        row["capabilities"] = serde_json::to_value(report).unwrap_or(Value::Null);
+    } else if let Some(object) = row.as_object_mut() {
+        object.remove("capabilities");
+    }
 }
 
 pub async fn register(app: &AppHandle, snapshot: &Snapshot, resume: bool) -> Result<(), StillError> {
@@ -268,7 +292,7 @@ pub async fn event(app: &AppHandle, snapshot: &Snapshot, event: &Event) -> Resul
     let mut header = fields(snapshot);
     if let Some(configs) = &event.config_options { header["configOptions"] = json!(configs); }
     if let Some(commands) = &event.commands { header["commands"] = commands.clone(); }
-    if matches!(event.kind.as_str(), "userMessage" | "threadComplete" | "threadError" | "permission" | "input" | "requestOutcome") { header["touchedAt"] = json!(timestamp()); }
+    if is_activity_event(&event.kind) { header["touchedAt"] = json!(timestamp()); }
     let event = history_event(event);
     disk(app, move |root| {
         if file(root, &id, "deleted")?.exists() { return Ok(()); }
@@ -294,6 +318,10 @@ fn history_event(event: &Event) -> Event {
     event
 }
 
+fn is_activity_event(kind: &str) -> bool {
+    matches!(kind, "userMessage" | "threadComplete" | "threadError" | "permission" | "input" | "requestOutcome")
+}
+
 #[tauri::command]
 pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
     let mut library = disk(&app, |root| {
@@ -314,6 +342,7 @@ pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
                 match result.and_then(replay) { Ok(row) => rows.push(row), Err(error) => warnings.push(error) }
             }
         }
+        for row in &mut rows { stale_library_capabilities(row); crate::agent::restore_todo_fields(row); }
         Ok(json!({"rows":rows,"workspaces":workspace,"storagePath":root.to_string_lossy(),"warnings":warnings}))
     }).await?;
     library["liveExecutions"] = json!(crate::agent::live_executions().await);
@@ -459,6 +488,34 @@ mod tests {
         assert_eq!(recovered["transcript"][0]["request"]["requestId"],"q-1");
         assert_eq!(recovered["transcript"][1]["requestOutcome"]["outcome"],"answered");
     }
+    #[test]
+    fn capability_events_do_not_count_as_conversation_activity() {
+        assert!(is_activity_event("userMessage"));
+        assert!(!is_activity_event("capabilities"));
+        assert!(!is_activity_event("todos"));
+    }
+    #[test]
+    fn library_capabilities_are_scope_validated_and_always_stale() {
+        let report = json!({
+            "schemaVersion":1,"executionId":"execution-1","agentSessionId":"session-1","cwd":"/srv/project",
+            "configGeneration":0,"observedAt":1234,
+            "providerRuntime":{"transport":"pi-rpc"},
+            "features":{
+                "sharedTodos":{"status":"unverified","reason":"Waiting for tool registration."},
+                "providerPlans":{"status":"unsupported","evidence":"adapter","reason":"Not integrated."},
+                "providerTaskProjection":{"status":"unsupported","evidence":"adapter","reason":"Not integrated."},
+                "clientTodoWrite":{"status":"unsupported","evidence":"adapter","reason":"Agent-managed."}
+            }
+        });
+        let mut row = json!({"executionId":"execution-1","agentId":"pi","agentSessionId":"session-1","cwd":"/srv/project","capabilities":report});
+        stale_library_capabilities(&mut row);
+        assert_eq!(row["capabilities"]["freshness"], "stale");
+
+        row["capabilities"]["features"]["clientTodoWrite"]["status"] = json!("supported");
+        row["capabilities"]["features"]["clientTodoWrite"]["evidence"] = json!("observed");
+        stale_library_capabilities(&mut row);
+        assert!(row.get("capabilities").is_none(), "invalid optional report is omitted without hiding the conversation");
+    }
     fn root() -> PathBuf {
         static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("still-history-{}-{}-{}", std::process::id(), timestamp(), ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
@@ -549,6 +606,31 @@ mod tests {
         let retry = serde_json::from_value(json!({"sequence":3,"attemptId":"second-run","type":"userMessage","messageId":"retry","text":"Later prompt"})).unwrap();
         append(&path, &Record::Event { fields:json!({"executionId":"second-run","lastSequence":3}), event:retry }).unwrap();
         assert_eq!(replay(records(&path, &mut Vec::new()).unwrap()).unwrap()["transcript"].as_array().unwrap().len(), 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn latest_todos_survive_revert_checkpoint_and_provider_session_replacement() {
+        let root = root(); let path = file(&root, "todo-revert-history", "jsonl").unwrap();
+        let original = json!({"protocolVersion":3,"revision":7,"toolAvailable":true,"available":true,"activeId":"kept-task",
+            "items":[{"id":"kept-task","title":"Do not rewind the shared list","status":"pending","createdBy":"agent","updatedBy":"agent","startedAt":10,"detail":"Still current."}]});
+        append(&path, &Record::Create { row:json!({"executionId":"first-run","lastSequence":0,"transcript":[],"meta":{"id":"todo-revert-history","activityAt":1}}) }).unwrap();
+        for (sequence, kind) in [(1,"userMessage"),(2,"todos")] {
+            let event: Event = serde_json::from_value(json!({"sequence":sequence,"attemptId":"first-run","type":kind,"messageId":"m1","text":"Revert me later","todos":if kind == "todos" {original.clone()}else{Value::Null}})).unwrap();
+            append(&path,&Record::Event {fields:json!({"executionId":"first-run","lastSequence":sequence,"todos":original,"todoSync":{"state":"current"}}),event}).unwrap();
+        }
+        let boundary: Event = serde_json::from_value(json!({"sequence":3,"attemptId":"first-run","type":"historyReverted","messageId":"m1"})).unwrap();
+        append(&path,&Record::Event {fields:json!({"executionId":"first-run","agentSessionId":"forked-pi-session","lastSequence":3,"todos":original,"todoSync":{"state":"current"}}),event:boundary}).unwrap();
+        checkpoint(&path).unwrap();
+        let mut row = replay(records(&path,&mut Vec::new()).unwrap()).unwrap();
+        assert!(!row["transcript"].as_array().unwrap().iter().any(|event| event["type"] == "todos"));
+        assert_eq!(row["todos"], original);
+        append(&path,&Record::Update {fields:json!({"executionId":"resumed-run","lastSequence":0,"agentSessionId":"forked-pi-session","todos":original,"todoSync":{"state":"current"}})}).unwrap();
+        checkpoint(&path).unwrap();
+        row = replay(records(&path,&mut Vec::new()).unwrap()).unwrap();
+        crate::agent::restore_todo_fields(&mut row);
+        assert_eq!(row["todos"], original);
+        assert_eq!(row["todoSync"]["state"], "stale");
+        assert_eq!(row["meta"]["activityAt"], 1);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

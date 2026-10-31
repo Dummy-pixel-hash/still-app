@@ -17,8 +17,7 @@
         "decorations": false,
         "shadow": false,
         "transparent": false,
-        "backgroundColor": "#050505",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --force-color-profile=srgb"
+        "backgroundColor": "#050505"
       }
     ],
     "security": {

@@ -16,7 +16,7 @@ Still is a persistent remote terminal: SSH into a server, work in a per-card tmu
 
 The workspace groups session cards into projects. Opening a card opens the terminal; leaving the terminal view does not disconnect its worker. Credentials are requested at connection time and optionally retained in the OS keyring. Host-key trust requires an explicit decision.
 
-The user is adding an opt-in floating orb to glance at sessions while working elsewhere. The first integration exposes observed connection activity and connection-related attention. Agent-specific approval and completion detection is not yet established.
+The opt-in floating orb is the status companion for the Agents workspace. The approved next milestone (2026-10-30) moves its signal source from terminal connections to structured agent-conversation state: working, requests needing attention, confirmed turn outcomes, and unknown/recovery states. It covers background conversations and opens the relevant conversation in Agents when clicked. This migration is planned in [the Agents tracker](docs/todo/README.md) and [agent-driven orb specification](docs/todo/agent-orb.md); the current implementation still uses connection activity until AG-01 is delivered.
 
 The agent workspace is a project-and-conversation surface for existing coding agents on remote servers. The user explicitly selected `pingdotgg/t3code` as the reference for organisation, visual hierarchy, and interaction. Opening Agents must open that surface directly; it must not create or navigate into a terminal as a connection prerequisite. Terminal folders and agent project folders have independent ownership.
 
