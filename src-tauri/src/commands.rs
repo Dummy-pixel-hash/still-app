@@ -579,8 +579,9 @@ pub async fn still_disconnect(
     let t0 = std::time::Instant::now();
     let sid = args.session_id.clone();
     diag::record("rust", "STILL_DISCONNECT_ENTERED", "", &sid, true, "", "", None);
-    let mut map = state.sessions.lock().await;
-    if let Some(live) = map.remove(&args.session_id) {
+    let live = state.sessions.lock().await.remove(&args.session_id);
+    if let Some(live) = live {
+        crate::agent_git::evict_session(&args.session_id).await;
         // Legitimate shutdown origin: signal the worker first so the pump
         // takes the clean shutdown branch (channel EOF + disconnect),
         // then abort as the backstop. Sender ownership is what keeps the

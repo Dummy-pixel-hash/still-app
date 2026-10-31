@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import "../src/styles/theme.css"
 import AgentWorkspace from "../src/components/AgentWorkspace"
 import { AGENTS, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
+import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../src/agents/git"
 import { nativeBridge, registerNativeBridge } from "../src/bridge/nativeBridge"
 import { mockBridge } from "../src/bridge/mockBridge"
 import { reattachAgentThread, refreshAgentThread, startRemoteAgent, useAgentThreads } from "../src/session/agentThreads"
@@ -48,12 +49,25 @@ const h = {
   rejectConfig: false, rejectSend: false, rejectResponse: false, deferResponse: false, deferConfig: false, unknownResponse: false, failSnapshot: false,
   releaseResponse: () => {}, releaseConfig: () => {},
   closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
+  gitStatusCalls: [] as Array<{ nativeSessionId: string; cwd: string }>,
+  gitDiffCalls: [] as Array<{ nativeSessionId: string; cwd: string; snapshotId: string; entryId: string; view: AgentGitView }>,
+  gitStatusState: "ready" as "ready" | "notRepository" | "gitUnavailable", gitRoot: "/srv/still", gitTruncated: false,
+  gitEntries: [
+    { id: "git-fixture-source", path: "src/current.ts", indexStatus: "M", worktreeStatus: "M", kind: "modified" as const, additions: 3, deletions: 1, binary: false },
+    { id: "git-fixture-untracked", path: "docs/new note.md", indexStatus: "?", worktreeStatus: "?", kind: "untracked" as const, additions: null, deletions: null, binary: null },
+  ],
+  gitDiffState: "ready" as AgentGitDiff["state"],
+  gitPatch: "diff --git a/spoofed/path.ts b/spoofed/path.ts\n--- a/spoofed/path.ts\n+++ b/spoofed/path.ts\n@@ -1,1 +1,2 @@\n old\n+new\n",
+  failGitStatus: false, failGitDiff: false, deferGitStatus: false, deferGitDiff: false,
+  pendingGitStatuses: [] as Array<() => void>, pendingGitDiffs: [] as Array<() => void>,
+  releaseGitStatus(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitStatuses[index]?.() },
+  releaseGitDiff(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitDiffs[index]?.() },
   trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], deferStartup: false, startupFail: false,
   releaseStartup: () => {},
   deferChecks: false,
   pendingChecks: [] as Array<() => void>,
   releaseChecks(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingChecks[index]?.() },
-  replaceTransport: () => {},
+  replaceTransport: () => {}, setConnected: (_connected: boolean) => {},
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
     const value = { ...event, attemptId: event.attemptId || row.executionId, sequence: ++row.lastSequence }
@@ -124,6 +138,25 @@ registerNativeBridge({
   agentDeleteSaved: async id => { const data = library(); data.rows = data.rows.filter((item: any) => item.meta.id !== id); data.deleted.push(id); saveLibrary(data) },
   agentCatalog: async (_native, agentId, cwd, executable) => { h.catalogs.push({ agentId, cwd, executable }); return { configOptions: structuredClone(modelOptions), commands: projectCommands, version: "2.fixture" } },
   agentResolveFolder: async (_native, cwd) => { h.resolutions.push(cwd); if (cwd.includes("missing")) throw new Error("The remote folder does not exist"); return cwd.replace(/^~\//, "/home/dev/") },
+  agentGitStatus: async (nativeSessionId, cwd) => {
+    h.gitStatusCalls.push({ nativeSessionId, cwd })
+    if (h.failGitStatus) throw new Error("Git status is unavailable")
+    const snapshot = mockGitStatus(nativeSessionId, cwd)
+    return await new Promise<AgentGitSnapshot>(resolve => {
+      const finish = () => resolve(snapshot)
+      if (h.deferGitStatus) h.pendingGitStatuses.push(finish)
+      else finish()
+    })
+  },
+  agentGitDiff: async (nativeSessionId, cwd, request) => {
+    h.gitDiffCalls.push({ nativeSessionId, cwd, ...request })
+    if (h.failGitDiff) throw new Error("Git diff is unavailable")
+    return await new Promise<AgentGitDiff>(resolve => {
+      const finish = () => resolve(mockGitDiff(request.snapshotId, request.entryId, request.view))
+      if (h.deferGitDiff) h.pendingGitDiffs.push(finish)
+      else finish()
+    })
+  },
   clipboardWriteText: async text => { h.copied = text },
   async openExternal(url) { h.external.push(url) },
   agentCheck: async (_native, agentId, executable) => {
@@ -232,6 +265,26 @@ registerNativeBridge({
 })
 
 const session = { id: "agent-fixture", name: "Development", host: "dev.example.test", port: 22, username: "dev", projectId: "still", workingDirectory: "/srv/still", authMethod: "ask" as const, remember: false, tmuxSession: "still-dev", createdAt: 0, updatedAt: 0 }
+let gitSnapshotSequence = 0
+function mockGitStatus(_nativeSessionId: string, cwd: string): AgentGitSnapshot {
+  const base = { schemaVersion: 1 as const, snapshotId: `git-fixture-${++gitSnapshotSequence}`, hostKey: hostKey(session), cwd, observedAt: Date.now() }
+  const result: AgentGitSnapshot = h.gitStatusState === "notRepository" ? { ...base, state: "notRepository", reason: "This folder is not inside a Git working tree." }
+    : h.gitStatusState === "gitUnavailable" ? { ...base, state: "gitUnavailable", reason: "Git is unavailable on this server." }
+      : { ...base, state: "ready", root: h.gitRoot, headOid: "a".repeat(40), branch: "main", detached: false, unborn: false, entries: structuredClone(h.gitEntries), truncated: h.gitTruncated }
+  return result
+}
+function mockGitDiff(snapshotId: string, entryId: string, view: AgentGitView): AgentGitDiff {
+  const state = h.gitDiffState
+  const reason = state === "binary" ? "Binary content is not rendered as a text diff."
+    : state === "stale" ? "The repository changed."
+      : state === "conflict" ? "Resolve this merge conflict before reviewing a text diff."
+        : state === "submodule" ? "Submodule contents are not traversed."
+          : state === "symlink" ? "Symbolic link content is not followed."
+            : state === "unsupportedPath" ? "This path cannot be safely opened as UTF-8 content."
+              : "This diff exceeds the safe preview limit."
+  return { snapshotId, entryId, view, observedAt: Date.now(), state,
+    ...(state === "ready" ? { path: "spoofed/from/patch-header.ts", patch: h.gitPatch } : { path: "spoofed/from/patch-header.ts", reason }) }
+}
 if (preview && !localStorage.getItem(libraryKey)) saveLibrary(createAgentDemo(session))
 if (preview && scenario) {
   const demo = createAgentDemo(session), row = demo.rows[0]
@@ -280,8 +333,10 @@ function AgentThreadProbe() {
 }
 function FixtureWorkspace() {
   const [transportId, setTransportId] = React.useState("ssh-fixture")
+  const [connected, setConnected] = React.useState(true)
   h.replaceTransport = () => setTransportId(id => `${id}-replaced`)
-  return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
+  h.setConnected = setConnected
+  return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} connected={connected} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
 }
 createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
 if (preview && scenario) {

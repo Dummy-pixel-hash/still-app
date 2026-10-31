@@ -1,7 +1,7 @@
 # Verification and evidence
 
-Status: **implementation checks recorded below; live-provider and packaged Windows
-evidence remain pending**. Commands run from `/mnt/data/still/still-app` after the
+Status: **implementation checks recorded below; live-provider, packaged Windows and
+authenticated Git-remote evidence remain pending**. Commands run from `/mnt/data/still/still-app` after the
 relevant implementation exists. The completed-evidence section records actual
 results and distinguishes fixture checks from external verification.
 
@@ -91,10 +91,11 @@ npx playwright test -c tests-agents/playwright.config.ts todos.spec.ts
 
 ### V-GIT / V-RUST-GIT / V-GIT-UI
 
-These tests/modules are created in Milestone B.
+Milestone B's parser/helper, native-boundary, and UI suites are implemented and
+registered. The full Node and Playwright suites run through `npm run test:agents`.
 
 ```sh
-env -u STILL_AGENT_DRIVER -u STILL_AGENT_EXECUTABLE -u STILL_AGENT_CATALOG -u STILL_TODO_MODULE -u STILL_TODO_SOCKET -u STILL_TODO_TOKEN -u STILL_TODO_PI_EXTENSION node --test tests-agents/git-review.test.mjs
+node --import ./tests-agents/isolated-env.mjs --test tests-agents/git-review.test.mjs
 ```
 
 ```sh
@@ -455,7 +456,7 @@ selection stale, so typing never launches probes.
 | Task / acceptance IDs | UI-01; UI-AC1–6 (browser-fixture coverage) |
 | Implementation | New `src/components/AgentCapabilities.tsx`; narrow `AgentWorkspace.tsx` and `agent-workspace.css` changes; `tests-agents/capabilities.spec.ts` and fixture extensions |
 | Environment | Local Linux Chromium via Playwright; packaged WebView2 not available here |
-| Checks | `npm run typecheck` → PASS; `npm run build` → PASS with existing Vite warnings; `npx playwright test -c tests-agents/playwright.config.ts capabilities.spec.ts` → 2 passed; capability + workspace subset → 61 passed. Full `npm run test:agents` → 108 passed, 3 failed (two Windows/native-glass pixel/profile checks and one particle-budget check; these do not cover the new disclosure). |
+| Checks | `npm run typecheck` → PASS; `npm run build` → PASS with existing Vite warnings; `npx playwright test -c tests-agents/playwright.config.ts capabilities.spec.ts` → 2 passed; capability + workspace subset → 61 passed. An earlier full `npm run test:agents` run had 108 passed and 3 unrelated visual checks failed; the later integrated VERIFY-01 run passed all 118 Playwright tests. |
 | Observation | Current/prepared execution gets one text trigger on its host/folder context line. The nonmodal `role=dialog` shows version/transport, wrapping executable, current/stale observation, and four status/evidence rows. It distinguishes advertised from observed Todos, unavailable integration features, connecting/legacy/unknown-version/stale/refresh-failure states, and only exposes snapshot Refresh for an available live execution. Settings now show discovery-only version, transport, and last-checked data with cached marking. |
 | Evidence location | `tests-agents/capabilities.spec.ts` covers no-report/unknown version, advertised/observed copy, connecting/stale/legacy, refresh failure, old attempt/generation handling, transcript/activity exclusion, keyboard/focus, outside dismissal, scope change, long strings, four viewport sizes, and reduced motion; existing `workspace.spec.ts` covers composer, model and Todo behavior |
 | Blockers | **UI-AC4 remains pending packaged Windows WebView2 verification**: test one keyboard open/close/focus-return interaction in the packaged app before marking UI-01 complete. Current Linux Playwright is not a substitute. Full-suite failures are in untouched glass-pixel/Windows-profile/particle-budget fixture paths; do not change them under this task |
@@ -488,3 +489,75 @@ installation, Todo mutation, or history operation is triggered by opening it.
 | Persistence evidence | Native checkpoint/Revert/provider-session replacement test retains the latest list even after its introducing event disappears; restart converts current observation to stale. Renderer tests retain IDs, task details and fixed completed durations through Revert, Retry, offline reload, provider resume and persistent reconnect without resending prompts. |
 | UI evidence | Todo metadata bypasses transcript/activity/turn accounting; completed tasks cannot finish a turn or approve a request. One bounded native snapshot refresh per execution/revision reconciles renderer-only conflicts without loops. Stale/conflict/unavailable copy is contextual, read-only and preserves the small attached Todo pill and normal composer geometry. |
 | Remaining boundaries | Live native restart and packaged WebView2 checks remain VERIFY-02/03; the two ignored Rust tests need their GUI/SSH fixtures. UI-01's browser implementation is integrated while its required packaged keyboard/focus evidence is still pending. |
+
+### VERIFY-01 — Milestone A deterministic integration gate
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | VERIFY-01; integrated CAP-AC1–7 and TODO-AC1–8 deterministic rows |
+| Implementation | `package.json` registers the new Node suites (`version-probe`, `todos-store`, `todos-reconcile`) in `test:agents`; Playwright's existing `*.spec.ts` discovery includes `capabilities.spec.ts` and `todos.spec.ts`. Added `tests-agents/isolated-env.mjs` so inherited provider/worker routes cannot leak into Node fixtures. |
+| Environment | Local Linux development host; Chromium/Playwright fixtures; no live provider calls or packaged WebView2 |
+| Checks | `npm run typecheck` → PASS; `npm run build` → PASS (existing dynamic-import/chunk-size warnings); `npm run test:agents` → **60 Node tests passed, 0 failed; 118 Playwright tests passed**; `npx playwright test -c tests-agents/playwright.config.ts capabilities.spec.ts todos.spec.ts workspace.spec.ts` → **68 passed**; `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins` → **67 passed, 0 failed, 2 ignored**; `git diff --check` → PASS. |
+| Observation | The integrated gate now covers selected-executable probe bounds/cleanup, accepted-versus-observed Todo evidence, direct legacy model/mode changes, provider-session scoping, Todo revision/state equality and history reconciliation, render scope, plus the existing full Agents UI regression suite. The prior full-suite visual failures did not reproduce; the current full Playwright gate is green. |
+| Evidence location | `/tmp/opencode/verify01-test-agents.log`, `/tmp/opencode/verify01-rust.log`, focused Playwright output, and the registered scripts/configuration noted above |
+| Blockers | Deterministic rows have evidence and no unexplained regression. Live provider-generated Todo evidence remains VERIFY-02; packaged Windows/WebView2 interaction and lifecycle evidence remains VERIFY-03/UI-01. Two ignored Rust tests still require their GUI/localhost-SSH fixture. |
+
+### GIT-01 — bounded Git contract and byte parsers
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | GIT-01; parser portions of GIT-AC1/2/5/6 |
+| Implementation | New `src/agents/git.ts`, pure `parsePorcelainV2` and `parseNumstatZ` exports in `src-tauri/agent-host/git-review.mjs`, `tests-agents/git-review.test.mjs`; registered in `package.json` `test:agents` |
+| Environment | Local Linux development host; synthetic NUL-byte edge fixtures and a private temporary real Git worktree; no SSH, UI, or provider operations |
+| Checks | At GIT-01 handoff, `node --import ./tests-agents/isolated-env.mjs --test tests-agents/git-review.test.mjs` → **8 passed**; the GIT-02 extension below now runs 16 Git tests. At the GIT-01/VERIFY-01 point the complete registered Node suite had **68 passed**; `npm run typecheck` and `git diff --check` → PASS |
+| Observation | Porcelain-v2 and numstat are parsed from bounded NUL-delimited bytes. Rename/copy, unmerged, submodule, staged/worktree state, binary counts, SHA-1/SHA-256 IDs, leading-dash and whitespace/control paths are covered. Invalid UTF-8 labels are explicitly escaped while base64 raw path bytes remain available for the future native-owned mapping. Incomplete final records retain only complete entries and set `truncated`; malformed records fail explicitly. |
+| Evidence location | `tests-agents/git-review.test.mjs` covers NUL fixtures with newline/tab/invalid-byte names, rename pairs and truncation, plus unmodified status/numstat bytes emitted by a temporary real Git repository |
+| Blockers | None for GIT-01. At parser handoff, remote command safety, filtering, and resource limits were GIT-02; native path mapping remains GIT-03. Windows skips the real-worktree newline-filename case; raw byte fixtures still cover it. |
+
+### GIT-02 — bounded read-only Git helper
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | GIT-02; helper portions of GIT-AC1/2/4/5/6/7/9 |
+| Implementation | Extended `src-tauri/agent-host/git-review.mjs` with `inspectGit`, fixed-argv Git execution, bounded status/numstat/diff handling, filter-driver isolation, repository identity and per-entry signatures |
+| Environment | Local Linux development host; private temporary Git repositories; no SSH or renderer integration |
+| Checks | `node --test tests-agents/git-review.test.mjs` → **16 passed**; complete registered Node suite, including the new Git module → **76 passed**; `npm run typecheck` → PASS; `git diff --check` and Node syntax checks → PASS |
+| Observation | Status resolves the worktree root from a selected subfolder, reports unborn/detached/bare/nonrepository states, joins raw numstat rename pairs, and returns bounded path bytes/signatures/fingerprints. Diff supports combined/staged/unstaged and untracked previews; conflict, submodule, symlink, binary, oversized and external-filter content are not mislabeled as normal patches. Before/after HEAD/index/status/filter identity plus selected-file nanosecond signatures detect stale/racing reads and retry once. |
+| Safety evidence | The real Git fixture confirms status/diff do not change HEAD or index. A hostile local clean/smudge/process filter, `core.fsmonitor`, and `diff.external` each have a marker command; markers remain absent, filtered files stay metadata-only, and repository config remains unchanged. Inherited `GIT_DIR`, index/object selectors, and `GIT_CONFIG_*` command injection cannot redirect inspection. |
+| Limits | 10-second operation deadline; 16 KiB retained stderr; 2 MiB status/response bounds; 2,000-entry cap with truncation; 512 KiB/10,000-line complete-patch limits; 256 KiB request cap; external filter config/attribute reads are bounded. |
+| Blockers | Native SSH framing, host/connection-bound snapshot registry, private-to-public response validation, IPC and UI are GIT-03/04 and not claimed here. |
+
+### GIT-03 — authenticated native SSH boundary
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | GIT-03; GIT-AC3/4/6/7/9 at the native boundary |
+| Implementation | New `src-tauri/src/agent_git.rs`; `still_agent_git_status`/`still_agent_git_diff` registered in `lib.rs`; shared canonical CWD/shell quoting reused from `agent.rs`; connection teardown evicts snapshots in `commands.rs`; typed `NativeBridge`, Tauri adapter and explicit unsupported-browser methods added |
+| Environment | Local Linux development host; Rust registry/framing unit tests and a Node subprocess test of the exact bundled-source loader; no authenticated SSH fixture was available |
+| Checks | `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib agent_git::tests` → **6 passed**; full Rust lib/bin gate → **73 passed, 2 ignored**; `npm run build` (includes typecheck) → PASS with existing Vite warnings; registered Node suite, including the exact loader smoke test → **77 passed**; `git diff --check` → PASS |
+| Observation | Native derives host/account identity from the live authenticated SSH session, canonicalizes `cwd` remotely, and sends the trusted bundled helper plus a bounded JSON request through a non-PTY exec channel on stdin followed by EOF. It stamps local observation time and opaque IDs, keeps raw path bytes/signatures private in a 16-snapshot/5-minute/16 MiB registry, validates host/connection/CWD/snapshot/entry scope before diff, and evicts on disconnect/replacement. Diff calls can use only stored root/fingerprint/entry data; unknown/expired IDs return stale without opening a path. |
+| Safety evidence | Status responses are revalidated before public serialization; label/raw-byte mapping, traversal, response version, signatures, counts, patch bytes/lines and frame prefix/banner bounds are checked. Browser mode rejects both operations. Snapshot unit tests prove public responses omit raw paths and native identity fields. |
+| Evidence location | `/tmp/opencode/git03-rust.log`, `/tmp/opencode/git03-node.log`, `tests-agents/git-review.test.mjs`, and `src-tauri/src/agent_git.rs` unit tests |
+| Blockers | **V-GIT-REMOTE remains pending**: no selected disposable SSH host/account or localhost SSH test fixture was available, so the actual remote loader/channel read-only round trip has not been claimed. The two ignored Rust tests still require their documented GUI/SSH prerequisites. |
+
+### GIT-04 — Repository/Conversation inspector
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | GIT-04; GIT-AC3/7/8 and visible state coverage for GIT-AC1/2/6 |
+| Implementation | New `src/session/agentGit.ts` request owner and `src/components/AgentRepositoryChanges.tsx`; `AgentChanges.tsx` now switches between Repository status and historical Conversation edits; narrow `AgentWorkspace.tsx`, `AgentMessage.tsx`, `agent-workspace.css`, fixture bridge and test updates |
+| Environment | Local Linux Chromium/Playwright; deterministic native-bridge fixture; no real SSH or packaged WebView2 |
+| Checks | Full `npm run test:agents` → **77 Node tests and 125 Playwright tests passed**, including all 7 current Git review UI tests and existing Changes accessibility/material checks; `npm run build` → PASS with existing Vite warnings; `git diff --check` → PASS |
+| Observation | Header Changes opens Repository; transcript edit summaries open Conversation. Repository shows the selected server, canonical root, branch/HEAD and check time. It preserves the last snapshot on offline/error, distinguishes clean/non-Git/truncated states, and keeps the historical edits separate. File labels come from native status mapping; scope tabs request Combined/Staged/Unstaged by opaque IDs. |
+| UI evidence | The seven Git browser tests cover default view, Conversation routing, refresh/failure/truncation, no per-chunk Git reads, turn-boundary refresh, selected-diff scope, binary/stale/special states, connection/project late-result isolation, compact drawer overflow, and status-label authority over spoofed patch headers. Existing focus, inert background, Escape, reduced-motion and historical drawer tests pass. |
+| Evidence location | `/tmp/opencode/git-final-test-agents.log`, `/tmp/opencode/git-final-build.log`, `tests-agents/git-review.spec.ts`, and existing workspace/accessibility/materials tests |
+| Blockers | Fixture refresh proves renderer reconciliation only. Actual manual server edits, read-only repository identity checks, and an authenticated SSH loader/channel round trip remain unverified under V-GIT-REMOTE; packaged WebView2 interaction remains VERIFY-03/UI-01. |
+
+### VERIFY-04 — deterministic Git delivery gate
+
+| Field | Value |
+| --- | --- |
+| Task / acceptance IDs | VERIFY-04; deterministic GIT-AC1–9 rows covered by GIT-01–04 |
+| Checks | `npm run test:agents` → **77 Node and 125 Playwright passed**; `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins` → **73 passed, 2 ignored**; `npm run build` → PASS with existing dynamic-import/chunk-size warnings; `git diff --check` → PASS |
+| Evidence location | `/tmp/opencode/git-final-test-agents.log`, `/tmp/opencode/git-final-rust.log`, `/tmp/opencode/git-final-build.log` |
+| Blockers | Deterministic B gate passes. Do **not** mark Git delivery complete until V-GIT-REMOTE uses a named disposable SSH host/project and compares HEAD/index/content before/after review reads, and packaged Windows/WebView2 checks are recorded. The live rows remain pending rather than inferred from fixtures. |

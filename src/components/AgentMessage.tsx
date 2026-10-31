@@ -50,12 +50,12 @@ export function AgentToolResult({ content }: { content: AgentToolContent[] }) {
       : entry.content?.type === "text" && entry.content.text ? <pre key={index}>{entry.content.text}</pre> : <p key={index} className="agent-muted">The agent supplied {entry.content?.type || "unsupported"} content. A text preview is unavailable.</p>)}</>
 }
 
-export function AgentChangeView({ change }: { change: ReportedChange }) {
+export function AgentChangeView({ change, sourceLabel = "Original provider patch" }: { change: ReportedChange; sourceLabel?: string }) {
   return <div className="agent-diff"><div className="agent-code-language"><AgentIcon name="file" size={13} /><span>{change.path}</span>{change.additions !== null && <span className="agent-change-numbers"><span>+{change.additions}</span><span>−{change.deletions}</span></span>}</div>
     {change.hunks !== null ? <>
       {change.hunks.length ? <Patch path={change.path} hunks={change.hunks} /> : <p className="agent-diff-fallback">No changed text lines were reported.</p>}
       {change.patch && <details className="agent-raw-patch"><summary>View raw patch</summary><pre>{change.patch}</pre></details>}
-    </> : change.patch !== null ? <><p className="agent-diff-fallback">Original provider patch · line totals unavailable</p><pre>{change.patch}</pre></> : change.source.type === "diff" ? <><p className="agent-diff-fallback">Showing supplied before/after text for this large change.</p><details><summary>Before</summary><pre>{change.source.oldText ?? "New file"}</pre></details><details open><summary>After</summary><pre>{change.source.newText}</pre></details></> : null}
+    </> : change.patch !== null ? <><p className="agent-diff-fallback">{sourceLabel} · line totals unavailable</p><pre>{change.patch}</pre></> : change.source.type === "diff" ? <><p className="agent-diff-fallback">Showing supplied before/after text for this large change.</p><details><summary>Before</summary><pre>{change.source.oldText ?? "New file"}</pre></details><details open><summary>After</summary><pre>{change.source.newText}</pre></details></> : null}
   </div>
 }
 

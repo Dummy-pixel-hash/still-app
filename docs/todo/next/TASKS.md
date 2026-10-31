@@ -19,14 +19,29 @@ and existing working-tree changes. No task below requires the original transcrip
 - [ ] **UI-01** — Agent details disclosure and settings metadata. Browser implementation is done; awaiting the required packaged WebView2 interaction evidence before closure. **S–M**.
 - [x] **TD-02** — Conversation store ownership and missing-store seed. **Done 2026-10-31**; 40 worker/protocol/bootstrap/store tests and 61 Rust tests pass (2 ignored). **M**.
 - [x] **TD-03** — Todo revision/history/native lifecycle reconciliation. **Done 2026-10-31**; native task-state/availability/conflict/history tests and 68 capability/Todo/workspace Playwright tests pass. **M**.
-- [ ] **VERIFY-01** — Milestone A deterministic integration gate. After UI-01 and TD-03. **S**.
+- [x] **VERIFY-01** — Milestone A deterministic integration gate. **Done 2026-10-31**; `npm run test:agents` passed (60 Node, 118 Playwright), Rust lib/bin tests passed (67, 2 ignored), and typecheck/build passed. UI-01's packaged WebView2 and live-provider evidence remain separate gates. **S**.
 - [ ] **VERIFY-02** — Real provider-generated Todo calls and evidence matrix. After VERIFY-01; needs named host/models. **S per provider**.
 - [ ] **VERIFY-03** — Packaged Windows lifecycle and Milestone A release record. After VERIFY-01; needs a test build. **S**.
-- [ ] **GIT-01** — Git types and pure status/numstat parsers. After SETUP-01, when Milestone B starts. **S–M**.
-- [ ] **GIT-02** — Bounded read-only remote Git helper. After GIT-01. **M**.
-- [ ] **GIT-03** — Native Git IPC and scoped snapshot registry. After GIT-02. **M**.
-- [ ] **GIT-04** — Repository inspector and scoped refresh lifecycle. After GIT-03 and UI-01. **M**.
-- [ ] **VERIFY-04** — Git end-to-end/read-only/native gate and docs. After GIT-04. **S**.
+- [x] **GIT-01** — Git types and pure status/numstat parsers. **Done 2026-11-01**; 8 parser tests and the registered 68-test Node suite pass; `npm run typecheck` passes. **S–M**.
+- [x] **GIT-02** — Bounded read-only Git helper. **Done 2026-11-01**; 16 Git parser/helper tests and the registered 76-test Node suite pass; `npm run typecheck` passes. **M**.
+- [x] **GIT-03** — Native Git IPC and scoped snapshot registry. **Implementation done 2026-11-01**; 6 native boundary tests, full Rust and build/type gates pass. The real SSH fixture remains pending under VERIFY-04/V-GIT-REMOTE. **M**.
+- [x] **GIT-04** — Repository inspector and scoped refresh lifecycle. **Implementation done 2026-11-01**; 7 Git UI tests and the full 125-test Playwright suite pass; view separation, refresh/race scopes, states and accessibility are covered. **M**.
+- [ ] **VERIFY-04** — Git end-to-end/read-only/native gate and docs. Deterministic B gate passed **2026-11-01**; live SSH checkout and packaged Windows/WebView2 evidence remain pending. **S**.
+
+## User inputs needed to close external evidence
+
+1. **V-GIT-REMOTE / VERIFY-04:** Connect the desired SSH host in Still and identify an
+   exact project folder containing a **disposable Git repository**. The remote host
+   needs Git and Node 20+. Do not send credentials or private keys; authenticate in
+   Still. Fixture setup may create test commits/files in the disposable repo, but the
+   review reads themselves must leave HEAD, index, and file contents unchanged.
+2. **VERIFY-03 / UI-01:** Run an integrated packaged build on Windows x64 or ARM64 and
+   report its build SHA, Windows version, and WebView2 runtime. Exercise keyboard
+   open/close/focus-return, Repository/Conversation switching, refresh, and offline
+   reattach. This plan is not authorization to publish or dispatch a workflow.
+3. **VERIFY-02:** Select a target host/project plus provider and model for the live
+   Todo prompt. Gemini remains blocked by the previously audited account; an available
+   non-Gemini provider is the quickest route. Keep secrets out of the evidence.
 
 Sizes are relative context/change size, not price or elapsed-time promises. Exact
 provider cost depends on the selected available model and billing configuration.
@@ -40,13 +55,12 @@ integrated boundary-sensitive changes once, with evidence supplied by the builde
 ```text
 SETUP-01
   ├─ CAP-01 → CAP-02 ─┐
-  └─ TD-01 ───────────┴→ CAP-03 → CAP-04 → CAP-05 → UI-01
-                                      └→ TD-02
-                                    UI-01 + TD-02 → TD-03 → VERIFY-01
-                                                              ├→ VERIFY-02
-                                                              └→ VERIFY-03
+  └─ TD-01 ───────────┴→ CAP-03 → CAP-04 ─┬→ CAP-05 → UI-01 browser ─┐
+                                           └→ TD-02 ─────────────────┴→ TD-03 → VERIFY-01 deterministic
+                                                                               ├→ VERIFY-02 live-provider evidence
+                                                                               └→ VERIFY-03 packaged Windows (also closes UI-01)
 
-Milestone B: GIT-01 → GIT-02 → GIT-03 → GIT-04 → VERIFY-04
+Milestone B after VERIFY-01: GIT-01 ✓ → GIT-02 ✓ → GIT-03 ✓ → GIT-04 ✓ → VERIFY-04
 ```
 
 - CAP-02 and TD-01 can run in parallel on separate branches after CAP-01 because

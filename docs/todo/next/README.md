@@ -2,7 +2,8 @@
 
 Date: **2026-10-30** · Repository: `/mnt/data/still/still-app`
 Inspected baseline: **`4c3062634438bba368677caa2dcb7b8d3d4fa022`** on `main`.
-Status: **Imported into the repository; SETUP-01 complete, CAP-01 next.**
+Progress updated: **2026-11-01**.
+Status: **CAP/TD and both deterministic gates complete; GIT-01–04 implementation done. VERIFY-02, VERIFY-03 and VERIFY-04 still need named provider, packaged Windows/WebView2 and authenticated SSH checkout evidence.**
 
 Concurrent project work landed while these specs were being written:
 **`a227ac7`** (sidebar rail/Vite host), **`eaaf421`** (compact tool/thought activity),

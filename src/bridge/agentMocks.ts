@@ -1,4 +1,5 @@
 import type {AgentThreadEvent,AgentThreadSnapshot} from "../agents/types"
+import type {AgentGitDiff,AgentGitSnapshot,AgentGitView} from "../agents/git"
 import type {Unsubscribe} from "./nativeBridge"
 const unavailable=()=>new Error("Remote ACP execution needs Still's native SSH bridge. Browser mode will never start a local agent.")
 export const unavailableAgentBridge={
@@ -9,8 +10,10 @@ export const unavailableAgentBridge={
  agentDeleteSaved:async():Promise<void>=>{throw unavailable()},
  agentMigrate:async():Promise<string[]>=>{throw unavailable()},
  subscribeAgentStorage:async():Promise<Unsubscribe>=>()=>{},
- agentCatalog:async():Promise<import('../agents/types').AgentCatalog>=>{throw unavailable()},
- agentResolveFolder:async():Promise<string>=>{throw unavailable()},
+  agentCatalog:async():Promise<import('../agents/types').AgentCatalog>=>{throw unavailable()},
+  agentResolveFolder:async():Promise<string>=>{throw unavailable()},
+  agentGitStatus:async():Promise<AgentGitSnapshot>=>{throw unavailable()},
+  agentGitDiff:async(_nativeId:string,_cwd:string,_request:{snapshotId:string;entryId:string;view:AgentGitView}):Promise<AgentGitDiff>=>{throw unavailable()},
  agentStart:async(_nativeId:string,_localId:string,_agentId:string):Promise<AgentThreadSnapshot>=>{throw unavailable()},
  agentCheck:async():Promise<never>=>{throw unavailable()},
   agentSend:async(_id:string,_message:string):Promise<void>=>{throw unavailable()},

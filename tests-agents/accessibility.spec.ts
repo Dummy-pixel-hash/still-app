@@ -145,11 +145,13 @@ test("default desktop window keeps review beside an editable conversation", asyn
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
+  await page.getByRole("tab", { name: "Conversation" }).click()
   const review = page.getByRole("complementary", { name: "Conversation changes", exact: true })
+  const conversationPanel = review.locator('.agent-review-tabpanel[aria-labelledby="agent-review-tab-conversation"]')
   await expect(review).toBeVisible()
   await expect(page.locator(".agent-chat")).not.toHaveAttribute("inert")
   await page.getByLabel("Message agent").fill("Follow-up while reviewing")
-  expect(await review.locator(".agent-patch").evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(13)
+  expect(await conversationPanel.locator(".agent-patch").evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(13)
 })
 
 test("failed conversations retain an explicit sidebar state on compact screens", async ({ page }) => {

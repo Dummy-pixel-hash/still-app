@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { changeTotals, type AgentChange } from "../agents/changes"
 import AgentIcon from "./AgentIcon"
 import { AgentChangeView } from "./AgentMessage"
@@ -19,7 +19,16 @@ export function AgentChangeSummary({ changes, open }: { changes: AgentChange[]; 
   </button>
 }
 
-export default function AgentChanges({ changes, close }: { changes: AgentChange[]; close: () => void }) {
+export type AgentChangesMode = "repository" | "conversation"
+
+export default function AgentChanges({ changes, close, mode, onModeChange, repository, repositoryCount = 0 }: {
+  changes: AgentChange[]
+  close: () => void
+  mode: AgentChangesMode
+  onModeChange: (mode: AgentChangesMode) => void
+  repository: ReactNode
+  repositoryCount?: number
+}) {
   const root = useRef<HTMLElement>(null), [selected, setSelected] = useState("")
   const returnFocus = useRef(document.activeElement as HTMLElement | null)
   const [overlay, setOverlay] = useState(() => matchMedia("(max-width: 1000px)").matches)
@@ -50,8 +59,18 @@ export default function AgentChanges({ changes, close }: { changes: AgentChange[
     if (!panel.contains(document.activeElement)) panel.querySelector<HTMLButtonElement>(".agent-review-close")?.focus({ preventScroll: true })
     return () => { siblings.forEach((node, index) => { node.inert = original[index] }) }
   }, [overlay])
-  return <aside ref={root} className="agent-review" role={overlay ? "dialog" : "complementary"} aria-modal={overlay || undefined} aria-label="Conversation changes" tabIndex={-1} onKeyDown={event => {
+  return <aside ref={root} className="agent-review" role={overlay ? "dialog" : "complementary"} aria-modal={overlay || undefined} aria-label={mode === "repository" ? "Repository changes" : "Conversation changes"} tabIndex={-1} onKeyDown={event => {
     if (overlay) event.stopPropagation()
+    if ((event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End")
+      && event.target instanceof HTMLElement && event.target.getAttribute("role") === "tab") {
+      const tabs = [...(root.current?.querySelectorAll<HTMLButtonElement>("[role=tab]") || [])]
+      const index = tabs.indexOf(event.target as HTMLButtonElement)
+      const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+        : event.key === "ArrowRight" ? (index + 1) % tabs.length : (index + tabs.length - 1) % tabs.length
+      event.preventDefault()
+      tabs[next]?.focus()
+      tabs[next]?.click()
+    }
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close() }
     if (event.key === "Tab" && overlay) {
       const nodes = [...(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled),select,a[href],summary,[tabindex="0"]') || [])].filter(node => node.getClientRects().length)
@@ -59,7 +78,13 @@ export default function AgentChanges({ changes, close }: { changes: AgentChange[
       else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus() }
     }
   }}>
-    <header className="agent-review-header"><div><AgentIcon name="changes" size={16} /><h2>Changes</h2><span>{total.reportedFiles}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
+    <header className="agent-review-header"><div><AgentIcon name="changes" size={16} /><h2>Changes</h2><span>{mode === "repository" ? repositoryCount : total.reportedFiles}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
+    <div className="agent-review-views" role="tablist" aria-label="Change source">
+      <button id="agent-review-tab-repository" type="button" role="tab" aria-selected={mode === "repository"} aria-controls="agent-review-panel" tabIndex={mode === "repository" ? 0 : -1} onClick={() => onModeChange("repository")}>Repository</button>
+      <button id="agent-review-tab-conversation" type="button" role="tab" aria-selected={mode === "conversation"} aria-controls="agent-conversation-review-panel" tabIndex={mode === "conversation" ? 0 : -1} onClick={() => onModeChange("conversation")}>Conversation</button>
+    </div>
+    <div id="agent-review-panel" className="agent-review-tabpanel" role="tabpanel" aria-labelledby="agent-review-tab-repository" tabIndex={0} hidden={mode !== "repository"}>{repository}</div>
+    <div id="agent-conversation-review-panel" className="agent-review-tabpanel" role="tabpanel" aria-labelledby="agent-review-tab-conversation" tabIndex={0} hidden={mode !== "conversation"}>
     <div className="agent-review-context"><span>{total.attempts ? total.files ? "Completed edits only" : "No completed edits reported" : "From this conversation"}</span>{total.files > 0 && total.exact && <ChangeNumbers additions={total.additions} deletions={total.deletions} />}</div>
     {files.length ? <>
       <div className="agent-review-files" aria-label="Changed files">{files.map(file => {
@@ -69,5 +94,6 @@ export default function AgentChanges({ changes, close }: { changes: AgentChange[
       <div className="agent-review-diff" key={path} tabIndex={0} role="region" aria-label={`Diff for ${path}`}>{changes.filter(c => c.path === path).map((change, index, list) => <section key={change.id} aria-label={list.length > 1 ? `Reported edit ${index + 1}` : path}>{list.length > 1 && <div className="agent-review-edit">Reported edit {index + 1} of {list.length}</div>}{change.outcome !== "completed" && <p className={`agent-change-outcome is-${change.outcome}`}>{change.outcome === "failed" ? "Edit failed · attempted patch" : change.outcome === "pending" ? "Edit pending · completion not reported" : "Outcome not reported · supplied patch"}</p>}<AgentChangeView change={change} /></section>)}</div>
       <p className="agent-review-note">Agent-reported changes, in order. Your server’s current files may have changed since.</p>
     </> : <div className="agent-review-empty"><AgentIcon name="file" size={25} /><h3>No reported changes yet</h3><p>File edits supplied by your agent will appear here.</p></div>}
+    </div>
   </aside>
 }

@@ -1,6 +1,7 @@
 import type { ConnectionStatus } from "../types"
 import type { OrbBridge } from "../orb/types"
 import type { AgentAvailability, AgentCatalog, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../agents/git"
 import type { ConversationMeta } from "../agents/workspace"
 
 import { unavailableAgentBridge } from "./agentMocks"
@@ -164,6 +165,8 @@ export interface NativeBridge extends OrbBridge {
   subscribeAgentStorage(callback: (event: { conversationId: string; sequence: number; error?: string }) => void): Promise<Unsubscribe>
   agentCatalog(nativeSessionId: string, agentId: string, cwd: string, executable?: string): Promise<AgentCatalog>
   agentResolveFolder(nativeSessionId: string, cwd: string): Promise<string>
+  agentGitStatus(nativeSessionId: string, cwd: string): Promise<AgentGitSnapshot>
+  agentGitDiff(nativeSessionId: string, cwd: string, request: { snapshotId: string; entryId: string; view: AgentGitView }): Promise<AgentGitDiff>
 
   agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>
   agentCheck(nativeSessionId:string,agentId?:string,executable?:string):Promise<AgentAvailability[]>

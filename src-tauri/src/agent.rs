@@ -385,7 +385,7 @@ fn definition(id: &str) -> Option<Definition> {
         _ => return None,
     })
 }
-fn quote(arg: &str) -> String {
+pub(crate) fn quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 fn executable(def: &Definition, override_path: Option<&str>) -> Result<String, StillError> {
@@ -402,7 +402,7 @@ fn executable(def: &Definition, override_path: Option<&str>) -> Result<String, S
     }
     Ok(path.to_owned())
 }
-fn login_command(script: &str) -> String {
+pub(crate) fn login_command(script: &str) -> String {
     format!(
         "exec \"${{SHELL:-/bin/sh}}\" -lc {}",
         quote(&format!(
@@ -1084,7 +1084,7 @@ pub async fn still_agent_flush() -> Result<(), StillError> {
 }
 
 /// Resolve and verify the directory through the already verified SSH connection.
-async fn remote_cwd(session_id: &str, directory: &str) -> Result<String, StillError> {
+pub(crate) async fn remote_cwd(session_id: &str, directory: &str) -> Result<String, StillError> {
     let script = directory_script(directory)?;
     let mut channel = ssh_worker::open_agent_exec(session_id, &login_command(&script))
         .await

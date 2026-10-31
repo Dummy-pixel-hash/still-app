@@ -4,6 +4,7 @@
 //! one worker task per session id, Tauri events back to the renderer.
 
 mod agent;
+mod agent_git;
 mod agent_store;
 mod commands;
 mod orb;
@@ -121,6 +122,8 @@ pub fn run() {
             agent::still_agent_input,
             agent::still_agent_snapshot,
             agent::still_agent_flush,
+            agent_git::still_agent_git_status,
+            agent_git::still_agent_git_diff,
             agent_store::still_agent_library,
             agent_store::still_agent_save_metadata,
             agent_store::still_agent_save_workspace,

@@ -25,6 +25,7 @@ import AgentIcon from "./AgentIcon"
 import AgentMenu from "./AgentMenu"
 import AgentProviderMark, { StillAgentMark } from "./AgentProviderMark"
 import AgentChanges, { AgentChangeSummary } from "./AgentChanges"
+import AgentRepositoryChanges from "./AgentRepositoryChanges"
 import { changeTotals, conversationChanges } from "../agents/changes"
 import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
 import AgentModelPicker from "./AgentModelPicker"
@@ -34,6 +35,7 @@ import AgentTodos from "./AgentTodos"
 import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
 import { requestKey, questionFields } from "../agents/requests"
 import AgentCapabilities, { agentProviderTransportLabel } from "./AgentCapabilities"
+import { useAgentGit } from "../session/agentGit"
 import type { TranscriptItem } from "../agents/transcript"
 import "../styles/agent-workspace.css"
 import "../styles/agent-materials.css"
@@ -93,6 +95,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [timelineOpen, setTimelineOpen] = useState(false), [timelineQuery, setTimelineQuery] = useState("")
   const [feedback, setFeedback] = useState("")
   const [review, setReview] = useState(false)
+  const [reviewMode, setReviewMode] = useState<"repository" | "conversation">("repository")
+  const [gitRefreshEpoch, setGitRefreshEpoch] = useState(0)
   const [todosOpen, setTodosOpen] = useState(false)
   const [agentDetailsOpen, setAgentDetailsOpen] = useState(false)
   const [historyAction, setHistoryAction] = useState<{ message: TranscriptItem; retry: boolean } | null>(null)
@@ -138,7 +142,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     attachAttempt.current = key
     const revision = navigation.current
     setRestoring(true)
-    void onReattach(current).catch(failure => { if (mounted.current && revision === navigation.current) setError(messageOf(failure)) }).finally(() => { if (mounted.current && revision === navigation.current) setRestoring(false) })
+    void onReattach(current).then(() => { if (mounted.current && revision === navigation.current) setGitRefreshEpoch(epoch => epoch + 1) }).catch(failure => { if (mounted.current && revision === navigation.current) setError(messageOf(failure)) }).finally(() => { if (mounted.current && revision === navigation.current) setRestoring(false) })
   }, [current?.executionId, current?.state, transportId, connectedHere, onReattach])
   useEffect(() => {
     if (!current || current.persistent || current.state !== "saved" || !canResumeAgentThread(current) || !onStart || !transportId || !connectedHere) return
@@ -171,6 +175,21 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable }, context?.host || "", onStart)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
+  const repositoryCwd = activeAgent?.cwd || current?.meta.folder || ""
+  const repositoryConnected = !!current && connectedHere && !!transportId
+  const repositoryEnabled = review && reviewMode === "repository"
+  const git = useAgentGit({
+    hostKey: current?.meta.hostKey || "", nativeSessionId: repositoryConnected ? transportId : undefined,
+    cwd: repositoryCwd, conversationId: current?.meta.id || "", enabled: repositoryEnabled, refreshEpoch: gitRefreshEpoch,
+  })
+  const repositoryCount = git.status.snapshot?.state === "ready" ? git.status.snapshot.entries.length : 0
+  const lastGitTurn = useRef<{ executionId: string; active: boolean } | null>(null)
+  useEffect(() => {
+    const executionId = activeAgent?.executionId || "", active = !!activeAgent?.turnActive
+    const previous = lastGitTurn.current
+    if (previous?.executionId === executionId && previous.active && !active && repositoryEnabled) void git.refreshAfterCurrent()
+    lastGitTurn.current = { executionId, active }
+  }, [activeAgent?.executionId, activeAgent?.turnActive, repositoryEnabled, git.refreshAfterCurrent])
   const capabilityProviderLabel = activeAgent?.agentName || AGENTS.find(agent => agent.id === activeAgent?.agentId)?.label || activeAgent?.agentId || definition.label
   const capabilityState: "connecting" | "live" | "offline" | "unavailable" = !activeAgent
     ? "unavailable"
@@ -639,7 +658,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           {current && <>
             <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
             <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
-            <button className={`agent-review-toggle ${review ? "is-active" : ""}`} aria-label="Review changes" aria-expanded={review} onClick={() => setReview(!review)}><AgentIcon name="changes" size={16} /><span>Changes</span>{changeCount.reportedFiles > 0 && <small>{changeCount.reportedFiles}</small>}</button>
+            <button className={`agent-review-toggle ${review ? "is-active" : ""}`} aria-label="Review changes" aria-expanded={review} onClick={() => { if (review) setReview(false); else { setReviewMode("repository"); setReview(true) } }}><AgentIcon name="changes" size={16} /><span>Changes</span>{changeCount.reportedFiles > 0 && <small>{changeCount.reportedFiles}</small>}</button>
           </>}
           {onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
           <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
@@ -664,7 +683,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       </section> : <>
         <div ref={scroll.viewport} className="agent-conversation" tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
           <div ref={scroll.content} className="agent-message-list">
-            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={() => setReview(true)} />}</>
+            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={() => { setReviewMode("conversation"); setReview(true) }} />}</>
               : startScreen ? <div className="agent-welcome"><h1>What will you <em>build?</em></h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
@@ -715,7 +734,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         {startScreen && <div className="agent-launch-extras"><div className="agent-starters">{promptStarters.map(starter => <button key={starter.label} disabled={!!draft.trim() || busy} onClick={() => useStarter(starter.prompt)}><span>{starter.label}</span></button>)}</div>{recent.length > 0 && <section className="agent-recents"><div className="agent-section-label"><span>Recent conversations</span><button className="agent-link-button" onClick={() => revealProjects(true)}>View all {recent.length} conversations <AgentIcon name="chevron" size={12} /></button></div>{recent.slice(0, 3).map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</section>}</div>}
       </>}
       </div>
-      {review && current && <><button className="agent-review-scrim" aria-label="Close changes panel" onClick={() => setReview(false)} /><AgentChanges key={current.meta.id} changes={changes} close={() => setReview(false)} /></>}
+      {review && current && <><button className="agent-review-scrim" aria-label="Close changes panel" onClick={() => setReview(false)} /><AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} close={() => setReview(false)} /></>}
       </div>
       {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
