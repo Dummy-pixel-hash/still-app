@@ -15,7 +15,7 @@ export function modeOption(fields: AgentConfigOption[]) {
 }
 
 type ConfigChange = (id: string, value: string | boolean) => void | Promise<void>
-export function ConfigPicker({ option, disabled, change, icon, label, searchable = true }: { option: AgentConfigOption; disabled: boolean; change: ConfigChange; icon?: ReactNode; label?: string; searchable?: boolean }) {
+export function ConfigPicker({ option, disabled, change, icon, label, searchable = true, className }: { option: AgentConfigOption; disabled: boolean; change: ConfigChange; icon?: ReactNode; label?: string; searchable?: boolean; className?: string }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(""), [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null)
   const popup = useRef<HTMLDivElement>(null)
@@ -42,7 +42,7 @@ export function ConfigPicker({ option, disabled, change, icon, label, searchable
   const choose = (value: string) => { restoreFocus.current = true; change(option.id, value); setOpen(false); setQuery(""); root.current?.querySelector("button")?.focus() }
   if (option.type === "boolean") return <label className="agent-toggle"><input type="checkbox" checked={option.currentValue === true} disabled={disabled} onChange={e => change(option.id, e.target.checked)} />{option.name}</label>
   if (option.type !== "select") return <span className="agent-muted">{option.name}: {String(option.currentValue)}</span>
-  return <div className="agent-picker" ref={root} data-config-id={option.id}>
+  return <div className={`agent-picker${className ? ` ${className}` : ""}`} ref={root} data-config-id={option.id}>
     <button type="button" className="agent-control" aria-label={`${label || option.name}: ${selected?.name || option.currentValue || "Default"}`} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined} disabled={disabled} onClick={() => { setOpen(!open); setQuery(""); setActive(Math.max(0, all.findIndex(value => value.value === option.currentValue))) }} title={option.description || label || option.name}>
       {icon}<span>{selected?.name || String(option.currentValue || "Default")}</span><AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>
     {open && <div ref={popup} className={`agent-picker-popup${searchable ? "" : " is-compact"}`} onKeyDown={e => {

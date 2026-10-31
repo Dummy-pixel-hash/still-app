@@ -73,7 +73,7 @@ test("agent selection connects before the first message and chunks stay one resp
 test("model and reasoning share one menu beside the agent mode selector", async ({ page }) => {
   await connect(page)
   const modelTrigger = page.getByRole("button", { name: "Model: Model A", exact: true })
-  await expect(modelTrigger).toHaveCSS("border-radius", "999px")
+  await expect(modelTrigger).toHaveCSS("border-radius", "10px")
   await modelTrigger.click()
   await expect(page.getByRole("dialog", { name: "Model and reasoning" })).toBeVisible()
   await page.getByLabel("Search models").fill("Model B")
@@ -83,7 +83,7 @@ test("model and reasoning share one menu beside the agent mode selector", async 
   await expect(page.getByRole("button", { name: "Model: Model B", exact: true })).toHaveAccessibleDescription("Reasoning: High")
   await page.getByRole("button", { name: "Done", exact: true }).click()
   const modeTrigger = page.getByRole("button", { name: "Agent: Ask", exact: true })
-  await expect(modeTrigger).toHaveCSS("border-radius", "999px")
+  await expect(modeTrigger).toHaveCSS("border-radius", "9px")
   await modeTrigger.click()
   await expect(page.locator(".agent-picker-popup input")).toHaveCount(0)
   await expect(page.getByRole("option", { name: /Ask/ })).toBeFocused()
