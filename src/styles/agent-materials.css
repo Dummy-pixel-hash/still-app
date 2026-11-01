@@ -459,13 +459,49 @@
 }
 .agent-workspace .agent-composer .agent-model-trigger-copy strong { max-width: 220px; font-size: 13px; font-weight: 550; letter-spacing: -.005em; }
 .agent-workspace .agent-composer .agent-model-trigger-copy small { display: none; }
-.agent-workspace .agent-reasoning-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 15px; }
-.agent-workspace .agent-reasoning-bars i { display: block; width: 2.5px; border-radius: 99px; background: rgba(255, 255, 255, .2); }
-.agent-workspace .agent-reasoning-bars i:nth-child(1) { height: 5px; }
-.agent-workspace .agent-reasoning-bars i:nth-child(2) { height: 8px; }
-.agent-workspace .agent-reasoning-bars i:nth-child(3) { height: 11px; }
-.agent-workspace .agent-reasoning-bars i:nth-child(4) { height: 14px; }
-.agent-workspace .agent-reasoning-bars i.is-filled { background: #eee6ea; }
+.agent-workspace .agent-reasoning-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 38px;
+  margin-left: 4px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .032);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  flex: 0 0 auto;
+}
+.agent-workspace .agent-reasoning-control[aria-busy="true"] { opacity: .62; }
+.agent-workspace .agent-reasoning-level {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 8px;
+  height: 26px;
+  padding: 0 0 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.agent-workspace .agent-reasoning-level:hover:not(:disabled) { background: rgba(255, 255, 255, .055); }
+.agent-workspace .agent-reasoning-level > span {
+  display: block;
+  width: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .18);
+  transition: height 160ms ease, background-color 160ms ease;
+}
+.agent-workspace .agent-reasoning-level:nth-child(1) > span { height: 7px; }
+.agent-workspace .agent-reasoning-level:nth-child(2) > span { height: 10px; }
+.agent-workspace .agent-reasoning-level:nth-child(3) > span { height: 13px; }
+.agent-workspace .agent-reasoning-level:nth-child(4) > span { height: 16px; }
+.agent-workspace .agent-reasoning-level.is-filled > span { background: #d9d0d5; }
+.agent-workspace .agent-reasoning-level.is-current > span { background: #fff8fa; box-shadow: 0 0 9px rgba(238, 230, 234, .3); }
+.agent-workspace .agent-reasoning-level:focus-visible { outline: 2px solid rgba(226, 159, 177, .62); outline-offset: 1px; }
+.agent-workspace .agent-reasoning-level:disabled { opacity: .34; cursor: not-allowed; }
+.agent-workspace .agent-reasoning-level.is-unavailable > span { background: rgba(255, 255, 255, .14); }
 .agent-workspace .agent-composer .agent-mode-picker > .agent-control {
   min-height: 34px;
   padding: 0 10px;
@@ -499,7 +535,6 @@
 .agent-workspace .agent-composer .agent-send:disabled { background: rgba(238, 231, 234, .42); color: rgba(23, 19, 21, .55); }
 .agent-workspace .agent-composer .agent-send.agent-stop { background: #ece5e8; color: #171315; }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer textarea { min-height: 64px; margin-bottom: 16px; line-height: 1.62; }
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-reasoning-bars { display: none; }
 .agent-workspace :is(.agent-picker-popup, .agent-command-menu) > .agent-picker-search {
   min-height: 40px;
   margin: 9px 9px 5px;

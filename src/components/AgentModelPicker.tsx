@@ -42,8 +42,6 @@ export default function AgentModelPicker({ model, reasoning, disabled, disabledR
   const reasoningValues = reasoning ? configValues(reasoning) : []
   const label = selected?.name || String(model?.currentValue || "Choose model")
   const reasoningLabel = selectedReasoning?.name || String(reasoning?.currentValue ?? "")
-  const reasoningIndex = reasoning ? reasoningValues.findIndex(value => value.value === reasoning.currentValue) : -1
-  const reasoningFill = reasoningIndex < 0 ? 0 : Math.max(1, Math.round((reasoningIndex + 1) / Math.max(1, reasoningValues.length) * 4))
   const activeIndex = Math.max(0, Math.min(active, values.length - 1))
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
@@ -90,7 +88,6 @@ export default function AgentModelPicker({ model, reasoning, disabled, disabledR
   return <div ref={root} className="agent-picker agent-model-picker" data-config-id="model-reasoning">
     <button ref={trigger} type="button" className="agent-control agent-model-trigger" aria-label={`Model: ${label}`} aria-description={reasoning ? `Reasoning: ${reasoningLabel || "Default"}` : disabledReason} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? `${listId}-dialog` : undefined} disabled={disabled && !open && !pending} onClick={() => open ? close() : onOpenChange(true)} title={disabled ? disabledReason : `Choose model${reasoning ? ` and reasoning · ${reasoningLabel}` : ""}`}>
       <span className="agent-model-trigger-copy"><strong>{label}</strong>{reasoning && <small>{reasoningLabel || "Default"}</small>}</span>
-      {reasoningFill > 0 && <span className="agent-reasoning-bars" role="img" aria-label={`Reasoning effort: ${reasoningLabel || "Default"}`} title={`Reasoning effort: ${reasoningLabel || "Default"}`}>{[0, 1, 2, 3].map(index => <i key={index} className={index < reasoningFill ? "is-filled" : ""} />)}</span>}
     </button>
     {open && <div ref={popup} id={`${listId}-dialog`} className="agent-model-menu" role="dialog" aria-label="Model and reasoning" onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); return }

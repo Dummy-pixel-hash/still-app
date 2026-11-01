@@ -159,6 +159,24 @@ test("the frosted input floats over a wide transcript and reserves space as the 
   await expect.poll(() => composer.evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
 })
 
+test("expanding the collapsed composer settles at its final width without a height jump", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  await page.getByRole("button", { name: "Find a message" }).focus()
+  const composer = page.locator(".agent-composer")
+  const textarea = page.getByLabel("Message agent")
+  await expect(composer).toHaveClass(/is-collapsed/)
+  await composer.click({ position: { x: 5, y: 20 } })
+  await expect(composer).not.toHaveClass(/is-collapsed/)
+  await expect.poll(() => textarea.evaluate(el => el.getBoundingClientRect().width)).toBeGreaterThan(700)
+  await expect.poll(() => textarea.evaluate(el => el.getBoundingClientRect().height)).toBeLessThan(90)
+  await page.waitForTimeout(300)
+  const settled = await textarea.evaluate(el => el.getBoundingClientRect().height)
+  expect((await composer.boundingBox())!.height).toBeLessThan(200)
+  await textarea.fill("A short line")
+  await expect.poll(() => textarea.evaluate(el => el.getBoundingClientRect().height)).toBeCloseTo(settled, 0)
+})
+
 test("native frost tracks the active composer after history opens and viewport resizes", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} })

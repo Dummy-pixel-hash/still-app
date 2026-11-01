@@ -29,6 +29,7 @@ import AgentRepositoryChanges from "./AgentRepositoryChanges"
 import { changeTotals, conversationChanges } from "../agents/changes"
 import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
 import AgentModelPicker from "./AgentModelPicker"
+import AgentReasoningBars from "./AgentReasoningBars"
 import AgentAurora from "./AgentAurora"
 import { AgentTimeline } from "./AgentTimeline"
 import AgentTodos from "./AgentTodos"
@@ -354,12 +355,28 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
   useEffect(() => { if (!current?.todos?.items.length) setTodosOpen(false) }, [current?.meta.id, current?.todos?.items.length])
   useLayoutEffect(() => { setAgentDetailsOpen(false) }, [contextKey, agentId, activeAgent?.executionId, activeAgent?.agentId, activeAgent?.agentSessionId, activeAgent?.cwd, transportId, view])
-  useEffect(() => {
+  useLayoutEffect(() => {
     const input = textarea.current
     if (!input) return
     if (composerCollapsed) { input.style.height = ""; return }
-    input.style.height = "auto"
-    input.style.height = `${Math.min(input.scrollHeight, 156)}px`
+    const resize = () => {
+      if (input.getBoundingClientRect().width < 120) return
+      const maxHeight = Number.parseFloat(getComputedStyle(input).maxHeight) || 156
+      input.style.height = "auto"
+      input.style.height = `${Math.min(input.scrollHeight, maxHeight)}px`
+    }
+    let previousWidth = input.getBoundingClientRect().width
+    let settleTimer = 0
+    const observer = new ResizeObserver(() => {
+      const width = input.getBoundingClientRect().width
+      if (Math.abs(width - previousWidth) < 1) return
+      previousWidth = width
+      window.clearTimeout(settleTimer)
+      settleTimer = window.setTimeout(resize, 100)
+    })
+    observer.observe(input)
+    resize()
+    return () => { observer.disconnect(); window.clearTimeout(settleTimer) }
   }, [draft, selected, view, composerCollapsed])
   useEffect(() => { mounted.current = true; const previous = document.activeElement as HTMLElement | null; surface.current?.focus(); return () => { mounted.current = false; void flushAgentSaves(); if (previous?.isConnected) previous.focus() } }, [])
   useLayoutEffect(() => {
@@ -718,6 +735,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
               <div className="agent-composer-controls">
                 {!current ? <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} /> : <span className="agent-composer-provider" title={current.agentName}><AgentProviderMark id={current.agentId} size={16} /><span className="agent-provider-name">{current.agentName}</span></span>}
                   <AgentModelPicker key={activeAgent?.executionId || configurationKey} model={modelControl} reasoning={reasoningControl} open={modelMenu !== null} focusReasoning={modelMenu === "reasoning"} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : "Connect the agent to configure its model"} change={changeConfig} />
+                  {reasoningControl && <AgentReasoningBars key={`${activeAgent?.executionId}:${reasoningControl.id}`} option={reasoningControl} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its reasoning" : current?.turnActive ? "Wait for the agent to finish before changing its reasoning" : "Connect the agent to configure its reasoning"} change={changeSecondaryConfig} />}
                 {agentModeControl && <ConfigPicker className="agent-mode-picker" key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
