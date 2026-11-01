@@ -28,6 +28,11 @@ and existing working-tree changes. No task below requires the original transcrip
 - [x] **GIT-04** — Repository inspector and scoped refresh lifecycle. **Implementation done 2026-11-01**; 7 Git UI tests and the full 125-test Playwright suite pass; view separation, refresh/race scopes, states and accessibility are covered. **M**.
 - [ ] **VERIFY-04** — Git end-to-end/read-only/native gate and docs. Deterministic B gate passed **2026-11-01**; live SSH checkout and packaged Windows/WebView2 evidence remain pending. **S**.
 
+### Reported Git runtime regression — 2026-11-01
+
+- [x] **FIX-GIT-EOF** — Fix the reported “Remote Git helper did not exit successfully” error. Native must keep reading after SSH output EOF until channel close and validate the later exit status. An authenticated in-memory SSH regression reproduced the original error and now passes; missing/nonzero exit, signal termination and stalled close still fail. Also corrected native `headOid` field serialization. **Implementation verified; packaged rebuild and user retest pending.**
+- [ ] **VERIFY-GIT-EOF-PACKAGED** — Rebuild Windows ARM64 with FIX-GIT-EOF, then retry Repository/Refresh on the user's selected `Darsh@100.86.95.34` project `/mnt/data/git-test`. Confirm status and diff loads from the native app; this remains part of VERIFY-04, not inferred from fixture tests.
+
 ## User inputs needed to close external evidence
 
 1. **V-GIT-REMOTE / VERIFY-04:** Connect the desired SSH host in Still and identify an

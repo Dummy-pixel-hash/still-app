@@ -1,6 +1,6 @@
 use crate::{agent, commands::AppState, core::{SessionStatus, StillError}, ssh_worker};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use russh::ChannelMsg;
+use russh::{Channel, ChannelMsg, client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -100,7 +100,7 @@ pub struct AgentGitEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum AgentGitSnapshotState {
     NotRepository { reason: String },
     GitUnavailable { reason: String },
@@ -531,9 +531,16 @@ async fn run_remote_helper(
         Ok(Err(_)) => { let _ = channel.close().await; return Err(friendly("agent_git_ssh", "Could not close the Git request stream.")); }
         Err(_) => { let _ = channel.close().await; return Err(friendly("agent_git_timeout", "Remote Git inspection exceeded its 10-second deadline.")); }
     }
+    read_helper_channel(&mut channel, prefix.as_bytes(), deadline).await
+}
+
+async fn read_helper_channel(
+    channel: &mut Channel<client::Msg>, prefix: &[u8], deadline: tokio::time::Instant,
+) -> Result<Value, StillError> {
     let mut stdout = Vec::new();
     let mut _stderr = Vec::new();
     let mut exit_status = None;
+    let mut exit_signal = None;
     loop {
         let message = match tokio::time::timeout_at(deadline, channel.wait()).await {
             Ok(message) => message,
@@ -552,14 +559,23 @@ async fn run_remote_helper(
                 _stderr.extend_from_slice(&data[..retained]);
             }
             Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
-            Some(ChannelMsg::Close | ChannelMsg::Eof) | None => break,
+            Some(ChannelMsg::ExitSignal { signal_name, .. }) => exit_signal = Some(signal_name),
+            // SSH EOF closes the output stream, not the process/channel. OpenSSH
+            // can send the exit status afterwards; keep draining to Close.
+            Some(ChannelMsg::Eof) => {},
+            Some(ChannelMsg::Close) | None => break,
             _ => {}
         }
     }
     let _ = channel.close().await;
-    let frame = parse_frame(&stdout, prefix.as_bytes())?;
+    let frame = parse_frame(&stdout, prefix)?;
     if frame.get("ok").and_then(Value::as_bool) != Some(true) { return Err(helper_error(&frame)); }
-    if exit_status != Some(0) { return Err(friendly("agent_git_failed", "Remote Git helper did not exit successfully.")); }
+    if exit_signal.is_some() { return Err(friendly("agent_git_failed", "Remote Git helper was terminated by a signal.")); }
+    match exit_status {
+        Some(0) => {},
+        Some(code) => return Err(friendly("agent_git_failed", &format!("Remote Git helper exited with status {code}."))),
+        None => return Err(friendly("agent_git_failed", "Remote Git helper closed without confirming its exit status.")),
+    }
     let result = frame.get("result").cloned().ok_or_else(|| friendly("agent_git_frame", "Remote Git result is missing."))?;
     if serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > RESPONSE_LIMIT) {
         return Err(friendly("agent_git_frame", "Remote Git response exceeded its 2 MiB limit."));
@@ -706,6 +722,71 @@ pub async fn still_agent_git_diff(state: State<'_, AppState>, args: GitDiffArgs)
 mod tests {
     use super::*;
 
+    // In-memory SSH fixture: no external server, account, keys, or filesystem writes.
+    struct ExitOrderServer { exit_code: Option<u32>, signal: bool, delay: Duration }
+    impl russh::server::Handler for ExitOrderServer {
+        type Error = russh::Error;
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+        async fn channel_open_session(&mut self, _: Channel<russh::server::Msg>, reply: russh::server::ChannelOpenHandle, _: &mut russh::server::Session) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+        async fn exec_request(&mut self, channel: russh::ChannelId, _: &[u8], session: &mut russh::server::Session) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            session.data(channel, b"STILL_GIT_RESULT_test:{\"ok\":true,\"result\":{\"state\":\"ready\"}}\n".to_vec())?;
+            // OpenSSH can close stdout before reporting process exit.
+            session.eof(channel)?;
+            let handle = session.handle();
+            let exit_code = self.exit_code;
+            let signal = self.signal;
+            let delay = self.delay;
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Some(exit_code) = exit_code { let _ = handle.exit_status_request(channel, exit_code).await; }
+                if signal { let _ = handle.exit_signal_request(channel, russh::Sig::TERM, false, String::new(), String::new()).await; }
+                let _ = handle.close(channel).await;
+            });
+            Ok(())
+        }
+    }
+    struct ExitOrderClient { expected: russh::keys::PublicKey }
+    impl client::Handler for ExitOrderClient {
+        type Error = russh::Error;
+        async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+            Ok(matches!(key, russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } if key.key_data() == self.expected.key_data()))
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_output_eof_before_exit_status_does_not_reject_a_successful_helper() {
+        use russh::keys::{PrivateKey, ssh_key::private::{Ed25519Keypair, KeypairData}};
+        for (exit_code, signal, delay) in [
+            (Some(0), false, Duration::from_millis(30)),
+            (Some(7), false, Duration::from_millis(30)),
+            (None, false, Duration::from_millis(30)),
+            (Some(0), true, Duration::from_millis(30)),
+            (Some(0), false, Duration::from_secs(5)),
+        ] {
+            let key = PrivateKey::new(KeypairData::Ed25519(Ed25519Keypair::from_seed(&[7;32])), "test-only").unwrap();
+            let expected = key.public_key().clone();
+            let config = Arc::new(russh::server::Config { keys: vec![key], auth_rejection_time: Duration::ZERO, ..Default::default() });
+            let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
+            let server = tokio::spawn(async move { russh::server::run_stream(config, server_stream, ExitOrderServer { exit_code, signal, delay }).await.unwrap().await });
+            let mut connection = client::connect_stream(Arc::new(client::Config::default()), client_stream, ExitOrderClient { expected }).await.unwrap();
+            assert!(connection.authenticate_none("fixture").await.unwrap().success());
+            let mut channel = connection.channel_open_session().await.unwrap();
+            channel.exec(true, "fixture").await.unwrap();
+            let result = read_helper_channel(&mut channel, b"STILL_GIT_RESULT_test:", tokio::time::Instant::now() + Duration::from_secs(1)).await;
+            let _ = connection.disconnect(russh::Disconnect::ByApplication, "", "").await;
+            server.abort();
+            if delay > Duration::from_secs(1) { assert_eq!(result.unwrap_err().code, "agent_git_timeout"); }
+            else if exit_code == Some(0) && !signal { assert_eq!(result.unwrap()["state"], "ready"); }
+            else { assert_eq!(result.unwrap_err().code, "agent_git_failed"); }
+        }
+    }
+
     fn raw_entry(bytes: &[u8], label: &str) -> Value {
         json!({
             "path": label, "pathBytesBase64": STANDARD.encode(bytes),
@@ -743,6 +824,8 @@ mod tests {
         assert_eq!(public["hostKey"], context().host_key);
         assert_eq!(public["cwd"], "/srv/project");
         assert_eq!(public["state"], "ready");
+        assert_eq!(public["headOid"], "a".repeat(40));
+        assert!(public.get("head_oid").is_none());
         let row = &public["entries"][0];
         assert_eq!(row["path"], "src/name with space.txt");
         assert_ne!(row["id"], "src/name with space.txt");

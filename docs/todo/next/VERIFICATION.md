@@ -561,3 +561,15 @@ installation, Todo mutation, or history operation is triggered by opening it.
 | Checks | `npm run test:agents` → **77 Node and 125 Playwright passed**; `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins` → **73 passed, 2 ignored**; `npm run build` → PASS with existing dynamic-import/chunk-size warnings; `git diff --check` → PASS |
 | Evidence location | `/tmp/opencode/git-final-test-agents.log`, `/tmp/opencode/git-final-rust.log`, `/tmp/opencode/git-final-build.log` |
 | Blockers | Deterministic B gate passes. Do **not** mark Git delivery complete until V-GIT-REMOTE uses a named disposable SSH host/project and compares HEAD/index/content before/after review reads, and packaged Windows/WebView2 checks are recorded. The live rows remain pending rather than inferred from fixtures. |
+
+### FIX-GIT-EOF — user-reported native Git read failure
+
+| Field | Value |
+| --- | --- |
+| Report | Screenshot `~/still-uploads/still-paste-2026-11-01T16-53-46-503Z.png`: Repository for `Darsh@100.86.95.34`, `/mnt/data/git-test`, showed “Remote Git helper did not exit successfully”; Refresh also failed. |
+| Cause | `run_remote_helper` treated SSH `ChannelMsg::Eof` as process completion. A valid helper result followed by stdout EOF and then exit status 0 was rejected because native stopped before seeing the status. This is independent of the accidentally initialized parent Git repository. |
+| Fix | `src-tauri/src/agent_git.rs`: extract/use the actual channel reader in tests, keep draining after EOF to channel close under the existing deadline, reject missing/nonzero exit or signal termination, and serialize Ready variant fields as camelCase (`headOid`). No Git safety checks were weakened. |
+| Regression evidence | Authenticated russh client/server over an in-memory duplex stream with an exact known test host key, no network listener or external account. The success case failed with the same user-visible error before the fix; success, nonzero exit, missing exit status, signal termination and stalled close behave correctly after the fix. The `headOid` assertion also failed before its serialization fix. |
+| Checks | `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --bins` → **74 passed, 2 ignored**; `node --import ./tests-agents/isolated-env.mjs --test tests-agents/git-review.test.mjs` → **17 passed**; Git review Playwright → **7 passed**; `npm run build` (includes typecheck) → PASS with existing Vite warnings. |
+| Evidence location | `/tmp/opencode/git-eof-rust.log`, `/tmp/opencode/git-eof-node.log`, `/tmp/opencode/git-eof-ui.log`, `/tmp/opencode/git-eof-build.log`; native regressions in `agent_git::tests`. |
+| Remaining gate | Packaged ARM64 rebuild and installation/retest remain pending. Retry the user's exact selected host/project after rebuilding; real-host end-to-end/read-only evidence remains VERIFY-04. Passing this transport fixture does not close that gate. |
