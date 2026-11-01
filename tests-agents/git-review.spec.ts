@@ -82,6 +82,20 @@ test("the transcript summary opens historical Conversation changes without readi
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(0)
 })
 
+test("first status failure has one clear recovery action instead of duplicate error and empty messages", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => { (window as any).agentFixture.failGitStatus = true })
+  const panel = await openRepository(page)
+  const failure = panel.locator(".agent-repository-state.is-error")
+  await expect(failure).toContainText("Git status is unavailable")
+  await expect(failure.getByRole("button", { name: "Try again" })).toBeEnabled()
+  await expect(panel.locator(".agent-repository-empty")).toHaveCount(0)
+  await expect(panel.locator(".agent-repository-error")).toHaveCount(0)
+  await page.evaluate(() => { (window as any).agentFixture.failGitStatus = false })
+  await failure.getByRole("button", { name: "Try again" }).click()
+  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+})
+
 test("refresh failures retain the last repository snapshot and truncated empty results never claim clean", async ({ page }) => {
   await connect(page)
   const panel = await openRepository(page)

@@ -91,8 +91,10 @@ export default function AgentRepositoryChanges({
       <div className="agent-repository-identity">
         <span className="agent-repository-server">{host}</span>
         {ready && <>
-          <strong>{branchLabel(ready)}</strong>
-          <code title={ready.root}>{ready.root}</code>
+          <div className="agent-repository-location">
+            <span className="agent-repository-branch"><AgentIcon name="code" size={13} />{branchLabel(ready)}</span>
+            <code title={ready.root}>{ready.root}</code>
+          </div>
         </>}
         {!ready && cwd && <code title={cwd}>{cwd}</code>}
       </div>
@@ -107,27 +109,35 @@ export default function AgentRepositoryChanges({
     {!connected && <p className="agent-repository-notice" role="status">{snapshot ? "Offline · showing the last read snapshot." : "Connect to this server to inspect its repository."}</p>}
     {connected && status.phase === "stale" && snapshot && !status.error && <p className="agent-repository-notice" role="status">Showing the last checked snapshot until this connection is refreshed.</p>}
     {status.phase === "loading" && <p className="agent-repository-notice" role="status">{snapshot ? "Refreshing repository status…" : "Reading repository status…"}</p>}
-    {status.error && <p className="agent-repository-error" role="alert">{status.error}</p>}
+    {status.error && snapshot && <p className="agent-repository-error" role="alert">{status.error}</p>}
 
     {snapshot?.state === "notRepository" && <div className="agent-repository-empty"><AgentIcon name="file" size={22} /><h3>This folder is not inside a Git working tree.</h3><p>Conversation changes are still available in the Conversation view.</p></div>}
     {snapshot?.state === "gitUnavailable" && <div className="agent-repository-empty"><AgentIcon name="terminal" size={22} /><h3>Git is unavailable on this server.</h3><p>{snapshot.reason}</p></div>}
     {!snapshot && status.phase === "idle" && connected && <div className="agent-repository-empty"><AgentIcon name="changes" size={22} /><h3>Repository status has not been read.</h3><p>Open Repository while connected to inspect the selected conversation’s folder.</p></div>}
-    {!snapshot && status.phase === "error" && <div className="agent-repository-empty"><AgentIcon name="changes" size={22} /><h3>Couldn’t read repository status.</h3><p>Reconnect or refresh to try again.</p></div>}
+    {!snapshot && status.phase === "error" && <div className="agent-repository-state is-error" role="alert">
+      <AgentIcon name="changes" size={18} />
+      <div><strong>Couldn’t read repository status</strong><p>{status.error || "Reconnect or retry to inspect this working tree."}</p></div>
+      <button type="button" className="agent-button" onClick={() => { void refresh() }} disabled={!canRefresh}>Try again</button>
+    </div>}
 
     {ready && <>
       {ready.truncated && <p className="agent-repository-notice" role="status">The file list reached its safety limit. Refresh to check again; this partial list is not a clean result.</p>}
       {ready.entries.length === 0 && !ready.truncated && <div className="agent-repository-empty"><AgentIcon name="check" size={22} /><h3>No uncommitted changes.</h3><p>Refresh to check the current server-side working tree.</p></div>}
       {ready.entries.length > 0 && <>
+        <div className="agent-repository-files-heading"><strong>Changed files</strong><span>{ready.entries.length}{ready.truncated ? "+" : ""}</span></div>
         <div className="agent-repository-files" role="group" aria-label="Repository files">
           {entries.map(entry => <button type="button" key={entry.id} aria-pressed={entry.id === selected?.id}
             aria-label={`${entry.path}, ${kindLabel[entry.kind]}, index ${entry.indexStatus}, worktree ${entry.worktreeStatus}`}
             className={`agent-repository-file ${entry.id === selected?.id ? "is-selected" : ""}`}
             onClick={() => setSelectedId(entry.id)} title={entry.path}>
-            <span className="agent-repository-xy" aria-hidden="true">{entry.indexStatus}{entry.worktreeStatus}</span>
+            <span className="agent-repository-xy" aria-label={`Index ${entry.indexStatus}; worktree ${entry.worktreeStatus}`}>{entry.indexStatus}{entry.worktreeStatus}</span>
             <span className="agent-repository-file-path">{entry.path}</span>
-            <span className="agent-repository-kind">{kindLabel[entry.kind]}</span>
-            {entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null
-              ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : null}
+            <span className="agent-repository-file-meta">
+              <span className="agent-repository-kind">{kindLabel[entry.kind]}</span>
+              {entry.originalPath && <span className="agent-repository-origin" title={`Renamed from ${entry.originalPath}`}>from {entry.originalPath}</span>}
+              {entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null
+                ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : null}
+            </span>
           </button>)}
         </div>
         {selected && <>

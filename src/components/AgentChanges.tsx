@@ -35,6 +35,7 @@ export default function AgentChanges({ changes, close, mode, onModeChange, repos
   const files = useMemo(() => [...new Set(changes.map(change => change.path))], [changes])
   const path = files.includes(selected) ? selected : files[0]
   const total = changeTotals(changes)
+  const sourceCount = mode === "repository" ? repositoryCount : total.reportedFiles
   useLayoutEffect(() => {
     root.current?.querySelector<HTMLButtonElement>(".agent-review-close")?.focus({ preventScroll: true })
     return () => { requestAnimationFrame(() => {
@@ -78,7 +79,7 @@ export default function AgentChanges({ changes, close, mode, onModeChange, repos
       else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus() }
     }
   }}>
-    <header className="agent-review-header"><div><AgentIcon name="changes" size={16} /><h2>Changes</h2><span>{mode === "repository" ? repositoryCount : total.reportedFiles}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
+    <header className="agent-review-header"><div><AgentIcon name="changes" size={16} /><h2>Changes</h2><span>{sourceCount} {sourceCount === 1 ? "file" : "files"}</span></div><button className="agent-icon-button agent-review-close" aria-label="Close changes" onClick={close}><AgentIcon name="close" size={17} /></button></header>
     <div className="agent-review-views" role="tablist" aria-label="Change source">
       <button id="agent-review-tab-repository" type="button" role="tab" aria-selected={mode === "repository"} aria-controls="agent-review-panel" tabIndex={mode === "repository" ? 0 : -1} onClick={() => onModeChange("repository")}>Repository</button>
       <button id="agent-review-tab-conversation" type="button" role="tab" aria-selected={mode === "conversation"} aria-controls="agent-conversation-review-panel" tabIndex={mode === "conversation" ? 0 : -1} onClick={() => onModeChange("conversation")}>Conversation</button>

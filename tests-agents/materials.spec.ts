@@ -33,7 +33,7 @@ test("sidebar actions and conversation review use the same warm glass materials"
   await expect(review).toHaveCSS("backdrop-filter", "blur(24px) saturate(1.12)")
   await expect(review).toHaveCSS("background-color", "rgba(18, 18, 21, 0.68)")
   await expect(review).toHaveCSS("border-radius", "16px")
-  await expect(review.locator(".agent-review-header h2")).toHaveCSS("font-size", "15px")
+  await expect(review.locator(".agent-review-header h2")).toHaveCSS("font-size", "16px")
   await expect(review.locator(".agent-review-files > button.is-selected")).toHaveCSS("background-image", /linear-gradient\(105deg/)
   await expect(conversationPanel.locator(".diff-add").first()).toHaveCSS("color", "rgb(178, 221, 197)")
   await expect(conversationPanel.locator(".diff-remove").first()).toHaveCSS("color", "rgb(237, 187, 201)")

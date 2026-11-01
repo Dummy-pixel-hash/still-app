@@ -39,6 +39,7 @@ import { useAgentGit } from "../session/agentGit"
 import type { TranscriptItem } from "../agents/transcript"
 import "../styles/agent-workspace.css"
 import "../styles/agent-materials.css"
+import "../styles/agent-changes.css"
 
 type Props = {
   session: Session | null

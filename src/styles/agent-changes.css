@@ -1,0 +1,319 @@
+/* A Change inspector should read as one tool surface: source, repository scope,
+   compact file index, then an uninterrupted diff canvas. */
+.agent-workspace .agent-review {
+  width: clamp(420px, 46%, 720px);
+  background: var(--ag-glass-sheen), var(--ag-sheet-deep);
+}
+
+.agent-workspace .agent-review-header {
+  min-height: 58px;
+  padding-inline: 19px;
+}
+
+.agent-workspace .agent-review-header h2 {
+  font-size: 16px;
+  letter-spacing: -.015em;
+}
+
+.agent-workspace .agent-review-header > div > span {
+  padding: 3px 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-workspace .agent-review-views {
+  gap: 4px;
+  padding: 7px 14px;
+  background: rgba(0, 0, 0, .13);
+}
+
+.agent-workspace .agent-review-views > button {
+  flex: 1;
+  min-height: 32px;
+  border-radius: 8px;
+  color: #bdb2b9;
+  font-size: 11px;
+}
+
+.agent-workspace .agent-review-views > button[aria-selected="true"] {
+  border-color: rgba(232, 153, 166, .2);
+  background: linear-gradient(110deg, rgba(165, 68, 89, .2), rgba(165, 68, 89, .08));
+  color: #f1e5ea;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .04);
+}
+
+.agent-workspace .agent-review-tabpanel[aria-labelledby="agent-review-tab-repository"] {
+  min-height: 0;
+}
+
+.agent-workspace .agent-repository-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 13px 19px 12px;
+  border-bottom-color: rgba(255, 255, 255, .065);
+}
+
+.agent-workspace .agent-repository-identity {
+  gap: 7px;
+}
+
+.agent-workspace .agent-repository-server {
+  color: #c9b3bf;
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.agent-workspace .agent-repository-location {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.agent-workspace .agent-repository-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #eee3e9;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.agent-workspace .agent-repository-branch > svg {
+  flex: 0 0 auto;
+  color: #d9a0b1;
+}
+
+.agent-workspace .agent-repository-identity > code,
+.agent-workspace .agent-repository-location > code {
+  max-width: 100%;
+  overflow: hidden;
+  color: #a99ca5;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workspace .agent-repository-refresh {
+  align-items: flex-end;
+  gap: 7px;
+}
+
+.agent-workspace .agent-repository-refresh > span {
+  color: #b7aab2;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-workspace .agent-repository-refresh > button {
+  min-height: 32px;
+  padding-inline: 11px;
+}
+
+.agent-workspace .agent-repository-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin: 14px 16px;
+  padding: 13px 14px;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, .18);
+}
+
+.agent-workspace .agent-repository-state.is-error > svg {
+  color: #e7a5b2;
+}
+
+.agent-workspace .agent-repository-state > div { min-width: 0; }
+.agent-workspace .agent-repository-state > div > strong { color: #f0e5e9; font-size: 12px; font-weight: 550; }
+.agent-workspace .agent-repository-state > div > p { margin: 4px 0 0; color: #b9abb3; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-workspace .agent-repository-state > button { min-height: 32px; white-space: nowrap; }
+
+.agent-workspace .agent-repository-files-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 5px 19px 4px;
+  color: #cfc1c9;
+}
+
+.agent-workspace .agent-repository-files-heading > strong {
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.agent-workspace .agent-repository-files-heading > span {
+  color: #a99da5;
+  font: 10px/1.4 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-workspace .agent-repository-files {
+  flex: 0 1 auto;
+  max-height: min(34%, 250px);
+  padding: 2px 12px 10px;
+  border-bottom-color: rgba(255, 255, 255, .065);
+}
+
+.agent-workspace .agent-repository-file {
+  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 3px;
+  min-height: 52px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  color: #e4dbe0;
+}
+
+.agent-workspace .agent-repository-file:hover {
+  background: rgba(255, 255, 255, .045);
+}
+
+.agent-workspace .agent-repository-file.is-selected {
+  background: linear-gradient(105deg, rgba(165, 68, 89, .17), rgba(165, 68, 89, .055));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .035);
+  color: #fff5f8;
+}
+
+.agent-workspace .agent-repository-xy {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 23px;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .025);
+  color: #d8c4cd;
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.agent-workspace .agent-repository-file-path {
+  grid-column: 2;
+  grid-row: 1;
+  color: #eee7eb;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-workspace .agent-repository-file-meta {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-workspace .agent-repository-file-meta > .agent-repository-kind,
+.agent-workspace .agent-repository-file-meta > .agent-repository-origin {
+  overflow: hidden;
+  color: #b6aab2;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workspace .agent-repository-file-meta > .agent-repository-origin {
+  flex: 1;
+  color: #a89ba4;
+  font-family: var(--font-mono);
+}
+
+.agent-workspace .agent-repository-file-meta > .agent-change-numbers {
+  margin-left: auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-workspace .agent-repository-file-meta > .agent-repository-binary {
+  margin-left: auto;
+  color: #c9b5c0;
+}
+
+.agent-workspace .agent-repository-scope {
+  gap: 5px;
+  min-height: 43px;
+  padding: 5px 16px;
+  border-bottom-color: rgba(255, 255, 255, .055);
+}
+
+.agent-workspace .agent-repository-scope > button {
+  min-height: 30px;
+  padding-inline: 12px;
+  border-radius: 7px;
+  color: #b8aeb4;
+  font-size: 11px;
+}
+
+.agent-workspace .agent-repository-scope > button[aria-selected="true"] {
+  border-color: rgba(232, 153, 166, .18);
+  background: rgba(165, 68, 89, .14);
+  color: #f0e3e9;
+}
+
+.agent-workspace .agent-review-diff.agent-repository-diff {
+  margin: 10px 12px 12px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, .28);
+  scrollbar-color: #51424b transparent;
+}
+
+.agent-workspace .agent-repository-diff .agent-diff {
+  margin-bottom: 0;
+  border: 0;
+  border-radius: 10px;
+}
+
+.agent-workspace .agent-repository-diff .agent-code-language {
+  min-height: 38px;
+  padding-inline: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  color: #cbbcc5;
+}
+
+.agent-workspace .agent-repository-diff .agent-patch {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.agent-workspace .agent-repository-diff .agent-line-number {
+  flex-basis: 38px;
+  color: #aa9ca6;
+}
+
+.agent-workspace .agent-repository-diff-message {
+  min-height: 145px;
+  color: #b6aab3;
+}
+
+@media (max-width: 1000px) {
+  .agent-workspace .agent-review {
+    inset: 54px 10px 10px auto;
+    width: min(680px, calc(100% - 20px));
+    border-radius: 16px;
+  }
+}
+
+@media (max-width: 520px) {
+  .agent-workspace .agent-review-header { min-height: 52px; }
+  .agent-workspace .agent-repository-header { padding: 11px 14px; }
+  .agent-workspace .agent-repository-files-heading { padding-inline: 16px; }
+  .agent-workspace .agent-repository-files { padding-inline: 9px; }
+  .agent-workspace .agent-repository-file { min-height: 54px; }
+  .agent-workspace .agent-repository-scope { padding-inline: 11px; }
+  .agent-workspace .agent-review-diff.agent-repository-diff { margin: 8px 8px 9px; }
+  .agent-workspace .agent-repository-state { grid-template-columns: auto minmax(0, 1fr); margin: 12px 10px; padding: 12px; }
+  .agent-workspace .agent-repository-state > button { grid-column: 2; justify-self: start; }
+}
