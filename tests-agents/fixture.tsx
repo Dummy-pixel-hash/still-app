@@ -2,7 +2,7 @@ import React from "react"
 import { createRoot } from "react-dom/client"
 import "../src/styles/theme.css"
 import AgentWorkspace from "../src/components/AgentWorkspace"
-import { AGENTS, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
+import { AGENTS, type AgentConfigOption, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
 import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../src/agents/git"
 import { nativeBridge, registerNativeBridge } from "../src/bridge/nativeBridge"
 import { mockBridge } from "../src/bridge/mockBridge"
@@ -48,6 +48,8 @@ const h = {
   trimSnapshot: (count: number) => { const row = snapshots.get(h.current)!; row.transcript = row.transcript.slice(-count) },
   rejectConfig: false, rejectSend: false, rejectResponse: false, deferResponse: false, deferConfig: false, unknownResponse: false, failSnapshot: false,
   releaseResponse: () => {}, releaseConfig: () => {},
+  reasoningByModel: {} as Record<string, AgentConfigOption | null>,
+  configOptions: () => structuredClone(snapshots.get(h.current)!.configOptions),
   closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   gitStatusCalls: [] as Array<{ nativeSessionId: string; cwd: string }>,
   gitDiffCalls: [] as Array<{ nativeSessionId: string; cwd: string; snapshotId: string; entryId: string; view: AgentGitView }>,
@@ -225,6 +227,11 @@ registerNativeBridge({
     if (h.deferConfig) await new Promise<void>(resolve => { h.releaseConfig = resolve })
     const row = snapshots.get(id)!
     row.configOptions.find(option => option.id === configId)!.currentValue = value
+    if (configId === "model" && Object.prototype.hasOwnProperty.call(h.reasoningByModel, String(value))) {
+      row.configOptions = row.configOptions.filter(option => option.category !== "thought_level")
+      const reasoning = h.reasoningByModel[String(value)]
+      if (reasoning) row.configOptions.push(structuredClone(reasoning))
+    }
     h.emit(id, { type: "configOptions", configOptions: structuredClone(row.configOptions) })
   },
   agentRespondPermission: async (id, requestId, optionId) => {

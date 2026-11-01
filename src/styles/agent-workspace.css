@@ -947,7 +947,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   padding: 30px clamp(16px, 4vw, 48px) max(12px, env(safe-area-inset-bottom));
   background: none;
   pointer-events: none;
-  transition: padding 240ms cubic-bezier(.16, 1, .3, 1);
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area.is-collapsed {
   padding-top: 12px;
@@ -965,7 +964,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   margin-inline: auto;
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer {
-  transition: max-width 260ms cubic-bezier(.16, 1, .3, 1), padding 220ms cubic-bezier(.16, 1, .3, 1), border-radius 220ms cubic-bezier(.16, 1, .3, 1);
+  transition: border-radius 160ms ease;
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-todos-dock { display: flex; justify-content: center; flex-shrink: 0; width: min(100%, 800px); margin: 0 auto 7px; pointer-events: none; }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed {
@@ -990,7 +989,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   pointer-events: none;
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer textarea {
-  transition: opacity 140ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1), min-height 220ms cubic-bezier(.16, 1, .3, 1);
+  transition: opacity 140ms ease, transform 140ms ease;
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-toolbar {
   flex-wrap: nowrap;
@@ -1015,6 +1014,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   box-shadow: none;
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger-copy small,
+.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-provider,
 .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger > svg {
   display: none;
 }

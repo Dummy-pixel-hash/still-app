@@ -340,14 +340,16 @@
   border-top-color: rgba(255, 255, 255, .115);
   border-radius: inherit;
   pointer-events: none;
+  transform-origin: 0 0;
   background:
     linear-gradient(156deg, rgba(255, 255, 255, .035), rgba(255, 255, 255, 0) 40%),
     rgba(10, 10, 12, .86);
   backdrop-filter: blur(24px) saturate(112%);
   -webkit-backdrop-filter: blur(24px) saturate(112%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07);
+  transition: border-color 220ms ease;
 }
-.agent-workspace .agent-composer:focus-within::before { border-color: rgba(240, 104, 112, .46); }
+.agent-workspace .agent-composer:focus-within::before { border-color: rgba(255, 255, 255, .14); border-top-color: rgba(255, 255, 255, .2); }
 /* Selector triggers sit quietly in the writing rail; only open state warms up. */
 .agent-workspace .agent-composer .agent-control,
 .agent-workspace .agent-composer .agent-model-trigger {
@@ -416,32 +418,25 @@
 
 /* The writing rail stays spare: the provider mark lives inside one filled
    model chip, the mode is a quiet action, and only Send carries weight. */
-.agent-workspace .agent-composer.has-provider .agent-composer-controls { position: relative; }
+.agent-workspace .agent-composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.agent-workspace .agent-composer-controls { gap: 6px; }
+.agent-workspace .agent-composer-controls > .agent-picker { margin-inline: 0; }
+.agent-workspace .agent-composer .agent-model-picker { max-width: 100%; }
 .agent-workspace .agent-composer-provider {
-  z-index: 2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 32px;
-  flex: 0 0 18px;
-  margin-right: -26px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
   padding: 0;
   color: #d8ccd3;
   pointer-events: none;
 }
-.agent-workspace .agent-provider-name {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 .agent-workspace .agent-composer .agent-picker.agent-model-picker > .agent-model-trigger {
   min-height: 38px;
-  max-width: 330px;
+  max-width: min(330px, 100%);
   gap: 10px;
   padding: 0 12px;
   border: 0;
@@ -450,7 +445,6 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045);
   color: #f2ebee;
 }
-.agent-workspace .agent-composer.has-provider .agent-picker.agent-model-picker > .agent-model-trigger { padding-left: 36px; }
 .agent-workspace .agent-composer .agent-picker.agent-model-picker > .agent-model-trigger:hover { background: rgba(255, 255, 255, .085); color: #fff; }
 .agent-workspace .agent-composer .agent-picker.agent-model-picker > .agent-model-trigger[aria-expanded="true"] {
   background: rgba(163, 66, 82, .18);
@@ -460,48 +454,57 @@
 .agent-workspace .agent-composer .agent-model-trigger-copy strong { max-width: 220px; font-size: 13px; font-weight: 550; letter-spacing: -.005em; }
 .agent-workspace .agent-composer .agent-model-trigger-copy small { display: none; }
 .agent-workspace .agent-reasoning-control {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  height: 38px;
-  margin-left: 4px;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .032);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  position: relative;
   flex: 0 0 auto;
+  transition: opacity 220ms ease;
 }
 .agent-workspace .agent-reasoning-control[aria-busy="true"] { opacity: .62; }
-.agent-workspace .agent-reasoning-level {
-  display: flex;
+.agent-workspace .agent-reasoning-trigger {
+  display: inline-flex;
   align-items: flex-end;
   justify-content: center;
-  width: 8px;
-  height: 26px;
-  padding: 0 0 4px;
-  border: 0;
-  border-radius: 999px;
+  gap: 4px;
+  min-width: 44px;
+  height: 38px;
+  padding: 10px;
+  border-radius: 10px;
   background: transparent;
+  border: 0;
+  box-shadow: none;
   cursor: pointer;
+  touch-action: pan-y;
 }
-.agent-workspace .agent-reasoning-level:hover:not(:disabled) { background: rgba(255, 255, 255, .055); }
-.agent-workspace .agent-reasoning-level > span {
+.agent-workspace .agent-reasoning-trigger:hover { background: transparent; }
+.agent-workspace .agent-reasoning-trigger:hover:not([aria-disabled="true"]) .is-filled { background: #fff8fa; }
+.agent-workspace .agent-reasoning-level {
   display: block;
-  width: 4px;
+  flex: 0 0 5px;
+  width: 5px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, .18);
-  transition: height 160ms ease, background-color 160ms ease;
+  background: rgba(255, 255, 255, .22);
+  opacity: .7;
+  transition: background-color 320ms ease, opacity 320ms ease;
+  transition-delay: calc(var(--effort-index, 0) * 20ms);
 }
-.agent-workspace .agent-reasoning-level:nth-child(1) > span { height: 7px; }
-.agent-workspace .agent-reasoning-level:nth-child(2) > span { height: 10px; }
-.agent-workspace .agent-reasoning-level:nth-child(3) > span { height: 13px; }
-.agent-workspace .agent-reasoning-level:nth-child(4) > span { height: 16px; }
-.agent-workspace .agent-reasoning-level.is-filled > span { background: #d9d0d5; }
-.agent-workspace .agent-reasoning-level.is-current > span { background: #fff8fa; box-shadow: 0 0 9px rgba(238, 230, 234, .3); }
-.agent-workspace .agent-reasoning-level:focus-visible { outline: 2px solid rgba(226, 159, 177, .62); outline-offset: 1px; }
-.agent-workspace .agent-reasoning-level:disabled { opacity: .34; cursor: not-allowed; }
-.agent-workspace .agent-reasoning-level.is-unavailable > span { background: rgba(255, 255, 255, .14); }
+.agent-workspace .agent-reasoning-level.is-filled { background: var(--ag-text); opacity: 1; }
+.agent-workspace .agent-reasoning-trigger:focus-visible { outline: 2px solid rgba(226, 159, 177, .62); outline-offset: 2px; }
+.agent-workspace .agent-reasoning-trigger[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.agent-workspace .agent-reasoning-control[aria-busy="true"] .agent-reasoning-trigger { cursor: wait; }
+.agent-workspace .agent-reasoning-error {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  inset-inline-start: 0;
+  z-index: 26;
+  width: max-content;
+  max-width: min(280px, 65vw);
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--ag-text);
+  background: var(--ag-sheet-deep);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+  font-size: 12px;
+  line-height: 1.5;
+}
 .agent-workspace .agent-composer .agent-mode-picker > .agent-control {
   min-height: 34px;
   padding: 0 10px;
@@ -571,14 +574,15 @@
 .agent-workspace .agent-picker-popup.is-compact { padding: 5px; }
 .agent-workspace .agent-picker-popup.is-compact .agent-picker-options { padding: 0; }
 .agent-workspace .agent-picker-popup.is-compact .agent-picker-options button { min-height: 40px; }
-.agent-workspace .agent-model-menu-heading { min-height: 56px; padding: 13px 15px 10px; border-bottom: 0; }
-.agent-workspace .agent-model-menu-heading strong { color: #f0e8ec; font-size: 15px; font-weight: 550; letter-spacing: -.01em; }
+.agent-workspace .agent-model-menu { width: min(330px, calc(100vw - 28px)); max-height: min(420px, 70vh); }
+.agent-workspace .agent-model-menu-heading { min-height: 40px; padding: 6px 10px; border-bottom: 0; }
+.agent-workspace .agent-model-menu-heading strong { color: #bdb2ba; font-size: 12px; font-weight: 500; letter-spacing: 0; }
 .agent-workspace .agent-model-menu-heading span { display: inline-flex; align-items: center; width: fit-content; padding: 2px 7px; border-radius: 99px; background: rgba(255, 255, 255, .05); color: #bdb2ba; font-size: 10px; }
 .agent-workspace .agent-model-menu > .agent-picker-search { min-height: 39px; margin: 0 10px 5px; padding: 0 11px; border: 0; border-radius: 9px; background: rgba(0, 0, 0, .32); }
 .agent-workspace .agent-model-options { padding: 4px 8px 8px; scrollbar-color: rgba(255, 255, 255, .17) transparent; }
 .agent-workspace .agent-model-group + .agent-model-group { margin-top: 9px; }
 .agent-workspace .agent-model-group-label { margin: 8px 10px 4px; color: #a99da5; font-size: 11px; font-weight: 500; }
-.agent-workspace .agent-model-group button { min-height: 48px; padding: 9px 11px; border-radius: 9px; }
+.agent-workspace .agent-model-group button { min-height: 36px; padding: 7px 10px; border-radius: 8px; }
 .agent-workspace .agent-model-group button:hover,
 .agent-workspace .agent-model-group button.is-active { background: rgba(255, 255, 255, .055); }
 .agent-workspace .agent-model-group button[aria-selected="true"],

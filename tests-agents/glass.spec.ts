@@ -53,7 +53,7 @@ test("native workspace panes blur with their shared frost texture without CSS ba
 test("the floating input and model menu keep their own CSS blur while the wrapper stays clear", async ({ page }, info) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html?demo&scenario=models")
-  await expect(page.getByRole("dialog", { name: "Model and reasoning" })).toBeVisible()
+  await expect(page.getByRole("dialog", { name: "Models", exact: true })).toBeVisible()
   // Keep the production layout. The stripes distinguish a blurred pill from
   // a merely tinted rectangle and from the fully clear space around it.
   await page.evaluate(() => {
@@ -175,6 +175,72 @@ test("expanding the collapsed composer settles at its final width without a heig
   expect((await composer.boundingBox())!.height).toBeLessThan(200)
   await textarea.fill("A short line")
   await expect.poll(() => textarea.evaluate(el => el.getBoundingClientRect().height)).toBeCloseTo(settled, 0)
+})
+
+for (const width of [1456, 620, 390]) test(`composer expansion never overshoots before the first keystroke at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 844 })
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  await page.getByRole("button", { name: "Find a message" }).focus()
+  await expect(page.locator(".agent-composer")).toHaveClass(/is-collapsed/)
+  const frames = await page.evaluate(async () => {
+    const composer = document.querySelector<HTMLElement>(".agent-composer")!
+    const textarea = composer.querySelector("textarea")!
+    const frames: Array<{ inputHeight: number; width: number; height: number }> = []
+    textarea.focus()
+    for (let index = 0; index < 24; index++) {
+      await new Promise(requestAnimationFrame)
+      if (!composer.classList.contains("is-collapsed")) frames.push({ inputHeight: textarea.offsetHeight, width: composer.offsetWidth, height: composer.offsetHeight })
+    }
+    return frames
+  })
+  expect(frames).toHaveLength(24)
+  const final = frames.at(-1)!
+  expect(Math.max(...frames.map(frame => frame.inputHeight))).toBeLessThanOrEqual(final.inputHeight + 1)
+  expect(Math.max(...frames.map(frame => frame.width)) - Math.min(...frames.map(frame => frame.width))).toBeLessThanOrEqual(1)
+  await page.getByLabel("Message agent").fill("A short first line")
+  expect(await page.getByLabel("Message agent").evaluate(el => el.offsetHeight)).toBe(final.inputHeight)
+})
+
+test("a wrapped draft resizes to the new viewport without waiting for another keystroke", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  const textarea = page.getByLabel("Message agent")
+  const draft = "Keep this wrapped draft. ".repeat(10)
+  await textarea.fill(draft)
+  const narrowHeight = await textarea.evaluate(el => el.offsetHeight)
+  expect(narrowHeight).toBeGreaterThan(100)
+  await page.setViewportSize({ width: 1456, height: 844 })
+  await expect.poll(() => textarea.evaluate(el => el.offsetHeight)).toBeLessThan(narrowHeight - 30)
+  await expect(textarea).toHaveValue(draft)
+})
+
+test("the glass shell animates without scaling text or changing its measured height", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  await page.getByRole("button", { name: "Find a message" }).focus()
+  const samples = await page.evaluate(async () => {
+    const composer = document.querySelector<HTMLElement>(".agent-composer")!
+    const textarea = composer.querySelector("textarea")!
+    textarea.focus()
+    const samples: Array<{ height: number; shell: string; scale: number }> = []
+    for (let index = 0; index < 36; index++) {
+      await new Promise(requestAnimationFrame)
+      const transform = getComputedStyle(textarea).transform
+      samples.push({ height: textarea.offsetHeight, shell: getComputedStyle(composer, "::before").transform, scale: new DOMMatrixReadOnly(transform === "none" ? undefined : transform).a })
+    }
+    return samples
+  })
+  expect(samples.some(sample => sample.shell !== "none")).toBe(true)
+  expect(new Set(samples.map(sample => sample.height)).size).toBe(1)
+  expect(samples.every(sample => sample.scale === 1)).toBe(true)
+  expect(samples.at(-1)!.shell).toBe("none")
+  expect(await page.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").borderTopColor)).toBe("rgba(255, 255, 255, 0.2)")
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.getByRole("button", { name: "Find a message" }).focus()
+  await page.getByLabel("Message agent").focus()
+  expect(await page.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").transform)).toBe("none")
 })
 
 test("native frost tracks the active composer after history opens and viewport resizes", async ({ page }) => {
