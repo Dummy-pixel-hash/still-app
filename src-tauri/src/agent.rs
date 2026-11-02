@@ -1653,6 +1653,16 @@ async fn handle(
             if update_todos(&mut thread.snapshot, value.pointer("/params/todos"), observation) { emit_todos(&mut thread).await; }
             return Ok(());
         }
+        if method == "_still/chat_title_changed" {
+            let Some(title) = value.pointer("/params/title").and_then(Value::as_str) else { return Ok(()); };
+            let title = title.trim();
+            if title.is_empty() || title.chars().count() > 80 || title.chars().any(char::is_control) { return Ok(()); }
+            let mut thread = row.lock().await;
+            let mut event = Event::new("chatTitle");
+            event.title = Some(title.to_owned());
+            emit(&mut thread, event).await;
+            return Ok(());
+        }
         if method == "_still/caught_up" {
             let mut thread = row.lock().await;
             let params = &value["params"];

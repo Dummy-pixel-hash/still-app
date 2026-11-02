@@ -76,6 +76,7 @@ async function worker() {
   const clients = new Set()
   let owner = null, child = null, childEnded = false, closed = false, sequence = 0, eventIndex = 0
   let initializeResult = null, sessionResult = null, busy = false, activePrompt = null, closing = false, maxRequestId = 3
+  const titlePromptPath = join(directory, "chat-title-prompted")
   let initializeOperation = null, sessionOperation = null
   const todoRoot = join(process.env.HOME, ".local", "state", "still", "agent-todos")
   mkdirSync(todoRoot, { recursive: true, mode: 0o700 })
@@ -119,7 +120,7 @@ async function worker() {
     history.push(frame)
     writeSync(journal, JSON.stringify(frame) + "\n")
     // A response boundary or approval must survive loss of the client machine.
-    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission" || message.method === "_still/todos_changed" || message.method === "_still/capabilities_changed") fsyncSync(journal)
+    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission" || message.method === "_still/todos_changed" || message.method === "_still/chat_title_changed" || message.method === "_still/capabilities_changed") fsyncSync(journal)
     remember()
     const handshake = !message.method && (message.id === initializeOperation || message.id === sessionOperation)
     if (owner?.writable && (owner.replayed || handshake)) {
@@ -304,7 +305,7 @@ async function worker() {
       const method = event.method
       const pendingRequest = (method === "session/request_permission" || method === "elicitation/create") && pending.has(JSON.stringify(event.id))
       const response = !method && event.id !== initializeOperation && event.id !== sessionOperation
-      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || method === "_still/todos_changed" || method === "_still/capabilities_changed" || pendingRequest || response)
+      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || method === "_still/todos_changed" || method === "_still/chat_title_changed" || method === "_still/capabilities_changed" || pendingRequest || response)
       if (shouldReplay) writeLine(socket,event)
     }
     // Forms are state, not disposable events: disk history intentionally strips their schema.
@@ -319,6 +320,20 @@ async function worker() {
     if (request.id !== undefined) writeLine(socket, { jsonrpc: "2.0", id: request.id, error: { code: -32000, message } })
   }
   const handle = (socket, request) => {
+    if (request.method === "_still/chat_title") {
+      const token = request.params?.token
+      const fromTool = typeof token === "string" && /^[a-f0-9]{64}$/.test(token) && timingSafeEqual(Buffer.from(token), Buffer.from(todoToken))
+      if (closed || childEnded || !todoOwnerActive) { reject(socket, request, "This execution no longer owns the conversation."); return }
+      if (!fromTool) { reject(socket, request, "Only the registered agent title tool may rename this conversation."); return }
+      const title = request.params?.input?.title
+      if (typeof title !== "string" || !title.trim() || [...title.trim()].length > 80 || Buffer.byteLength(title.trim()) > 320 || /[\r\n\p{Cc}]/u.test(title.trim())) {
+        reject(socket, request, "Use a chat title of 1–80 characters on one line."); return
+      }
+      const value = title.trim()
+      publish({ jsonrpc: "2.0", method: "_still/chat_title_changed", params: { title: value } })
+      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { title: value } })
+      return
+    }
     if (request.method === "_still/todos" || request.method === "_still/todo_tool_ready") {
       const token = request.params?.token
       const fromTool = typeof token === "string" && /^[a-f0-9]{64}$/.test(token) && timingSafeEqual(Buffer.from(token), Buffer.from(todoToken))
@@ -412,6 +427,15 @@ async function worker() {
       if (existsSync(receipt)) { reject(socket, request, "This prompt was already submitted. Reattach to inspect its result."); return }
       if (busy || pending.size) { reject(socket, request, "The agent is busy or needs your answer"); return }
       writeFileSync(receipt, JSON.stringify({ id: request.id, messageId }), { mode: 0o600, flag: "wx" })
+      if (config.agentId && !existsSync(titlePromptPath)) {
+        let titlePrompted = false
+        try { const fd = openSync(titlePromptPath, "wx", 0o600); fsyncSync(fd); closeSync(fd); titlePrompted = true }
+        catch (error) { if (error.code !== "EEXIST") throw error }
+        if (titlePrompted) {
+          const text = request.params?.prompt?.map(part => part?.text || "").join("\n") || ""
+          request = { ...request, params: { ...request.params, prompt: [{ type: "text", text: `[Still conversation title] Choose a concise 3–7-word title for this conversation that describes the user's request. Call still_set_chat_title with that title. Do not show the title in your response. Then handle the user's request normally.\n\n${text}` }] } }
+        }
+      }
       busy = true; activePrompt = request.id; remember()
     }
     if (request.method === "session/cancel") {

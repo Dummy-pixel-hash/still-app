@@ -10,6 +10,7 @@ export interface ConversationMeta {
   hostKey: string
   folder: string
   title: string
+  titleSource?: "prompt" | "agent" | "user"
   pinned: boolean
   archivedAt?: number
   createdAt: number

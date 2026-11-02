@@ -34,6 +34,15 @@ export const todoTool = {
   },
 }
 
+export const chatTitleTool = {
+  name: "still_set_chat_title",
+  description: "Set a concise 3–7-word title for this Still conversation. Use it once, based on the user's request. Do not include the title in your response.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["title"],
+    properties: { title: { type: "string", minLength: 1, maxLength: 80, description: "A concise 3–7-word conversation title." } },
+  },
+}
+
 export function todoStorePath(home, conversationId) {
   if (typeof home !== "string" || !home || typeof conversationId !== "string" || !conversationId || conversationId.length > 512) throw new Error("Invalid todo storage identity.")
   return join(home, ".local", "state", "still", "agent-todos", createHash("sha256").update(conversationId).digest("hex"), "todos.json")
@@ -280,6 +289,30 @@ export function requestTodos(connection, input, requestId = randomUUID(), signal
   })
 }
 
+export function requestChatTitle(connection, input, requestId = randomUUID(), signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Title request cancelled.")); return }
+    const socket = createConnection(connection.socket)
+    let settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy()
+      if (error) reject(error); else resolve(value)
+    }
+    const abort = () => finish(new Error("Title request cancelled."))
+    const timer = setTimeout(() => finish(new Error("Title request timed out.")), 10000)
+    signal?.addEventListener("abort", abort, { once: true })
+    socket.once("connect", () => socket.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "_still/chat_title", params: { token: connection.token, input } }) + "\n"))
+    socket.on("error", error => finish(error))
+    socket.on("close", () => finish(new Error("Title connection closed.")))
+    lines(socket, message => {
+      if (message.id !== requestId) return
+      if (message.error) finish(new Error(message.error.message || "Title update failed."))
+      else finish(null, message.result)
+    }, error => finish(error))
+  })
+}
+
 export function markTodoToolReady(connection) {
   return requestTodos(connection, { action: "list" }, randomUUID(), undefined, "_still/todo_tool_ready")
 }
@@ -295,12 +328,17 @@ async function mcp() {
     try {
       if (method === "initialize") result = { protocolVersion: ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].includes(params?.protocolVersion) ? params.protocolVersion : "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "still-todos", version: "1.0.0" } }
       else if (method === "ping") result = {}
-      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: [todoTool] } }
+      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: [todoTool, chatTitleTool] } }
       else if (method === "tools/call") {
         try {
-          if (params?.name !== todoTool.name) throw new Error("Unknown Still tool.")
-          const list = await requestTodos(connection, params.arguments, `${client}:${createHash("sha256").update(JSON.stringify(id)).digest("hex")}`)
-          result = { content: [{ type: "text", text: JSON.stringify(list) }], structuredContent: list }
+          const requestId = `${client}:${createHash("sha256").update(JSON.stringify(id)).digest("hex")}`
+          if (params?.name === todoTool.name) {
+            const list = await requestTodos(connection, params.arguments, requestId)
+            result = { content: [{ type: "text", text: JSON.stringify(list) }], structuredContent: list }
+          } else if (params?.name === chatTitleTool.name) {
+            const title = await requestChatTitle(connection, params.arguments, requestId)
+            result = { content: [{ type: "text", text: JSON.stringify(title) }], structuredContent: title }
+          } else throw new Error("Unknown Still tool.")
         } catch (error) { result = { isError: true, content: [{ type: "text", text: error.message }] } }
       } else { send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown MCP method." } }); return }
       send({ jsonrpc: "2.0", id, result })

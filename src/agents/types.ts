@@ -30,6 +30,7 @@ export type AgentEventType =
   | "messageCheckpoint"
   | "historyReverted"
   | "historyCapabilities"
+  | "chatTitle"
   | "agentRequest"
   | "requestOutcome"
   | "todos"

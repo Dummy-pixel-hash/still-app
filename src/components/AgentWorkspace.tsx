@@ -481,7 +481,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     else if (command.name === "skills") { setCommandQuery("skill:"); setCommandOpen(true) }
     else if (command.name === "rename") {
       if (!current) { setError("Open a conversation to rename it."); return }
-      if (argument?.trim()) updateThreadMeta(current.executionId, { title: argument.trim() })
+      if (argument?.trim()) updateThreadMeta(current.executionId, { title: argument.trim(), titleSource: "user" })
       else { revealProjects(); setRename({ id: current.executionId, title: threadTitle(current) }) }
     }
     else if (command.name === "copy") {
@@ -564,7 +564,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const finishRename = () => {
     if (!rename) return
     if (rename.project) setPrefs(old => ({ ...old, projects: projects.map(p => projectKey(p) === rename.id ? { ...p, name: rename.title.trim() || undefined } : p) }))
-    else updateThreadMeta(rename.id, { title: rename.title.trim() })
+    else updateThreadMeta(rename.id, { title: rename.title.trim(), titleSource: "user" })
     setRename(null)
   }
   const useStarter = (prompt: string) => {

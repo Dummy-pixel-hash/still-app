@@ -21,7 +21,10 @@ const INDEX_KEY = "still.agents.index.v2"
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
   const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
   if (!row.meta || typeof row.meta !== "object") return defaults
-  return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title: typeof row.meta.title === "string" ? row.meta.title : "", folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "" }
+  const title = typeof row.meta.title === "string" ? row.meta.title : ""
+  const firstPromptTitle = row.transcript?.find(event => event.type === "userMessage")?.text?.split("\n")[0].slice(0, 160)
+  const titleSource = row.meta.titleSource || (title && title !== firstPromptTitle ? "user" : undefined)
+  return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title, ...(titleSource ? { titleSource } : {}), folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "" }
 }
 function withoutObservationEvents(events: AgentThreadEvent[]) { return events.filter(event => event.type !== "capabilities" && event.type !== "todos") }
 function invalidateObservations(row: AgentThreadRow) {
@@ -120,11 +123,19 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
     if (capabilities && capabilities !== row.capabilities) { row.capabilities = capabilities; emit() }
     return
   }
+  if (event.type === "chatTitle") {
+    row.lastSequence = event.sequence
+    if (event.title && row.meta.titleSource !== "user") {
+      row.meta = { ...row.meta, title: event.title, titleSource: "agent" }
+      persist(row); emit()
+    }
+    return
+  }
   row.lastSequence = event.sequence
   if (event.remoteCursor !== undefined) row.remoteCursor = event.remoteCursor
   if (event.turnActive !== undefined) row.turnActive = event.turnActive
   if (["userMessage", "threadComplete", "permission", "input", "requestOutcome", "threadError"].includes(event.type)) { row.touchedAt = Date.now(); row.meta = { ...row.meta, activityAt: row.touchedAt } }
-  if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "" } }
+  if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "", titleSource: "prompt" } }
   if (event.type === "threadState" && event.state) {
     row.state = event.state
     if (["saved", "detached", "connecting"].includes(event.state)) invalidateObservations(row)

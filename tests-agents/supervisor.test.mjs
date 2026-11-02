@@ -22,7 +22,8 @@ input.on('line',line=>{
   write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Started'}}}});
    if(m.params.prompt[0].text==='question')write({jsonrpc:'2.0',id:'question-1',method:'elicitation/create',params:{sessionId:'server-session',mode:'form',message:'Choose a branch',requestedSchema:{properties:{answer:{type:'string'}}}}});
    else if(m.params.prompt[0].text==='approval')write({jsonrpc:'2.0',id:'approval-1',method:'session/request_permission',params:{sessionId:'server-session',toolCall:{title:'Run checks'},options:[{optionId:'yes',name:'Allow once',kind:'allow_once'},{optionId:'no',name:'Reject',kind:'reject_once'}]}});
-     else if(m.params.prompt[0].text==='tool-todo')void(async()=>{await todoRequest('ready','_still/todo_tool_ready',{});const list=await todoRequest('list','_still/todos',{input:{action:'list'},requestId:'agent:list:1'});const added=await todoRequest('add','_still/todos',{input:{action:'add',expectedRevision:list.result.todos.revision,title:'Model-authored task'},requestId:'agent:add:1'});const item=added.result.todos.items[0];const changed=await todoRequest('update','_still/todos',{input:{action:'update',expectedRevision:added.result.todos.revision,id:item.id,status:'completed'},requestId:'agent:update:1'});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.todos.items[0].status==='completed'?'end_turn':'error'}})})();
+      else if(m.params.prompt[0].text.includes('tool-title'))void(async()=>{const changed=await todoRequest('title','_still/chat_title',{input:{title:'Improve Agents chat titles'}});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.title==='Improve Agents chat titles'?'end_turn':'error'}})})();
+      else if(m.params.prompt[0].text.includes('tool-todo'))void(async()=>{await todoRequest('ready','_still/todo_tool_ready',{});const list=await todoRequest('list','_still/todos',{input:{action:'list'},requestId:'agent:list:1'});const added=await todoRequest('add','_still/todos',{input:{action:'add',expectedRevision:list.result.todos.revision,title:'Model-authored task'},requestId:'agent:add:1'});const item=added.result.todos.items[0];const changed=await todoRequest('update','_still/todos',{input:{action:'update',expectedRevision:added.result.todos.revision,id:item.id,status:'completed'},requestId:'agent:update:1'});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.todos.items[0].status==='completed'?'end_turn':'error'}})})();
      else setTimeout(()=>{write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Finished while disconnected'}}}});write({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}})},120);
  } else if(!m.method&&['question-1','approval-1'].includes(m.id))write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Answer received'}}}});
 });
@@ -48,8 +49,8 @@ input.on('line',line=>{const m=JSON.parse(line);
   }
   else if(m.method==='_still/session/revert'){session='forked-cap-session';write({jsonrpc:'2.0',id:m.id,result:{reverted:true,sessionId:session,configOptions:configs()}});}
  else if(m.method==='session/prompt'){
-   if(m.params.prompt[0].text==='plan')write({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'plan',entries:[{content:'Inspect the capability report',status:'pending'}]}}});
-   if(m.params.prompt[0].text==='invalid-plan')write({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'plan',entries:[{content:'Not a valid status',status:'running'}]}}});
+    if(m.params.prompt[0].text.includes('invalid-plan'))write({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'plan',entries:[{content:'Not a valid status',status:'running'}]}}});
+    else if(m.params.prompt[0].text.includes('plan'))write({jsonrpc:'2.0',method:'session/update',params:{sessionId:session,update:{sessionUpdate:'plan',entries:[{content:'Inspect the capability report',status:'pending'}]}}});
   write({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});
  }
 });
@@ -356,6 +357,19 @@ test("only the authenticated agent tool can change the revisioned conversation t
   assert.equal(changed.params.todos.items[0].createdBy,"agent")
   const updated=await client.wait(frame=>frame.id===303&&frame.result?.stopReason==="end_turn")
   assert.equal(updated.result.stopReason,"end_turn")
+}))
+
+test("first prompt receives one title instruction and the authenticated title tool publishes the title",{timeout:15000},()=>fixture(async({make,directory})=>{
+  const client=make({agentId:"pi"})
+  await initialize(client)
+  client.send({jsonrpc:"2.0",id:601,method:"session/prompt",params:{prompt:[{type:"text",text:"tool-title"}],_meta:{messageId:"title-first"}}})
+  const changed=await client.wait(frame=>frame.method==="_still/chat_title_changed")
+  assert.equal(changed.params.title,"Improve Agents chat titles")
+  assert.ok(await readFile(join(directory,"chat-title-prompted")))
+  await client.wait(frame=>frame.id===601)
+  client.send({jsonrpc:"2.0",id:602,method:"session/prompt",params:{prompt:[{type:"text",text:"second ordinary prompt"}],_meta:{messageId:"title-second"}}})
+  await client.wait(frame=>frame.id===602)
+  assert.equal(client.frames.filter(frame=>frame.method==="_still/chat_title_changed").length,1)
 }))
 
 test("Gemini ACP session setup receives Still's private stdio todo server",{timeout:15000},()=>fixture(async({make,config})=>{
