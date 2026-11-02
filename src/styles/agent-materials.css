@@ -168,6 +168,7 @@
     box-shadow: 0 12px 34px rgba(0, 0, 0, .28);
   }
   .agent-workspace .agent-sidebar.is-collapsed { width: 56px; flex-basis: 56px; }
+  .agent-workspace .agent-sidebar-panel { inset-block-start: 70px; width: 280px; }
 }
 @media (max-width: 800px) {
   .agent-workspace .agent-sidebar {
@@ -695,3 +696,102 @@
 .agent-workspace :is(.agent-error, .agent-model-error) { background: rgba(70, 27, 42, .6); border-color: rgba(237, 119, 133, .35); color: #efc8d2; }
 .agent-workspace :is(.agent-storage-notice, .agent-command-error) { background: rgba(47, 36, 20, .9); border-color: rgba(211, 174, 116, .23); color: #e6d0ab; }
 .agent-workspace .agent-storage-notice { border-bottom: 1px solid rgba(211, 174, 116, .23); }
+
+/* Project navigation: the accepted readable hierarchy keeps full titles
+   to two lines, with quieter, tabular timestamps and distinct project labels. */
+.agent-workspace .agent-sidebar-panel--readable {
+  min-height: 0;
+  font-family: var(--font-sans);
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-sidebar-new > span {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -.012em;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-sidebar-search input {
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-sidebar-archive > span,
+.agent-workspace .agent-sidebar-panel--readable .agent-sidebar-settings {
+  font-size: 12.5px;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-project-heading {
+  font-size: 10.5px;
+  letter-spacing: .085em;
+  text-transform: uppercase;
+  color: #bcb2b8;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-project-open { min-width: 0; }
+.agent-workspace .agent-sidebar-panel--readable .agent-project-open > span {
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: -.015em;
+  color: #eee6eb;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-folder-heading .agent-icon-button {
+  min-width: 28px;
+  min-height: 28px;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-thread-open {
+  min-height: 46px;
+  padding-block: 9px;
+  font-size: 13px;
+  font-weight: 450;
+  align-items: start;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-thread-title {
+  min-width: 0;
+  font-size: inherit;
+  line-height: 1.45;
+  color: #d5ccd2;
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-thread-time {
+  color: #b0a6ae;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-thread.is-selected .agent-thread-title {
+  color: #fff3f5;
+  font-weight: 600;
+}
+.agent-workspace .agent-sidebar-panel--readable .agent-thread-provider { margin-top: 3px; }
+.agent-workspace .agent-sidebar-panel--readable .agent-folder-threads { padding-left: 9px; }
+.agent-workspace .agent-sidebar-panel--readable .agent-folder { margin-bottom: 15px; }
+
+/* Compact utilities keep workspace actions outside the conversation index. */
+.agent-workspace .agent-sidebar-footer--compact {
+  border-top: 0;
+  padding: 9px 5px 12px;
+  gap: 2px;
+}
+.agent-workspace .agent-sidebar-footer--compact .agent-sidebar-settings {
+  flex: none;
+  min-width: 38px;
+  min-height: 38px;
+  padding: 10px;
+  justify-content: center;
+}
+.agent-workspace .agent-sidebar-footer--compact .agent-sidebar-settings > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.agent-workspace .agent-sidebar-footer--compact .agent-sidebar-settings > svg { color: #c8bdc5; }
+.agent-workspace .agent-sidebar-footer--compact > .agent-thread-more {
+  width: 38px;
+  height: 38px;
+  color: #b1a5ae;
+}

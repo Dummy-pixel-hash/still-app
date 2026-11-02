@@ -714,7 +714,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           <span className={`agent-rail-storage agent-status-dot ${storage.error ? "attention" : "connected"}`} title={savedStatus} role="status" aria-label={savedStatus} />
         </div>
       </div>
-      <div className="agent-sidebar-panel" id="agent-project-navigation" inert={!sidebarExpanded} aria-hidden={!sidebarExpanded}>
+      <div className="agent-sidebar-panel agent-sidebar-panel--readable" id="agent-project-navigation" inert={!sidebarExpanded} aria-hidden={!sidebarExpanded}>
         <button className="agent-sidebar-new" aria-label="New conversation" disabled={!hydrated} onClick={() => newThread()}><AgentIcon name="compose" size={17} /><span>New conversation</span></button>
         <label className="agent-sidebar-search"><AgentIcon name="search" size={15} /><input ref={search} aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={event => setQuery(event.target.value)} /></label>
         <button className={`agent-sidebar-archive ${archived ? "is-selected" : ""}`} onClick={() => { setArchived(!archived); home() }}><AgentIcon name="archive" size={16} /><span>{archived ? "All conversations" : "Archived"}</span>{allThreads.some(row => row.meta.archivedAt) && <small>{allThreads.filter(row => row.meta.archivedAt).length}</small>}</button>
@@ -723,7 +723,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           <button className="agent-sidebar-view agent-thread-more" aria-label="View options" title="View options" aria-haspopup="dialog" aria-expanded={menu === "sidebar:view"} onClick={() => setMenu(menu === "sidebar:view" ? null : "sidebar:view")}><AgentIcon name="settings" size={14} /></button>
           <button className="agent-icon-button" aria-label="Add project folder" title="Add project" onClick={chooseFolder}><AgentIcon name="plus" size={15} /></button>
         </div>
-        <nav ref={listMotion} className="agent-thread-list" aria-label="Conversations by folder">
+        <nav ref={listMotion} className="agent-thread-list ag-list-guide" aria-label="Conversations by folder">
           {sortedProjects.map(p => {
             const key = projectKey(p), collapsed = prefs.collapsed.includes(key) && !query
             const rows = threads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || (prefs.sort === "name" ? threadTitle(a).localeCompare(threadTitle(b)) : prefs.sort === "manual" ? b.meta.order - a.meta.order : b.meta.activityAt - a.meta.activityAt))
@@ -745,9 +745,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           })}
           {!sortedProjects.length && <div className="agent-sidebar-empty"><p>{query ? "No matching conversations." : archived ? "No archived conversations." : "Add a project to keep related conversations together."}</p>{!query && !archived && <button onClick={chooseFolder}><AgentIcon name="plus" size={14} />Add a project</button>}</div>}
         </nav>
-        <footer className="agent-sidebar-footer">
-          <button className="agent-sidebar-settings" aria-label="Agent settings" onClick={() => { setView("settings"); setSelected(null); setSidebar(false); setMenu(null) }}><AgentIcon name="settings" size={16} /><span>Settings</span></button>
-          <button className="agent-icon-button agent-thread-more" aria-label="Workspace options" title="Workspace options" aria-haspopup="menu" aria-expanded={menu === "sidebar:more"} onClick={() => setMenu(menu === "sidebar:more" ? null : "sidebar:more")}><AgentIcon name="more" size={17} /></button>
+        <footer className="agent-sidebar-footer agent-sidebar-footer--compact agent-sidebar-footer--settings-only">
+          <button className="agent-sidebar-settings" aria-label="Agent settings" title="Agent settings" onClick={() => { setView("settings"); setSelected(null); setSidebar(false); setMenu(null) }}><AgentIcon name="settings" size={16} /><span>Settings</span></button>
           {storage.error && <div className="agent-storage-status has-error" title={`${savedStatus} · ${storage.path}`} role="status"><span className="agent-status-dot attention" /><span>{savedStatus}</span></div>}
         </footer>
       </div>
@@ -756,7 +755,12 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     </aside>
     <main className={`agent-main ${review && current ? "has-review" : ""}`} inert={sidebarOverlay || dialogOpen}>
       <div className="agent-sr-only" role="status" aria-atomic="true">{current?.pendingPermission ? `Approval needed: ${current.pendingPermission.title}` : current?.pendingInput ? `Agent question: ${current.pendingInput.title}` : ""}</div>
-      <header className="agent-topbar" data-tauri-drag-region><div className="agent-breadcrumb"><button className="agent-icon-button agent-mobile-menu" aria-label="Toggle projects" aria-expanded={sidebarOverlay} onClick={() => sidebarOverlay ? toggleProjects() : revealProjects()}><AgentIcon name="panel" /></button>{current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}<button aria-label="Conversation home" onClick={home}>{current || archived ? "Conversations" : "New conversation"}</button>{context && <><AgentIcon name="chevron" size={12} /><button onClick={() => openProject(context)} title={`${hostLabel(context.host)} · ${context.folder}`}>{projectName}</button></>}{current && <><AgentIcon name="chevron" size={12} /><strong>{threadTitle(current)}</strong></>}{view === "settings" && <strong>Settings</strong>}</div>
+      <header className="agent-topbar agent-topbar--stacked" data-tauri-drag-region>
+        <div className="agent-topbar-leading agent-topbar-leading--focused">
+          {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
+          {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
+          {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
+        </div>
         <div className="agent-topbar-actions">
           {current && <>
             <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
