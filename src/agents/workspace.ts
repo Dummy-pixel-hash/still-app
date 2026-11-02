@@ -1,4 +1,5 @@
 import type { Session } from "../types"
+import type { AgentDraftAttachment } from "./attachments"
 import { saveAgentWorkspace, storedWorkspace, storedWorkspaces } from "../session/agentStorage"
 
 export const hostKey = (session: Pick<Session, "host" | "port" | "username">) => JSON.stringify([session.host.toLowerCase(), session.port, session.username])
@@ -17,6 +18,7 @@ export interface ConversationMeta {
   activityAt: number
   order: number
   draft: string
+  draftAttachments?: AgentDraftAttachment[]
   submissionUnknown?: boolean
   prepared?: boolean
 }
@@ -31,6 +33,7 @@ export interface AgentWorkspacePreferences {
   executables: Record<string, string>
   draft: string
   drafts?: Record<string, string>
+  draftAttachments?: AgentDraftAttachment[]
 }
 const key = "still.agents.workspace.v2"
 export function readWorkspace(host: string, _initialFolder = ""): AgentWorkspacePreferences {
@@ -39,7 +42,7 @@ export function readWorkspace(host: string, _initialFolder = ""): AgentWorkspace
     const saved = (storedWorkspace(host) ?? JSON.parse(localStorage.getItem(key) || "{}")[host]) as AgentWorkspacePreferences | undefined
     if (!saved || typeof saved.folder !== "string") return defaults
     const strings = (value: unknown, fallback: string[] = []) => Array.isArray(value) ? value.filter(item => typeof item === "string") : fallback
-    return { ...defaults, ...saved, agent: typeof saved.agent === "string" ? saved.agent : defaults.agent, sort: ["recent", "name", "manual"].includes(saved.sort) ? saved.sort : "recent", draft: typeof saved.draft === "string" ? saved.draft : "", executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).filter(([, value]) => typeof value === "string")) : {}, folderOrder: strings(saved.folderOrder), collapsed: strings(saved.collapsed), folders: strings(saved.folders, defaults.folders) }
+    return { ...defaults, ...saved, agent: typeof saved.agent === "string" ? saved.agent : defaults.agent, sort: ["recent", "name", "manual"].includes(saved.sort) ? saved.sort : "recent", draft: typeof saved.draft === "string" ? saved.draft : "", draftAttachments: Array.isArray(saved.draftAttachments) ? saved.draftAttachments.filter(item => item && typeof item.id === "string") : [], executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).filter(([, value]) => typeof value === "string")) : {}, folderOrder: strings(saved.folderOrder), collapsed: strings(saved.collapsed), folders: strings(saved.folders, defaults.folders) }
   } catch { return defaults }
 }
 export function saveWorkspace(host: string, value: AgentWorkspacePreferences) {
@@ -66,18 +69,19 @@ export interface AgentLibraryPreferences {
   sort: "recent" | "name" | "manual"
   collapsed: string[]
   drafts: Record<string, string>
+  draftAttachments: Record<string, AgentDraftAttachment[]>
   agent: string
   executables: Record<string, Record<string, string>>
   servers: Session[]
 }
 export function readLibraryPreferences(): AgentLibraryPreferences {
-  const defaults: AgentLibraryPreferences = { projects: [], sidebarCollapsed: false, sort: "recent", collapsed: [], drafts: {}, agent: "opencode", executables: {}, servers: [] }
+  const defaults: AgentLibraryPreferences = { projects: [], sidebarCollapsed: false, sort: "recent", collapsed: [], drafts: {}, draftAttachments: {}, agent: "opencode", executables: {}, servers: [] }
   const saved = storedWorkspace("library") as Partial<AgentLibraryPreferences> | undefined
   if (saved) {
     const strings = (value: unknown): Record<string, string> => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([, text]) => typeof text === "string")) : {}
     return { ...defaults, sidebarCollapsed: saved.sidebarCollapsed === true, projects: Array.isArray(saved.projects) ? saved.projects.filter(p => p && typeof p.host === "string" && typeof p.folder === "string").map(p => ({ ...p, name: typeof p.name === "string" ? p.name : undefined })) : [],
       sort: ["recent", "name", "manual"].includes(saved.sort || "") ? saved.sort! : "recent", collapsed: Array.isArray(saved.collapsed) ? saved.collapsed.filter(value => typeof value === "string") : [],
-      agent: typeof saved.agent === "string" ? saved.agent : "opencode", drafts: strings(saved.drafts), executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).map(([key, paths]) => [key, strings(paths)])) : {}, servers: Array.isArray(saved.servers) ? saved.servers.filter(server => server && typeof server.host === "string" && typeof server.username === "string" && typeof server.port === "number").map(agentServerProfile) : [] }
+      agent: typeof saved.agent === "string" ? saved.agent : "opencode", drafts: strings(saved.drafts), draftAttachments: saved.draftAttachments && typeof saved.draftAttachments === "object" ? Object.fromEntries(Object.entries(saved.draftAttachments).map(([key, list]) => [key, Array.isArray(list) ? list.filter(item => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.hostKey === "string" && typeof item.folder === "string") : []])) : {}, executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).map(([key, paths]) => [key, strings(paths)])) : {}, servers: Array.isArray(saved.servers) ? saved.servers.filter(server => server && typeof server.host === "string" && typeof server.username === "string" && typeof server.port === "number").map(agentServerProfile) : [] }
   }
   for (const host of Object.keys(storedWorkspaces())) {
     const prefs = readWorkspace(host)

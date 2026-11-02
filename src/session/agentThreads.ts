@@ -371,9 +371,13 @@ export function updateThreadMeta(id: string, patch: Partial<ConversationMeta>) {
   if (!row) return
   row.meta = { ...row.meta, ...patch, id: row.meta.id }; persist(row); emit()
 }
-export function clearAgentDraft(id: string, submitted: string) {
+export function clearAgentDraft(id: string, submitted: string, submittedAttachmentIds?: string[]) {
   const row = rows.get(id)
-  if (row?.meta.draft.trim() === submitted.trim()) updateThreadMeta(id, { draft: "" })
+  if (row?.meta.draft.trim() === submitted.trim() && (!submittedAttachmentIds || JSON.stringify((row.meta.draftAttachments || []).map(file => file.id)) === JSON.stringify(submittedAttachmentIds))) {
+    updateThreadMeta(id, { draft: "", ...(submittedAttachmentIds ? { draftAttachments: [] } : {}) })
+    return true
+  }
+  return false
 }
 export async function deleteAgentThread(id: string) {
   const row = rows.get(id)

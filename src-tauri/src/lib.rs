@@ -138,6 +138,7 @@ pub fn run() {
             commands::still_resize,
             commands::still_refresh,
             commands::still_upload_image,
+            commands::still_agent_upload_attachment,
             commands::still_open_url,
             commands::still_status,
             commands::still_disconnect,

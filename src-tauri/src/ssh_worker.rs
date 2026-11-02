@@ -357,6 +357,58 @@ pub async fn upload_via_sftp(
     Ok(format!("$HOME/{remote}"))
 }
 
+/// Upload an agent attachment over the selected authenticated SSH connection.
+/// The caller supplies a generated conversation and attachment identity; the
+/// original filename is display-only and never determines the destination.
+pub async fn upload_agent_attachment(
+    session_id: &str,
+    conversation_id: &str,
+    attachment_id: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<String> {
+    use russh_sftp::{client::SftpSession, protocol::{FileAttributes, OpenFlags}};
+    use tokio::io::AsyncWriteExt;
+
+    if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+        return Err(anyhow!("attachment must be non-empty and no larger than 5 MiB"));
+    }
+    let valid_id = |value: &str| !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if conversation_id.is_empty() || conversation_id.len() > 256 || !valid_id(attachment_id) {
+        return Err(anyhow!("invalid attachment identity"));
+    }
+    let safe_name: String = file_name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+    let safe_name = safe_name.trim_matches('.').chars().take(120).collect::<String>();
+    let safe_name = if safe_name.is_empty() { "attachment".to_owned() } else { safe_name };
+    let relative_dir = format!("still-uploads/agents/{attachment_id}");
+    let handle_arc = {
+        let locked = session_handles().lock().await;
+        locked.get(session_id).cloned()
+    }.ok_or_else(|| anyhow!("unknown session (reconnect first)"))?;
+    let channel = {
+        let h = handle_arc.lock().await;
+        h.channel_open_session().await.map_err(|e| anyhow!("sftp channel open failed: {e:#}"))?
+    };
+    channel.request_subsystem(true, "sftp").await.map_err(|e| anyhow!("sftp subsystem refused: {e:#}"))?;
+    let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| anyhow!("sftp handshake failed: {e:#}"))?;
+    for directory in ["still-uploads", "still-uploads/agents", relative_dir.as_str()] {
+        let _ = sftp.create_dir(directory).await;
+    }
+    let home = sftp.canonicalize(".").await.map_err(|e| anyhow!("could not resolve remote home: {e:#}"))?;
+    let canonical_dir = sftp.canonicalize(relative_dir.as_str()).await.map_err(|e| anyhow!("could not resolve attachment directory: {e:#}"))?;
+    if canonical_dir != format!("{}/{relative_dir}", home.trim_end_matches('/')) {
+        return Err(anyhow!("attachment directory resolves outside the remote home"));
+    }
+    sftp.set_metadata(canonical_dir.as_str(), FileAttributes { permissions: Some(0o40700), ..Default::default() }).await
+        .map_err(|e| anyhow!("could not secure attachment directory: {e:#}"))?;
+    let relative = format!("{relative_dir}/{attachment_id}-{safe_name}");
+    let mut file = sftp.open_with_flags_and_attributes(&relative, OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE, FileAttributes { permissions: Some(0o100600), ..Default::default() }).await.map_err(|e| anyhow!("sftp open failed: {e:#}"))?;
+    file.write_all(&bytes).await.map_err(|e| anyhow!("sftp write failed: {e:#}"))?;
+    file.flush().await.map_err(|e| anyhow!("sftp flush failed: {e:#}"))?;
+    file.shutdown().await.map_err(|e| anyhow!("sftp close failed: {e:#}"))?;
+    Ok(format!("{canonical_dir}/{attachment_id}-{safe_name}"))
+}
+
 /// Ask tmux to repaint the client(s) attached to `tmux_session` from its own
 /// screen buffer. The terminal surface throws away xterm state whenever it
 /// unmounts (leaving the overlay via Ctrl+., toggling split view) while the

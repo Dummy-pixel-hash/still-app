@@ -30,7 +30,8 @@ const modelOptions = [
 const projectCommands = [{ name: "review", description: "Review the current changes" }, { name: "compact", description: "Compact this conversation" }, ...Array.from({ length: 25 }, (_, i) => ({ name: `team/command-${i}`, description: `Project command ${i}` })), { name: "skill:security-review", description: "Audit security boundaries", route: "skill" as const, source: "Skill" }]
 let counter = 0
 const h = {
-  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[],
+  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], uploads: [] as unknown[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[],
+  rejectUpload: false,
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
   external: [] as string[],
@@ -203,6 +204,11 @@ registerNativeBridge({
     h.emit(id, { type: "userMessage", text: message, messageId })
     h.emit(id, { type: "assistantChunk", text: "First " }); h.emit(id, { type: "assistantChunk", text: "second " }); h.emit(id, { type: "assistantChunk", text: "third." })
     if (row.historyCapabilities?.revert) h.emit(id, { type: "messageCheckpoint", messageId, checkpoint: { provider: row.agentId, id: messageId } })
+  },
+  agentUploadAttachment: async (nativeSessionId, conversationId, attachmentId, fileName, base64Data) => {
+    if (h.rejectUpload) throw new Error("SFTP disconnected during upload")
+    h.uploads.push({ nativeSessionId, conversationId, attachmentId, fileName, bytes: atob(base64Data).length })
+    return { remotePath: `/home/dev/still-uploads/agents/${attachmentId}/${attachmentId}-${fileName.replace(/[^A-Za-z0-9._-]/g, "_")}` }
   },
   agentRevert: async (id, messageId, expectedSequence) => {
     const row = snapshots.get(id)!

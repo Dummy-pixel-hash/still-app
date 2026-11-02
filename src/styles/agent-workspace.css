@@ -1086,3 +1086,19 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area.is-collapsed { padding-top: 10px; }
   .agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed { max-width: 320px; }
 }
+
+.agent-composer.is-file-dragging { border-color: var(--ag-accent); background: #20191b; }
+.agent-composer .agent-attach-trigger { position: absolute; z-index: 2; top: 10px; right: 12px; width: 32px; height: 32px; }
+.agent-composer.is-collapsed .agent-attach-trigger { display: none; }
+.agent-workspace .agent-composer textarea { padding-right: 39px; }
+.agent-drop-hint { position: absolute; z-index: 8; inset: 7px; display: flex; align-items: center; justify-content: center; gap: 9px; border: 1px dashed rgba(240, 104, 112, .75); border-radius: 11px; background: rgba(10, 8, 9, .94); color: var(--ag-text); pointer-events: none; }
+.agent-attachments { display: flex; flex-wrap: wrap; gap: 7px; max-height: 148px; overflow: auto; margin: 0 0 13px; }
+.agent-attachment { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: min(100%, 310px); min-height: 48px; padding: 5px 7px; border: 1px solid var(--ag-line); border-radius: 9px; background: rgba(255,255,255,.035); }
+.agent-attachment-preview { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; overflow: hidden; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--ag-dim); }
+.agent-attachment-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.agent-attachment-copy { display: grid; min-width: 0; line-height: 1.35; }
+.agent-attachment-copy strong { max-width: 190px; overflow: hidden; color: var(--ag-text); font-size: 12px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.agent-attachment-copy small { color: var(--ag-dim); font-size: 11px; }
+.agent-attachment-failed { color: var(--ag-red); font-size: 10px; }
+.agent-attachment-error { margin: 7px 3px 0; color: var(--ag-red); font-size: 12px; }
+.agent-attachment-note { margin: -7px 2px 11px; color: var(--ag-dim); font-size: 11px; }

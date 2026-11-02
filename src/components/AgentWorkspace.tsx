@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { AGENTS, type AgentAvailability, type AgentCatalog, type AgentCommand, type AgentLaunchOptions } from "../agents/types"
 import { conversation } from "../agents/transcript"
+import { attachmentId, loadAttachmentFile, removeAttachmentFile, saveAttachmentFile, validateAttachments, type AgentDraftAttachment } from "../agents/attachments"
 import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, projectKey, readLibraryPreferences, sessionForHost, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
 import { useConversationScroll } from "../agents/useConversationScroll"
 import { useComposerOverlay } from "../agents/useComposerOverlay"
@@ -20,7 +21,7 @@ import { commandInventory } from "../agents/commands"
 import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, reconcileAgentRequest, refreshAgentCommands, refreshAgentThread, respondAgentInput, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
 import { agentDiscoverySelectionKey, discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
-import { nativeBridge } from "../bridge/nativeBridge"
+import { nativeBridge, readClipboardImageFile } from "../bridge/nativeBridge"
 import type { Session } from "../types"
 import AgentIcon from "./AgentIcon"
 import AgentMenu from "./AgentMenu"
@@ -34,6 +35,7 @@ import AgentReasoningBars from "./AgentReasoningBars"
 import AgentAurora from "./AgentAurora"
 import { AgentTimeline } from "./AgentTimeline"
 import AgentTodos from "./AgentTodos"
+import AgentAttachments from "./AgentAttachments"
 import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
 import { requestKey, questionFields } from "../agents/requests"
 import AgentCapabilities, { agentProviderTransportLabel } from "./AgentCapabilities"
@@ -72,6 +74,8 @@ function relativeActivity(at: number) {
   return minutes < 1 ? "now" : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`
 }
 
+function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
+
 export default function AgentWorkspace({ session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
@@ -86,6 +90,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
   const [undo, setUndo] = useState<{ id: string; at?: number } | null>(null)
   const [busy, setBusy] = useState(false), [configBusy, setConfigBusy] = useState(false)
+  const [attachmentProgress, setAttachmentProgress] = useState<Record<string, string>>({})
+  const [attachmentError, setAttachmentError] = useState("")
+  const [draggingFiles, setDraggingFiles] = useState(false)
   const [composerExpanded, changeComposerExpanded] = useState(false)
   const [error, setError] = useState("")
   const [commandOpen, setCommandOpen] = useState(false), [commandQuery, setCommandQuery] = useState("")
@@ -114,7 +121,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const requestOperations = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
   const [, updateHistoryWindow] = useState(0)
-  const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), search = useRef<HTMLInputElement>(null)
+  const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const navigationPanel = useRef<HTMLElement>(null)
   const projectPopover = useRef<HTMLDivElement>(null), agentDetailsRoot = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
@@ -202,6 +209,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const capabilityRefreshAvailable = !!activeAgent && connectedHere && !["saved", "detached", "error", "submissionUnknown"].includes(activeAgent.state)
   const agentDetailsScopeKey = activeAgent ? JSON.stringify([activeAgent.executionId, activeAgent.agentId, activeAgent.agentSessionId, activeAgent.cwd, contextKey, transportId]) : "no-agent"
   const draft = current ? current.meta.draft : prefs.drafts[draftKey] || ""
+  const attachments: AgentDraftAttachment[] = current ? current.meta.draftAttachments || [] : prefs.draftAttachments?.[draftKey] || []
   const fields = activeAgent?.configOptions || []
   const modelControl = fields.find(option => option.category === "model")
   const reasoningControl = reasoningOption(fields)
@@ -235,9 +243,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const plan = useMemo(() => current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript])
   const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript)
   const showComposer = startScreen || !!current
-  const composerCollapsed = !!current && !composerExpanded
+  const composerCollapsed = !!current && !composerExpanded && !draft && !attachments.length
   const composerDock = useComposerOverlay(!!current)
-  const canSend = hydrated && connectedHere && !busy && !configBusy && !!draft.trim() && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
+  const canSend = hydrated && connectedHere && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
   const projects = [...prefs.projects]
   for (const row of libraryThreads) if (!projects.some(p => p.host === row.meta.hostKey && p.folder === row.meta.folder)) projects.push({ host: row.meta.hostKey, folder: row.meta.folder })
@@ -384,7 +392,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     document.fonts.addEventListener("loadingdone", schedule)
     resize()
     return () => { observer.disconnect(); cancelAnimationFrame(frame); window.removeEventListener("resize", schedule); document.fonts.removeEventListener("loadingdone", schedule) }
-  }, [draft, selected, view, composerCollapsed])
+  }, [draft, selected, view, composerCollapsed, attachments.length])
   const { form: composerForm, setExpanded: setComposerExpanded } = useComposerMotion(composerCollapsed, composerExpanded, changeComposerExpanded)
   useEffect(() => { mounted.current = true; const previous = document.activeElement as HTMLElement | null; surface.current?.focus(); return () => { mounted.current = false; void flushAgentSaves(); if (previous?.isConnected) previous.focus() } }, [])
   useLayoutEffect(() => {
@@ -418,6 +426,32 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   }, [agentDetailsOpen])
 
   const setDraft = (text: string) => current ? updateThreadMeta(current.executionId, { draft: text }) : setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: text } }))
+  const setAttachments = (next: AgentDraftAttachment[]) => current
+    ? updateThreadMeta(current.executionId, { draftAttachments: next })
+    : setPrefs(old => ({ ...old, draftAttachments: { ...old.draftAttachments, [draftKey]: next } }))
+  const addAttachments = async (incoming: File[]) => {
+    if (!context) { setAttachmentError("Choose a project before adding attachments."); return }
+    const problem = validateAttachments(attachments, incoming)
+    if (problem) { setAttachmentError(problem); return }
+    setAttachmentError("")
+    const added: AgentDraftAttachment[] = []
+    try {
+      for (const file of incoming) {
+        const id = attachmentId()
+        await saveAttachmentFile(id, file)
+        added.push({ id, name: file.name || "attachment", type: file.type || "application/octet-stream", size: file.size, hostKey: context.host, folder: context.folder })
+      }
+      setAttachments([...attachments, ...added])
+    } catch (failure) {
+      await Promise.all(added.map(file => removeAttachmentFile(file.id).catch(() => {})))
+      setAttachmentError(`Could not store this attachment locally: ${messageOf(failure)}`)
+    }
+  }
+  const removeAttachment = (id: string) => {
+    setAttachments(attachments.filter(file => file.id !== id))
+    setAttachmentProgress(old => { const next = { ...old }; delete next[id]; return next })
+    void removeAttachmentFile(id).catch(failure => setAttachmentError(`Could not remove the local attachment: ${messageOf(failure)}`))
+  }
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
   const selectHost = (key: string) => { const server = sessionForHost(key, hosts); if (server) onSelectHost?.(server) }
   const revealProjects = (focusSearch = false) => {
@@ -507,15 +541,54 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     else if (command.configId) { setExtraControl(command.configId); setConfigError("") }
   }
   const send = async () => {
-    const text = draft.trim(), parsed = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
+    const text = draft.trim(), submittedAttachments = [...attachments], parsed = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
     const command = commands.find(c => c.name === parsed?.[1]) || commands.find(c => c.aliases?.includes(parsed?.[1] || ""))
     if (command?.route === "client" || command?.unavailable) { chooseCommand(command, parsed?.[2]); if (!command.unavailable) setDraft(""); return }
     if (!canSend) return
+    if (command && submittedAttachments.length) { setAttachmentError("Remove attachments before running a slash command. Send attachments as a regular prompt."); return }
+    if (submittedAttachments.some(file => file.hostKey !== context?.host || file.folder !== context?.folder)) { setAttachmentError("These attachments belong to a different project. Remove them and add them again here."); return }
     const revision = navigation.current
     await run(async () => {
       const row = current || start()
       if (!idle(row)) return
-      await sendAgentMessage(row.executionId, text); clearAgentDraft(row.executionId, text)
+      if (!current && submittedAttachments.length) updateThreadMeta(row.executionId, { draftAttachments: submittedAttachments })
+      const sent: AgentDraftAttachment[] = []
+      for (const attachment of submittedAttachments) {
+        if (attachment.remotePath) { sent.push(attachment); continue }
+        const file = await loadAttachmentFile(attachment.id)
+        if (!file) throw new Error(`${attachment.name} is no longer available on this device. Remove it and attach it again.`)
+        if (!transportId || !connectedHere) throw new Error("Reconnect to this project’s server before uploading attachments.")
+        setAttachmentProgress(old => ({ ...old, [attachment.id]: "Uploading…" }))
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onerror = () => reject(reader.error || new Error("Could not read the attachment."))
+            reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "")
+            reader.readAsDataURL(file)
+          })
+          const uploaded = await nativeBridge.agentUploadAttachment(transportId, row.meta.id, attachment.id, attachment.name, base64)
+          const complete = { ...attachment, remotePath: uploaded.remotePath }
+          sent.push(complete)
+          const saved = submittedAttachments.map(item => sent.find(done => done.id === item.id) || item)
+          if (current) updateThreadMeta(row.executionId, { draftAttachments: saved })
+          else setPrefs(old => ({ ...old, draftAttachments: { ...old.draftAttachments, [draftKey]: saved } }))
+          setAttachmentProgress(old => ({ ...old, [attachment.id]: "Uploaded" }))
+        } catch (failure) {
+          setAttachmentProgress(old => ({ ...old, [attachment.id]: "Upload failed" }))
+          throw failure
+        }
+      }
+      const attachmentContext = sent.length ? `\n\nAttached files uploaded to this server (remote paths; image understanding depends on the selected agent):\n${sent.map(file => `- ${markdownCode(file.name.replace(/[\r\n]/g, " "))}: ${markdownCode(file.remotePath || "")}`).join("\n")}` : ""
+      const message = `${text}${attachmentContext}`.trim() || `Please inspect the attached file${sent.length === 1 ? "" : "s"}.${attachmentContext}`
+      await sendAgentMessage(row.executionId, message)
+      const cleared = current ? clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
+        : (prefsRef.current.drafts[draftKey] || "").trim() === text.trim() && (prefsRef.current.draftAttachments?.[draftKey] || []).map(file => file.id).join("|") === submittedAttachments.map(file => file.id).join("|")
+      if (!current && cleared) {
+        setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" }, draftAttachments: { ...old.draftAttachments, [draftKey]: [] } }))
+        if (submittedAttachments.length) updateThreadMeta(row.executionId, { draftAttachments: [] })
+      }
+      if (cleared) await Promise.all(submittedAttachments.map(file => removeAttachmentFile(file.id).catch(() => {})))
+      setAttachmentProgress({}); setAttachmentError("")
       if (mounted.current && navigation.current === revision) scroll.anchorTurn(row.meta.id)
     })
   }
@@ -730,7 +803,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
           {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} sync={current.todoSync} expanded={todosOpen} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
-          <form ref={composerForm} className={`agent-composer${current ? " has-provider" : ""}${composerCollapsed ? " is-collapsed" : ""}`} onFocusCapture={e => {
+          <form ref={composerForm} className={`agent-composer${current ? " has-provider" : ""}${composerCollapsed ? " is-collapsed" : ""}${draggingFiles ? " is-file-dragging" : ""}`} onDragEnter={e => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); setDraggingFiles(true) } }} onDragOver={e => { if (e.dataTransfer.types.includes("Files")) e.preventDefault() }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDraggingFiles(false) }} onDrop={e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDraggingFiles(false); void addAttachments(Array.from(e.dataTransfer.files)) }} onFocusCapture={e => {
             if ((e.target as HTMLElement).tagName === "TEXTAREA") setComposerExpanded(true)
           }} onBlurCapture={e => {
             if (composerDock.current?.contains(e.relatedTarget as Node | null)) return
@@ -742,7 +815,12 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
             textarea.current?.focus({ preventScroll: true })
           }} onSubmit={e => { e.preventDefault(); void send() }}>
             {commandOpen && <CommandPicker commands={commands} query={commandQuery} onQuery={setCommandQuery} onSelect={chooseCommand} onClose={() => { setCommandOpen(false); textarea.current?.focus() }} loading={catalogBusy || preparing && !preparation.ready && !preparation.error} error={catalogError || preparation.error} refresh={() => void refreshCatalog()} />}
-            <textarea ref={textarea} aria-label="Message agent" aria-description="Enter to send. Shift+Enter for a new line. Type / for commands." rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <button type="button" className="agent-icon-button agent-attach-trigger" aria-label="Attach files" title={context ? "Attach files · paste or drop also works" : "Choose a project before attaching files"} disabled={!context || busy} onClick={() => filePicker.current?.click()}><AgentIcon name="attach" /></button>
+            <input ref={filePicker} type="file" multiple hidden aria-label="Choose message attachments" onChange={e => { const files = Array.from(e.currentTarget.files || []); e.currentTarget.value = ""; void addAttachments(files) }} />
+            <AgentAttachments attachments={attachments} progress={attachmentProgress} onRemove={removeAttachment} />
+            {attachments.length > 0 && <p className="agent-attachment-note">Files upload to this server and are shared by path. Image understanding depends on the selected agent.</p>}
+            {draggingFiles && <div className="agent-drop-hint" aria-hidden="true"><AgentIcon name="attach" size={17} />Drop files to attach</div>}
+            <textarea ref={textarea} aria-label="Message agent" aria-description="Enter to send. Shift+Enter for a new line. Type / for commands." rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); void addAttachments(files); return } void readClipboardImageFile().then(file => { if (file) void addAttachments([file]) }) }} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current && <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} />}
@@ -753,6 +831,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
             </div>
           </form>
+          {attachmentError && <p className="agent-attachment-error" role="alert">{attachmentError}</p>}
           {configError && !extraControl && <p className="agent-model-error" role="alert">{configError}</p>}
           <div className="agent-composer-footnote">
             {context ? <div className="agent-context-line"><AgentIcon name="folder" size={13} /><span title={context.folder}>{context.folder}</span><small title={hostLabel(context.host)}>{hostLabel(context.host)}</small>{!current && <button type="button" data-agent-popover-trigger aria-label="Change project" title="Change project" aria-haspopup="dialog" aria-expanded={projectChoices} onClick={() => { setAgentDetailsOpen(false); setCommandOpen(false); setProjectChoices(!projectChoices) }}><AgentIcon name="chevron" size={11} /></button>}{activeAgent && <div className="agent-capabilities-anchor" ref={agentDetailsRoot}>

@@ -181,6 +181,10 @@ export const mockBridge: NativeBridge = {
     const safe = fileName.replace(/[^A-Za-z0-9._-]/g, "_") || "still-paste.png"
     return { remotePath: `$HOME/still-uploads/${safe}` }
   },
+  async agentUploadAttachment(_nativeSessionId: string, _conversationId: string, attachmentId: string, fileName: string, _base64Data: string) {
+    const safe = fileName.replace(/[^A-Za-z0-9._-]/g, "_") || "attachment"
+    return { remotePath: `/home/dev/still-uploads/agents/${attachmentId}/${safe}` }
+  },
 }
 
 export { mapRemoteStatus }

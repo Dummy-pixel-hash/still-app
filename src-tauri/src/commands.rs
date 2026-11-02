@@ -531,6 +531,38 @@ pub async fn still_upload_image(args: UploadArgs) -> Result<UploadResult, StillE
     Ok(UploadResult { remote_path })
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAttachmentArgs {
+    native_session_id: String,
+    conversation_id: String,
+    attachment_id: String,
+    file_name: String,
+    base64_data: String,
+}
+
+/// Upload a message attachment through the authenticated SSH connection,
+/// independent of any terminal card or PTY.
+#[tauri::command]
+pub async fn still_agent_upload_attachment(args: AgentAttachmentArgs) -> Result<UploadResult, StillError> {
+    if args.native_session_id.trim().is_empty() {
+        return Err(StillError::friendly("no_session", "Reconnect to the selected server before uploading attachments."));
+    }
+    if args.base64_data.len() > 7 * 1024 * 1024 {
+        return Err(StillError::friendly("too_large", "Attachment too large. Max is 5 MiB."));
+    }
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, args.base64_data.trim())
+        .map_err(|_| StillError::friendly("invalid", "Attachment data is not valid base64."))?;
+    let remote_path = crate::ssh_worker::upload_agent_attachment(&args.native_session_id, &args.conversation_id, &args.attachment_id, &args.file_name, bytes)
+        .await.map_err(|error| {
+            let detail = format!("{error:#}");
+            if detail.contains("unknown session") { StillError::friendly("no_session", "Reconnect to the selected server before uploading attachments.") }
+            else if detail.contains("no larger") { StillError::friendly("too_large", "Attachment too large. Max is 5 MiB.") }
+            else { StillError::friendly("upload_failed", format!("Attachment upload failed ({detail}).")) }
+        })?;
+    Ok(UploadResult { remote_path })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusResult {
