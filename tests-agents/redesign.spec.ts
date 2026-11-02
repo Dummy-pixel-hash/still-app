@@ -185,7 +185,7 @@ test("a detached persistent agent reattaches without starting or sending another
   expect(await page.evaluate(()=>{const h=(window as any).agentFixture;return {id:h.current,starts:h.starts.length,sends:h.sends.length}})).toEqual(before)
 })
 
-test("each reasoning phase completes at tools, then resumes after the stacked tool group", async ({ page }) => {
+test("reasoning and tool calls share an expandable, ordered activity timeline", async ({ page }) => {
   await connect(page)
   await page.evaluate(() => {
     const h = (window as any).agentFixture
@@ -196,40 +196,50 @@ test("each reasoning phase completes at tools, then resumes after the stacked to
     h.emit(h.current, { type: "toolStart", toolCallId: "execute-three", title: "Check formatting", toolKind: "execute", rawInput: { command: "npm run format:check" }, status: "completed" })
     h.emit(h.current, { type: "reasoningChunk", text: "PRIVATE_REASONING_BETA" })
   })
-  const thoughts = page.locator(".agent-thought")
-  await expect(thoughts).toHaveCount(1)
-  const first = thoughts.first(), second = page.locator(".agent-reasoning").first()
-  await expect(first.locator(":scope > summary")).toHaveText("Thought")
-  await expect(first.locator(".lattice-loader")).toHaveCount(0)
-  await expect(first).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
-  await first.locator(":scope > summary").click()
-  await expect(first.locator(".agent-thought-details")).toHaveText("1 reasoning update")
-  await first.locator(":scope > summary").click()
-  await expect(second.locator(".lattice-loader")).toHaveAttribute("data-status", "working")
-  await expect(second.locator(".lattice-loader__text")).toHaveText("Thinking")
-  await expect(second.locator(".lattice-loader__text")).toBeVisible()
-  await expect(second.locator(".lattice-loader__grid")).toHaveCSS("--ll-n", "3")
-  await expect(second.locator(".lattice-loader__cell").first()).toHaveCSS("width", "4px")
-  await expect(second).toHaveCSS("background-color", "rgba(0, 0, 0, 0)")
   const toolGroup = page.locator(".agent-work-group")
   await expect(toolGroup).toHaveCount(1)
-  await expect(toolGroup.locator(":scope > summary")).toHaveText("3 operations done")
-  await expect(toolGroup.locator(":scope > summary svg")).toHaveCount(1)
+  await expect(toolGroup.locator(":scope > summary")).toContainText("Activity · 3 commands · Thinking")
+  await expect(toolGroup).not.toHaveAttribute("open", "")
   await expect(toolGroup).toHaveCSS("border-bottom-width", "0px")
-  expect(await first.evaluate(el => !!(el.compareDocumentPosition(document.querySelector(".agent-work-group")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
-  expect(await toolGroup.evaluate(el => !!(el.compareDocumentPosition(document.querySelector(".agent-reasoning")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
   await toolGroup.locator(":scope > summary").click()
   await expect(toolGroup.locator(".agent-tool")).toHaveCount(3)
-  await expect(page.getByText(/PRIVATE_REASONING_/)).toHaveCount(0)
+  await expect(toolGroup.locator(".agent-activity-reasoning")).toHaveCount(2)
+  await expect(toolGroup.getByText("PRIVATE_REASONING_ALPHA")).toBeVisible()
+  await expect(toolGroup.getByText("PRIVATE_REASONING_BETA")).toBeVisible()
+  const activity = toolGroup.locator(".agent-work-group-body")
+  expect(await activity.locator(":scope > *").evaluateAll(nodes => nodes.map(node => node.className.trim()))).toEqual([
+    "agent-activity-reasoning", "agent-tool", "agent-tool", "agent-tool", "agent-activity-reasoning",
+  ])
+  await expect(toolGroup.locator(".agent-tool-label").first()).toContainText("Run")
+  await expect(toolGroup.locator(".agent-tool-label").first()).toContainText("npm test")
+  await page.evaluate(() => (window as any).agentFixture.emit((window as any).agentFixture.current, { type: "reasoningChunk", text: "_CONTINUED" }))
+  await expect(toolGroup).toHaveAttribute("open", "")
+  await expect(toolGroup.getByText("PRIVATE_REASONING_BETA_CONTINUED")).toBeVisible()
 
   await page.evaluate(() => (window as any).agentFixture.finish())
-  const completedThought = page.locator(".agent-thought").last()
-  await expect(completedThought.locator(":scope > summary")).toHaveText("Thought")
-  await expect(completedThought.locator(".lattice-loader")).toHaveCount(0)
+  await expect(toolGroup.locator(":scope > summary")).toContainText("Activity · 3 commands · Complete")
   await page.getByLabel("Message agent").fill("Start another turn")
   await page.getByLabel("Message agent").press("Enter")
-  await expect(page.locator(".agent-thought").last().locator(":scope > summary")).toHaveText("Thought")
   await expect(page.locator(".agent-working")).toBeVisible()
+})
+
+test("tool-only activity stays grouped and collapsed failures remain obvious", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "userMessage", text: "Run a command" })
+    h.emit(h.current, { type: "toolStart", toolCallId: "failed-test", title: "Run tests", toolKind: "execute", rawInput: { command: "npm test" }, rawOutput: { exitCode: 1, error: "test failed" }, status: "failed" })
+  })
+  const activity = page.locator(".agent-work-group")
+  await expect(activity).toHaveCount(1)
+  await expect(activity).toHaveClass(/is-failed/)
+  await expect(activity.locator(":scope > summary")).toContainText("Activity · 1 command · 1 failed")
+  await activity.locator(":scope > summary").click()
+  await expect(activity.locator(".agent-activity-reasoning")).toHaveCount(0)
+  const tool = activity.locator(".agent-tool.is-failed")
+  await expect(tool).toBeVisible()
+  await tool.locator(":scope > summary").click()
+  await expect(activity.getByText("Raw output", { exact: true })).toBeVisible()
 })
 
 test("completed expanded requests remain dismissible and narrow model options are reachable",async({page})=>{
