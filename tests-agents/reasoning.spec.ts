@@ -23,9 +23,16 @@ test.beforeEach(async ({ page }) => {
   await page.getByLabel("Message agent").focus()
 })
 
-test("the count, labels, heights and submitted values come directly from the reported options", async ({ page }) => {
-  for (const names of [["Low", "Medium", "High"], ["Minimal", "Low", "Medium", "High", "Max", "Ultra"], ["Quick", "Balanced", "Deep"]]) {
-    await report(page, effort(names))
+test("reasoning is capped at four model-derived presets and Ultra is optional", async ({ page }) => {
+  for (const [reported, names] of [
+    [["Low", "Medium", "High"], ["Low", "Medium", "High"]],
+    [["Low", "High", "Max"], ["Low", "High", "Max"]],
+    [["Low", "Medium", "High", "XHigh"], ["Low", "High", "XHigh"]],
+    [["None", "Minimal", "Low", "Medium", "High", "XHigh"], ["Low", "High", "XHigh"]],
+    [["Minimal", "Low", "Medium", "High", "Max", "Ultra"], ["Low", "High", "Max", "Ultra"]],
+    [["Quick", "Balanced", "Deep"], ["Quick", "Balanced", "Deep"]],
+  ]) {
+    await report(page, effort(reported, names[0]))
     const bars = control(page).locator(".agent-reasoning-level")
     await expect(bars).toHaveCount(names.length)
     expect(await bars.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-reasoning-label")))).toEqual(names)
@@ -61,7 +68,7 @@ test("switching models replaces the bars and selection with that model's acknowl
   })
   for (const [model, names, selected] of [
     ["Claude Opus 4", ["Standard", "Extended"], "Extended"],
-    ["GPT-5", ["Minimal", "Low", "Medium", "High", "Max", "Ultra"], "Max"],
+    ["GPT-5", ["Low", "High", "Max", "Ultra"], "Max"],
     ["Gemini 2.5 Pro", [], ""],
   ] as const) {
     await page.getByRole("button", { name: /^Model:/ }).click()
@@ -84,6 +91,17 @@ test("provider updates change the filled bars without sending a configuration re
   await report(page, effort(["Low", "Medium", "High"], "Low"))
   await expect(control(page).locator(".is-filled")).toHaveCount(1)
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: Low")
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
+})
+
+test("Medium and High share the middle band when a higher Max tier exists", async ({ page }) => {
+  const names = ["Low", "Medium", "High", "Max", "Ultra"]
+  for (const [current, filled] of [["Low", 1], ["Medium", 2], ["High", 2], ["Max", 3], ["Ultra", 4]] as const) {
+    await report(page, effort(names, current))
+    await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(4)
+    await expect(control(page).locator(".is-filled")).toHaveCount(filled)
+    await expect(control(page)).toHaveAccessibleName(`Reasoning effort: ${current}`)
+  }
   expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
 })
 
@@ -175,10 +193,10 @@ test("touch selection uses the same advertised values", async ({ browser }) => {
   } finally { await context.close() }
 })
 
-for (const width of [320, 390]) test(`six reported levels remain separate and usable at ${width}px`, async ({ page }) => {
+for (const width of [320, 390]) test(`six reported levels collapse to at most four bars at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 844 })
   await report(page, effort(["Default", "Minimal", "Low", "Medium", "High", "Ultra"]))
-  await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(6)
+  await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(4)
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeVisible()
   const bounds = await page.locator(".agent-composer").evaluate(composer => {
     const box = composer.getBoundingClientRect()
