@@ -6,6 +6,7 @@ import { agentGitDiffKey } from "../session/agentGit"
 import AgentIcon from "./AgentIcon"
 import { AgentChangeView } from "./AgentMessage"
 import { ChangeNumbers } from "./AgentChanges"
+import AgentReviewFiles, { ReviewFileSelect } from "./AgentReviewFiles"
 
 const views: AgentGitView[] = ["combined", "staged", "unstaged"]
 const viewLabels: Record<AgentGitView, string> = { combined: "Combined", staged: "Staged", unstaged: "Unstaged" }
@@ -54,9 +55,9 @@ export default function AgentRepositoryChanges({
   const snapshot = status.snapshot
   const ready = snapshot?.state === "ready" ? snapshot : undefined
   const entries = ready?.entries || []
-  const [selectedId, setSelectedId] = useState("")
+  const [selectedPath, setSelectedPath] = useState("")
   const [view, setView] = useState<AgentGitView>("combined")
-  const selected = entries.find(entry => entry.id === selectedId) || entries[0]
+  const selected = entries.find(entry => entry.path === selectedPath) || entries[0]
   const activeDiffKey = selected && ready ? agentGitDiffKey(ready.snapshotId, selected.id, view) : ""
   const activeDiff = diff.key === activeDiffKey ? diff : undefined
   const source = useMemo(() => selected && activeDiff?.diff?.state === "ready" && activeDiff.diff.patch
@@ -64,10 +65,6 @@ export default function AgentRepositoryChanges({
     : null, [selected?.id, selected?.path, activeDiff?.diff?.snapshotId, activeDiff?.diff?.patch, activeDiff?.diff?.state])
   const parsed = useMemo(() => source ? describeChanges(source) : [], [source])
 
-  useEffect(() => {
-    setSelectedId("")
-    setView("combined")
-  }, [ready?.snapshotId])
   useEffect(() => {
     if (active && selected && ready && connected && status.phase !== "loading") void loadDiff(selected, view)
   }, [active, selected?.id, ready?.snapshotId, view, connected, status.phase, loadDiff])
@@ -79,6 +76,7 @@ export default function AgentRepositoryChanges({
         : event.key === "Home" ? 0 : event.key === "End" ? views.length - 1 : -1
     if (nextIndex < 0) return
     event.preventDefault()
+    event.stopPropagation()
     setView(views[nextIndex])
     event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=tab]")[nextIndex]?.focus()
   }
@@ -99,8 +97,7 @@ export default function AgentRepositoryChanges({
         {!ready && cwd && <code title={cwd}>{cwd}</code>}
       </div>
       <div className="agent-repository-refresh">
-        <span>{lastChecked}</span>
-        <button type="button" className="agent-button" onClick={() => { void refresh() }} disabled={!canRefresh}>
+        <button type="button" className="agent-button" title={lastChecked} onClick={() => { void refresh() }} disabled={!canRefresh}>
           <AgentIcon name="refresh" size={13} /> Refresh
         </button>
       </div>
@@ -123,42 +120,44 @@ export default function AgentRepositoryChanges({
     {ready && <>
       {ready.truncated && <p className="agent-repository-notice" role="status">The file list reached its safety limit. Refresh to check again; this partial list is not a clean result.</p>}
       {ready.entries.length === 0 && !ready.truncated && <div className="agent-repository-empty"><AgentIcon name="check" size={22} /><h3>No uncommitted changes.</h3><p>Refresh to check the current server-side working tree.</p></div>}
-      {ready.entries.length > 0 && <>
-        <div className="agent-repository-files-heading"><strong>Changed files</strong><span>{ready.entries.length}{ready.truncated ? "+" : ""}</span></div>
-        <div className="agent-repository-files" role="group" aria-label="Repository files">
-          {entries.map(entry => <button type="button" key={entry.id} aria-pressed={entry.id === selected?.id}
-            aria-label={`${entry.path}, ${kindLabel[entry.kind]}, index ${entry.indexStatus}, worktree ${entry.worktreeStatus}`}
-            className={`agent-repository-file ${entry.id === selected?.id ? "is-selected" : ""}`}
-            onClick={() => setSelectedId(entry.id)} title={entry.path}>
-            <span className="agent-repository-xy" aria-label={`Index ${entry.indexStatus}; worktree ${entry.worktreeStatus}`}>{entry.indexStatus}{entry.worktreeStatus}</span>
-            <span className="agent-repository-file-path">{entry.path}</span>
-            <span className="agent-repository-file-meta">
-              <span className="agent-repository-kind">{kindLabel[entry.kind]}</span>
-              {entry.originalPath && <span className="agent-repository-origin" title={`Renamed from ${entry.originalPath}`}>from {entry.originalPath}</span>}
-              {entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null
-                ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : null}
-            </span>
-          </button>)}
-        </div>
+      {ready.entries.length > 0 && <div className="agent-review-browser">
+        <AgentReviewFiles source="repository" selected={selected?.id} select={id => setSelectedPath(entries.find(entry => entry.id === id)?.path || "")} files={entries.map(entry => ({
+          id: entry.id, path: entry.path, originalPath: entry.originalPath,
+          label: `${kindLabel[entry.kind]}, index ${entry.indexStatus}, worktree ${entry.worktreeStatus}`,
+          status: entry.kind === "untracked" ? "U" : entry.kind === "conflicted" ? "!" : entry.kind === "added" ? "A" : entry.kind === "deleted" ? "D" : entry.kind === "renamed" ? "R" : "M",
+          counts: entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : undefined,
+        }))} />
         {selected && <>
+          <div className="agent-review-editor">
+          <ReviewFileSelect source="repository" files={entries.map(entry => ({ id: entry.id, path: entry.path }))} selected={selected.id} select={id => setSelectedPath(entries.find(entry => entry.id === id)?.path || "")} />
           <div className="agent-repository-scope" role="tablist" aria-label="Diff scope" onKeyDown={onScopeKeyDown}>
+            <span>Compare</span>
             {views.map(scope => <button type="button" role="tab" key={scope} aria-selected={view === scope} tabIndex={view === scope ? 0 : -1}
               onClick={() => setView(scope)}>{viewLabels[scope]}</button>)}
           </div>
-          <div className="agent-review-diff agent-repository-diff" role="region" aria-label={`${viewLabels[view]} diff for ${selected.path}`} tabIndex={0}>
+          <div key={JSON.stringify([selected.path, view])} className="agent-review-diff agent-repository-diff" role="region" aria-label={`${viewLabels[view]} diff for ${selected.path}`} tabIndex={0}>
+            <div className="agent-code-language agent-review-file-toolbar"><AgentIcon name="file" size={14} /><span title={selected.path}>{selected.path}</span>
+              <div className="agent-review-file-pager"><span>{entries.indexOf(selected) + 1} / {entries.length}</span>
+                <button type="button" aria-label="Previous changed file" disabled={entries.indexOf(selected) <= 0} onClick={() => setSelectedPath(entries[entries.indexOf(selected) - 1].path)}><AgentIcon name="back" size={14} /></button>
+                <button type="button" aria-label="Next changed file" disabled={entries.indexOf(selected) >= entries.length - 1} onClick={() => setSelectedPath(entries[entries.indexOf(selected) + 1].path)}><AgentIcon name="back" size={14} style={{ transform: "rotate(180deg)" }} /></button>
+              </div>
+            </div>
+            {selected.originalPath && <p className="agent-review-origin">Renamed from <code>{selected.originalPath}</code></p>}
             {activeDiff?.phase === "loading" && <p className="agent-repository-diff-message" role="status">Loading {viewLabels[view].toLowerCase()} diff…</p>}
-            {activeDiff?.error && <p className="agent-repository-error" role="alert">{activeDiff.error}</p>}
+            {activeDiff?.error && <div className="agent-repository-error" role="alert">{activeDiff.error}<button type="button" className="agent-link-button" disabled={!connected} onClick={() => { void loadDiff(selected, view) }}>Retry diff</button></div>}
             {activeDiff?.diff && activeDiff.diff.state !== "ready" && <div className={`agent-repository-diff-message is-${activeDiff.diff.state}`} role={activeDiff.diff.state === "stale" ? "status" : "note"}>
               <strong>{stateMessage(activeDiff.diff.state, activeDiff.diff.reason)}</strong>
               {activeDiff.diff.state === "stale" && <button type="button" className="agent-link-button" onClick={() => { void refresh() }}>Refresh repository</button>}
             </div>}
-            {parsed.map((change, index) => <AgentChangeView key={`${selected.id}:${view}:${index}`} change={{ ...change, path: selected.path }} sourceLabel="Repository diff" />)}
+            {parsed.map((change, index) => <AgentChangeView key={`${selected.id}:${view}:${index}`} change={{ ...change, path: selected.path }} sourceLabel="Repository diff" header={false} />)}
             {activeDiff?.diff?.state === "ready" && (!activeDiff.diff.patch || parsed.length === 0) && <p className="agent-repository-diff-message">No changes in this diff scope.</p>}
             {!activeDiff && connected && selected && <p className="agent-repository-diff-message" role="status">Loading selected diff…</p>}
             {!activeDiff && !connected && selected && <p className="agent-repository-diff-message" role="status">Reconnect to load this file’s diff.</p>}
           </div>
+          </div>
         </>}
-      </>}
+      </div>}
     </>}
+    {snapshot && <footer className="agent-review-note"><span className={`agent-review-freshness ${!connected || status.phase === "stale" ? "is-stale" : ""}`} /><span>{lastChecked}{!connected || status.phase === "stale" ? " · saved snapshot" : " · read-only"}</span></footer>}
   </section>
 }

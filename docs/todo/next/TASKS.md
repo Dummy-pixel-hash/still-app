@@ -33,6 +33,12 @@ and existing working-tree changes. No task below requires the original transcrip
 - [x] **FIX-GIT-EOF** — Fix the reported “Remote Git helper did not exit successfully” error. Native must keep reading after SSH output EOF until channel close and validate the later exit status. An authenticated in-memory SSH regression reproduced the original error and now passes; missing/nonzero exit, signal termination and stalled close still fail. Also corrected native `headOid` field serialization. **Implementation verified; packaged rebuild and user retest pending.**
 - [ ] **VERIFY-GIT-EOF-PACKAGED** — Rebuild Windows ARM64 with FIX-GIT-EOF, then retry Repository/Refresh on the user's selected `Darsh@100.86.95.34` project `/mnt/data/git-test`. Confirm status and diff loads from the native app; this remains part of VERIFY-04, not inferred from fixture tests.
 
+### Changes panel redesign and conversation preview reliability — 2026-11-02
+
+- [x] **REVIEW-UI-02** — Replace the rejected card/toolbar stack with an editor-style file index and diff canvas, searchable file navigation, previous/next controls, and expanded review with focus isolation/draft preservation. Short windows use a native file picker to keep code visible. **Verified 2026-11-02: full Agents suite 90 Node + 153 Playwright passed; build passed.**
+- [x] **REVIEW-FIX-02** — Preserve supplied edit previews through output-only completion events; recognise exact replacement-tool input pairs as labelled snippets, patch-only inputs by supplied file headers, and write-only content without invented old files/counts. Add failing-before/passing-after regressions, independent scope-tab coverage, stable selection and per-file diff scrolling. See [VERIFICATION.md](VERIFICATION.md#review-ui-02--review-fix-02--changes-editor-and-conversation-previews).
+- [ ] **VERIFY-REVIEW-02** — Retest the redesigned panel and the affected provider's Conversation previews in a rebuilt Windows package. Deterministic/browser evidence is not a substitute for provider/version-specific native evidence. No packaging workflow is implied by this UI task.
+
 ## User inputs needed to close external evidence
 
 1. **V-GIT-REMOTE / VERIFY-04:** Connect the desired SSH host in Still and identify an

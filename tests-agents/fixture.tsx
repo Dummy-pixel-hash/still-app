@@ -35,6 +35,7 @@ const h = {
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
   external: [] as string[],
+  rejectExternal: false,
   attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   snapshotReads: [] as string[],
@@ -161,7 +162,7 @@ registerNativeBridge({
     })
   },
   clipboardWriteText: async text => { h.copied = text },
-  async openExternal(url) { h.external.push(url) },
+  async openExternal(url) { if (h.rejectExternal) throw new Error("Browser unavailable"); h.external.push(url) },
   agentCheck: async (_native, agentId, executable) => {
     h.checks.push({ agentId, executable })
     const result = (agentId ? AGENTS.filter(a => a.id === agentId) : AGENTS).map(a => {

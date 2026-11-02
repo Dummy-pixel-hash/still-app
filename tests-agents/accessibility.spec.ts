@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__impeccable/**", route => route.abort())
+  await page.route("**/live.js?*", route => route.abort())
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/tests-agents/fixture.html")
 })
@@ -139,8 +140,8 @@ test("questions link descriptions and preserve zero numeric answers", async ({ p
   expect(await page.evaluate(() => (window as any).agentFixture.inputs.at(-1))).toMatchObject({ answers: { retries: 0 } })
 })
 
-test("default desktop window keeps review beside an editable conversation", async ({ page }) => {
-  await page.setViewportSize({ width: 1100, height: 720 })
+test("a roomy desktop workspace keeps review beside an editable conversation", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
@@ -176,6 +177,7 @@ test("reasoning cycles independently using Enter and Space", async ({ page }) =>
   await page.getByRole("button", { name: "Reasoning effort: Medium", exact: true }).focus()
   await page.keyboard.press("Space")
   await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toBeFocused()
+  await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toHaveAttribute("aria-disabled", "false")
   await page.keyboard.press("Enter")
   await expect(page.getByRole("button", { name: "Reasoning effort: Medium", exact: true })).toBeFocused()
   await expect(page.locator(".agent-model-menu")).toHaveCount(0)

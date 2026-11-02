@@ -20,25 +20,30 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   return <div className="agent-code"><div className="agent-code-header"><span>{language || "Code"}</span><button type="button" onClick={() => { void nativeBridge.clipboardWriteText(content.current?.textContent || "").then(() => { setCopied(true); setError("") }).catch(() => setError("Could not copy. Select the code and copy it manually.")) }} aria-label="Copy code"><AgentIcon name={copied ? "check" : "file"} size={13} />{copied ? "Copied" : "Copy"}</button></div><pre ref={content}>{highlighted === null ? children : <code dangerouslySetInnerHTML={{ __html: highlighted }} />}</pre>{error && <p className="agent-copy-error" role="status">{error}</p>}</div>
 }
 
+function ExternalLink({ href, children, modifier = true }: { href?: string; children: ReactNode; modifier?: boolean }) {
+  const [feedback, setFeedback] = useState<"" | "hint" | "failed" | "blocked">("")
+  const open = async () => {
+    setFeedback("")
+    try { if (!await openExternalUrl(href)) setFeedback("blocked") }
+    catch { setFeedback("failed") }
+  }
+  return <><a href={href} title={modifier ? "Ctrl/Cmd+click or press Enter to open in your browser" : "Open in your browser"} onClick={event => {
+    event.preventDefault()
+    if (!modifier || event.ctrlKey || event.metaKey) void open()
+    else setFeedback("hint")
+  }} onAuxClick={event => event.preventDefault()} onKeyDown={event => {
+    if (event.key !== "Enter" || event.ctrlKey || event.metaKey || event.altKey) return
+    event.preventDefault()
+    void open()
+  }}>{children}</a>{feedback && <span className="agent-link-feedback" role="status">{feedback === "blocked" ? "Only HTTP and HTTPS links can be opened." : <>{feedback === "failed" ? "Could not open your browser. " : "Opens in your browser. "}<button type="button" onClick={() => void open()}>{feedback === "failed" ? "Retry opening link" : "Open link"}</button></>}</span>}</>
+}
+
 /** Standard markdown/GFM, with raw HTML disabled and safe URL transformation. */
 const markdownComponents: Components = {
-      a: ({ href, children }) => <a
-        href={href}
-        title="Ctrl/Cmd+click to open in your browser"
-        onClick={(event) => {
-          event.preventDefault()
-          if (event.ctrlKey || event.metaKey) void openExternalUrl(href).catch(() => {})
-        }}
-        onAuxClick={(event) => event.preventDefault()}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.ctrlKey || event.metaKey || event.altKey) return
-          event.preventDefault()
-          void openExternalUrl(href).catch(() => {})
-        }}
-      >{children}</a>,
+       a: ({ href, children }) => <ExternalLink href={href}>{children}</ExternalLink>,
       pre: CodeBlock,
        table: ({ children }) => <div className="agent-table"><table>{children}</table></div>,
-       img: ({ src, alt }) => <span className="agent-media-fallback">{alt || "Image"}{src && <a href={src} onClick={event => { event.preventDefault(); void openExternalUrl(src).catch(() => {}) }}>Open image in browser</a>}</span>,
+       img: ({ src, alt }) => <span className="agent-media-fallback">{alt || "Image"}{src && <ExternalLink href={src} modifier={false}>Open image in browser</ExternalLink>}</span>,
 }
 export const AgentMessage = memo(function AgentMessage({ text }: { text: string }) {
   return <div className="agent-prose"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>{text}</ReactMarkdown></div>
@@ -50,8 +55,10 @@ export function AgentToolResult({ content }: { content: AgentToolContent[] }) {
       : entry.content?.type === "text" && entry.content.text ? <pre key={index}>{entry.content.text}</pre> : <p key={index} className="agent-muted">The agent supplied {entry.content?.type || "unsupported"} content. A text preview is unavailable.</p>)}</>
 }
 
-export function AgentChangeView({ change, sourceLabel = "Original provider patch" }: { change: ReportedChange; sourceLabel?: string }) {
-  return <div className="agent-diff"><div className="agent-code-language"><AgentIcon name="file" size={13} /><span>{change.path}</span>{change.additions !== null && <span className="agent-change-numbers"><span>+{change.additions}</span><span>−{change.deletions}</span></span>}</div>
+export function AgentChangeView({ change, sourceLabel = "Original provider patch", header = true }: { change: ReportedChange; sourceLabel?: string; header?: boolean }) {
+  if (change.preview === "written" && change.source.type === "diff") return <div className="agent-diff"><p className="agent-diff-fallback">Written content · the agent did not supply the original file. Line totals are unavailable.</p><pre className="agent-written-content" tabIndex={0} aria-label={`Written content for ${change.path}`}>{change.source.newText}</pre></div>
+  return <div className="agent-diff">{header && <div className="agent-code-language"><AgentIcon name="file" size={13} /><span>{change.path}</span>{change.additions !== null && <span className="agent-change-numbers"><span>+{change.additions}</span><span>−{change.deletions}</span></span>}</div>}
+    {change.preview === "snippet" && <p className="agent-diff-fallback">Reported replacement · line numbers are relative to the supplied snippet.</p>}
     {change.hunks !== null ? <>
       {change.hunks.length ? <Patch path={change.path} hunks={change.hunks} /> : <p className="agent-diff-fallback">No changed text lines were reported.</p>}
       {change.patch && <details className="agent-raw-patch"><summary>View raw patch</summary><pre>{change.patch}</pre></details>}

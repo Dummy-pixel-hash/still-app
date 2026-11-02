@@ -22,6 +22,15 @@ export interface TranscriptItem {
   attemptId?: string
 }
 
+function mergeToolContent(previous: AgentToolContent[] | undefined, next: AgentToolContent[]) {
+  const edits = (previous || []).filter(content => content.type === "diff" || content.type === "patch")
+  // A result/acknowledgement is not a retraction of an earlier edit preview.
+  // When the provider sends a new structured edit list, that list is authoritative.
+  const hasPreview = next.some(content => content.type === "diff" && typeof content.newText === "string"
+    || content.type === "patch" && typeof content.patch === "string" && !!content.patch.trim())
+  return hasPreview ? next : [...edits, ...next.filter(content => content.type !== "diff" && content.type !== "patch")]
+}
+
 /** Project ACP events into readable messages; protocol sequence remains untouched. */
 export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = []
@@ -66,8 +75,14 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
       if (event.title) tool.title = event.title
       if (event.status) tool.status = event.status
       if (event.detail) tool.text = event.detail
-      if (event.content) tool.content = event.content
-      if (event.rawInput) tool.input = event.rawInput
+      if (event.content) tool.content = mergeToolContent(tool.content, event.content)
+      if (event.rawInput) {
+        // Keep a complete input's identity stable across projections so derived
+        // edit previews can be cached while unrelated assistant tokens stream.
+        const previous = tool.input, next = event.rawInput
+        if (!previous || Object.keys(previous).every(key => key in next)) tool.input = next
+        else if (Object.entries(next).some(([key, value]) => previous[key] !== value)) tool.input = { ...previous, ...next }
+      }
       if (event.rawOutput !== undefined) tool.output = event.rawOutput
       if (event.locations) tool.locations = event.locations
       if (event.toolKind) tool.toolKind = event.toolKind

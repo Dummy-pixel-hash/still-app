@@ -244,9 +244,6 @@
 .agent-workspace .agent-review-diff { margin: 0 10px; border-radius: 10px; background: rgba(0, 0, 0, .22); }
 .agent-workspace .agent-review-diff .agent-diff { background: transparent; }
 .agent-workspace .agent-review-note { margin-top: 8px; padding: 11px 15px; border-top-color: rgba(255, 255, 255, .07); color: #a99fa5; font-size: 11px; }
-@media (max-width: 1000px) {
-  .agent-workspace .agent-review { inset: 54px 8px 8px auto; width: min(640px, calc(100% - 16px)); margin: 0; border: 0; border-radius: 16px; }
-}
 @media (max-height: 480px) {
   .agent-workspace .agent-model-menu > :not(.agent-model-options) { flex-shrink: 1; min-height: 0; }
   .agent-workspace .agent-model-menu-heading { min-height: 34px; padding: 5px 11px 3px; }
@@ -392,10 +389,6 @@
 .agent-workspace .agent-thought > summary { display: inline-flex; align-items: center; list-style: none; cursor: pointer; padding: 2px 0; color: inherit; font: 500 12px/1.45 var(--font-sans); }
 .agent-workspace .agent-thought.is-failed > summary { color: #e8aab4; }
 .agent-workspace .agent-thought-details { margin: 4px 0 5px; color: #b7aab2; font-size: 11px; line-height: 1.5; }
-@media (max-width: 1000px) {
-  .agent-workspace .agent-review { width: min(640px, calc(100% - 16px)); border-radius: 16px; }
-}
-
 /* Agent/model selectors: quiet, tactile choices with one clear selected state. */
 .agent-workspace :is(.agent-picker-popup, .agent-model-menu, .agent-command-menu) {
   background: var(--ag-glass-sheen), var(--ag-sheet-deep);
@@ -538,7 +531,6 @@
 .agent-workspace .agent-composer .agent-send:hover { background: #fff8fa; color: #171315; }
 .agent-workspace .agent-composer .agent-send:disabled { background: rgba(238, 231, 234, .42); color: rgba(23, 19, 21, .55); }
 .agent-workspace .agent-composer .agent-send.agent-stop { background: #ece5e8; color: #171315; }
-.agent-workspace .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer textarea { min-height: 64px; margin-bottom: 16px; line-height: 1.62; }
 .agent-workspace :is(.agent-picker-popup, .agent-command-menu) > .agent-picker-search {
   min-height: 40px;
   margin: 9px 9px 5px;

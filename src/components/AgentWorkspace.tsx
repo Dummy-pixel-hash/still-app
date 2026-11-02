@@ -28,7 +28,7 @@ import AgentMenu from "./AgentMenu"
 import AgentProviderMark, { StillAgentMark } from "./AgentProviderMark"
 import AgentChanges, { AgentChangeSummary } from "./AgentChanges"
 import AgentRepositoryChanges from "./AgentRepositoryChanges"
-import { changeTotals, conversationChanges } from "../agents/changes"
+import { conversationChanges } from "../agents/changes"
 import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
 import AgentModelPicker from "./AgentModelPicker"
 import AgentReasoningBars from "./AgentReasoningBars"
@@ -73,7 +73,6 @@ function relativeActivity(at: number) {
   const minutes = Math.max(0, Math.floor((Date.now() - at) / 60000))
   return minutes < 1 ? "now" : minutes < 60 ? `${minutes}m` : minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`
 }
-
 function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
 
 export default function AgentWorkspace({ session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
@@ -121,7 +120,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const requestOperations = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
   const [, updateHistoryWindow] = useState(0)
-  const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null)
+  const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null), timelineSearch = useRef<HTMLInputElement>(null)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const navigationPanel = useRef<HTMLElement>(null)
   const projectPopover = useRef<HTMLDivElement>(null), agentDetailsRoot = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
@@ -192,7 +191,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     hostKey: current?.meta.hostKey || "", nativeSessionId: repositoryConnected ? transportId : undefined,
     cwd: repositoryCwd, conversationId: current?.meta.id || "", enabled: repositoryEnabled, refreshEpoch: gitRefreshEpoch,
   })
-  const repositoryCount = git.status.snapshot?.state === "ready" ? git.status.snapshot.entries.length : 0
+  const repositoryCount = git.status.snapshot?.state === "ready" ? git.status.snapshot.entries.length : undefined
   const lastGitTurn = useRef<{ executionId: string; active: boolean } | null>(null)
   useEffect(() => {
     const executionId = activeAgent?.executionId || "", active = !!activeAgent?.turnActive
@@ -231,7 +230,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const changes = useMemo(() => conversationChanges(items), [items])
   const openHistoryAction = useCallback((message: TranscriptItem, retry: boolean) => { setError(""); setHistoryAction({ message, retry }) }, [])
   const historyActions = useMemo(() => ({ capabilities: current?.historyCapabilities, enabled: connectedHere && !busy && !configBusy && !!current && !current.turnActive && !current.pendingInput && !current.pendingPermission && !current.meta.archivedAt && !current.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(current.state), act: openHistoryAction }), [current?.historyCapabilities, current?.state, current?.turnActive, current?.pendingInput, current?.pendingPermission, current?.meta.archivedAt, current?.meta.submissionUnknown, connectedHere, busy, configBusy, openHistoryAction])
-  const changeCount = useMemo(() => changeTotals(changes), [changes])
+  const timelineMatches = timelineOpen ? items.filter(item => ["user", "assistant"].includes(item.kind) && item.text.toLowerCase().includes(timelineQuery.toLowerCase())) : []
   const historyId = current?.meta.id || ""
   const historyStart = historyWindows.get(historyId)
   const firstItem = historyStart === undefined ? Math.max(0, items.length - 120) : historyStart === "" ? 0 : Math.max(0, items.findIndex(item => item.id === historyStart))
@@ -244,13 +243,13 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript)
   const showComposer = startScreen || !!current
   const composerCollapsed = !!current && !composerExpanded && !draft && !attachments.length
-  const composerDock = useComposerOverlay(!!current)
+  const { dock: composerDock, compact: compactChat } = useComposerOverlay(!!current)
   const canSend = hydrated && connectedHere && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
   const projects = [...prefs.projects]
   for (const row of libraryThreads) if (!projects.some(p => p.host === row.meta.hostKey && p.folder === row.meta.folder)) projects.push({ host: row.meta.hostKey, folder: row.meta.folder })
   const activity = (p: AgentProject) => Math.max(0, ...libraryThreads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).map(row => row.meta.activityAt))
-  const sortedProjects = projects.filter(p => !query || threads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)).sort((a, b) => prefs.sort === "name" ? (a.name || folderName(a.folder)).localeCompare(b.name || folderName(b.folder)) : prefs.sort === "recent" ? activity(b) - activity(a) : 0)
+  const sortedProjects = projects.filter(p => (!archived && !query) || threads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)).sort((a, b) => prefs.sort === "name" ? (a.name || folderName(a.folder)).localeCompare(b.name || folderName(b.folder)) : prefs.sort === "recent" ? activity(b) - activity(a) : 0)
   const listMotion = useAgentListMotion(JSON.stringify([sortedProjects.map(projectKey), prefs.collapsed, prefs.sort, threads.map(row => [row.meta.id, row.meta.order, row.meta.pinned, row.meta.activityAt])]))
   const knownServers = [...prefs.servers, ...sessions, ...(session ? [session] : [])]
   const hosts = [...new Map([...projects.map(p => sessionForHost(p.host, knownServers)).filter((s): s is Session => !!s), ...knownServers].map(s => [hostKey(s), s])).values()]
@@ -258,7 +257,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const commands = commandInventory(providerCommands, agentId, otherControls)
   const sidebarExpanded = sidebar || !prefs.sidebarCollapsed
   const sidebarOverlay = sidebar && narrowNavigation
-  const dialogOpen = folderOpen || !!deleting || timelineOpen || !!historyAction || !!extraControl || !!expandedRequest
+  const todosDialog = compactChat && todosOpen && !!current?.todos?.items.length
+  const dialogOpen = folderOpen || !!deleting || timelineOpen || !!historyAction || !!extraControl || !!expandedRequest || todosDialog
   const attentionCount = allThreads.filter(row => row.pendingPermission || row.pendingInput).length
   const activeRequestKind = current?.pendingPermission ? "permission" : current?.pendingInput ? "question" : undefined
   const activeRequestId = current?.pendingPermission?.requestId ?? current?.pendingInput?.requestId
@@ -399,7 +399,8 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     if (!dialogOpen) return
     const previous = returnFocus.current
     const modal = surface.current?.querySelector<HTMLElement>(".agent-modal")
-    const target = expandedRequest ? modal?.querySelector<HTMLElement>('[aria-label="Close expanded request"]') : modal?.querySelector<HTMLElement>('input:not(:disabled),select:not(:disabled)') || modal?.querySelector<HTMLElement>('button:not(:disabled)')
+    const controls = [...(modal?.querySelectorAll<HTMLElement>('input:not(:disabled),select:not(:disabled),button:not(:disabled)') || [])].filter(node => node.getClientRects().length && !node.closest("[inert]"))
+    const target = expandedRequest ? modal?.querySelector<HTMLElement>('[aria-label="Close expanded request"]') : controls.find(node => node.matches("input,select")) || controls[0]
     target?.focus({ preventScroll: true })
     return () => { requestAnimationFrame(() => {
       if (surface.current?.querySelector(".agent-modal")) return
@@ -407,7 +408,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       else if (expandedRequest) (surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(expandedRequest)}"] .agent-request-expand`) || textarea.current)?.focus({ preventScroll: true })
       else textarea.current?.focus({ preventScroll: true })
     }) }
-  }, [folderOpen, !!deleting, timelineOpen, !!historyAction, extraControl, expandedRequest])
+  }, [folderOpen, !!deleting, timelineOpen, !!historyAction, extraControl, expandedRequest, todosDialog])
   useEffect(() => {
     if (!projectChoices) return
     const outside = (event: PointerEvent) => {
@@ -689,9 +690,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
       if (e.key === "Tab") {
-        const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || (review && matchMedia("(max-width: 1000px)").matches ? surface.current?.querySelector(".agent-review") : null) || (projectChoices ? projectPopover.current : null) || surface.current
+        const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || surface.current?.querySelector('.agent-review[aria-modal="true"]') || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
         if (e.shiftKey && (document.activeElement === elements[0] || document.activeElement === surface.current)) { e.preventDefault(); elements.at(-1)?.focus() }
         else if (!e.shiftKey && document.activeElement === elements.at(-1)) { e.preventDefault(); elements[0]?.focus() }
@@ -727,7 +728,6 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           {sortedProjects.map(p => {
             const key = projectKey(p), collapsed = prefs.collapsed.includes(key) && !query
             const rows = threads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || (prefs.sort === "name" ? threadTitle(a).localeCompare(threadTitle(b)) : prefs.sort === "manual" ? b.meta.order - a.meta.order : b.meta.activityAt - a.meta.activityAt))
-            if (archived && !rows.length) return null
             return <div className="agent-folder" key={key}>
               <div className={`agent-folder-heading ${contextKey === key ? "is-current" : ""}`} data-agent-row={`project:${key}`}>
                 <button className="agent-icon-button agent-folder-toggle" aria-label={`Toggle ${p.name || folderName(p.folder)} conversations`} aria-expanded={!collapsed} title={p.folder} onClick={() => setPrefs(old => ({ ...old, collapsed: collapsed ? old.collapsed.filter(id => id !== key) : [...old.collapsed, key] }))}><AgentIcon name="chevron" size={12} style={{ transform: collapsed ? "" : "rotate(90deg)" }} /></button>
@@ -755,22 +755,24 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     </aside>
     <main className={`agent-main ${review && current ? "has-review" : ""}`} inert={sidebarOverlay || dialogOpen}>
       <div className="agent-sr-only" role="status" aria-atomic="true">{current?.pendingPermission ? `Approval needed: ${current.pendingPermission.title}` : current?.pendingInput ? `Agent question: ${current.pendingInput.title}` : ""}</div>
+
       <header className="agent-topbar agent-topbar--stacked" data-tauri-drag-region>
-        <div className="agent-topbar-leading agent-topbar-leading--focused">
-          {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
-          {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
-          {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
-        </div>
-        <div className="agent-topbar-actions">
-          {current && <>
-            <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
-            <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
-            <button className={`agent-review-toggle ${review ? "is-active" : ""}`} aria-label="Review changes" aria-expanded={review} onClick={() => { if (review) setReview(false); else { setReviewMode("repository"); setReview(true) } }}><AgentIcon name="changes" size={16} /><span>Changes</span>{changeCount.reportedFiles > 0 && <small>{changeCount.reportedFiles}</small>}</button>
-          </>}
-          {onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
-          <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
-        </div>
+            <div className="agent-topbar-leading agent-topbar-leading--focused">
+              {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
+              {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
+              {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
+            </div>
+            <div className="agent-topbar-actions">
+              {current && <>
+                <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
+                <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
+                <button className={`agent-review-toggle ${review ? "is-active" : ""}`} aria-label="Review changes" aria-expanded={review} onClick={() => { if (review) setReview(false); else { setReviewMode("repository"); setReview(true) } }}><AgentIcon name="changes" size={16} /><span>Changes</span></button>
+              </>}
+              {onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
+              <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
+            </div>
       </header>
+
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       <div className="agent-workbody">
       <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`}>
@@ -797,6 +799,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         </div>
         {showComposer && <div ref={composerDock} className={`agent-composer-area${startScreen ? " is-compact" : ""}${composerCollapsed ? " is-collapsed" : ""}`}>
           {!scroll.atLatest && current && !activeRequestItem && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
+          <div className="agent-composer-notices" role="region" tabIndex={0} aria-label="Agent notices and tasks">
           {activeRequestItem && current && <button className={`agent-request-jump ${activeRequestKind === "permission" ? "is-approval" : "is-question"}`} onClick={() => {
             if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)
             else { findMessage(activeRequestItem.id); requestAnimationFrame(() => surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(activeRequestItem.id)}"] .agent-request-expand`)?.focus({ preventScroll: true })) }
@@ -805,8 +808,9 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
           {session && connectionNotice}
            {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span></div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
+           {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen && !todosDialog ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} sync={current.todoSync} expanded={todosOpen && !todosDialog} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
+          </div>
           {projectChoices && <div ref={projectPopover} className="agent-context-choices" role="dialog" aria-label="Choose a project"><div><strong>Choose a project</strong><button type="button" className="agent-icon-button" aria-label="Close project choices" onClick={() => setProjectChoices(false)}><AgentIcon name="close" size={14} /></button></div>{projects.map(p => <button type="button" key={projectKey(p)} className="agent-project-choice" onClick={() => assignProject(p)}><AgentIcon name="folder" size={14} /><span>{p.name || folderName(p.folder)}<small>{hostLabel(p.host)} · {p.folder}</small></span></button>)}<button type="button" className="agent-link-button" onClick={() => { setProjectChoices(false); chooseFolder() }}>Add another project</button></div>}
-          {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} sync={current.todoSync} expanded={todosOpen} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
           <form ref={composerForm} className={`agent-composer${current ? " has-provider" : ""}${composerCollapsed ? " is-collapsed" : ""}${draggingFiles ? " is-file-dragging" : ""}`} onDragEnter={e => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); setDraggingFiles(true) } }} onDragOver={e => { if (e.dataTransfer.types.includes("Files")) e.preventDefault() }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDraggingFiles(false) }} onDrop={e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); setDraggingFiles(false); void addAttachments(Array.from(e.dataTransfer.files)) }} onFocusCapture={e => {
             if ((e.target as HTMLElement).tagName === "TEXTAREA") setComposerExpanded(true)
           }} onBlurCapture={e => {
@@ -848,14 +852,15 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         {startScreen && <div className="agent-launch-extras"><div className="agent-starters">{promptStarters.map(starter => <button key={starter.label} disabled={!!draft.trim() || busy} onClick={() => useStarter(starter.prompt)}><span>{starter.label}</span></button>)}</div>{recent.length > 0 && <section className="agent-recents"><div className="agent-section-label"><span>Recent conversations</span><button className="agent-link-button" onClick={() => revealProjects(true)}>View all {recent.length} conversations <AgentIcon name="chevron" size={12} /></button></div>{recent.slice(0, 3).map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</section>}</div>}
       </>}
       </div>
-      {review && current && <><button className="agent-review-scrim" aria-label="Close changes panel" onClick={() => setReview(false)} /><AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} close={() => setReview(false)} /></>}
+      {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} close={() => setReview(false)} />}
       </div>
       {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
+    {todosDialog && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-todos-modal" role="dialog" aria-modal="true" aria-label="Conversation Todos"><AgentTodos id="agent-todos-dialog-full" todos={current.todos} sync={current.todoSync} expanded expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></section></div>}
     {expandedItem && <div className="agent-confirm-backdrop agent-request-backdrop"><AgentRequest key={expandedItem.id} item={expandedItem} actions={requestActions} expanded /></div>}
     {extraControl && <div className="agent-confirm-backdrop"><section className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-label={fields.find(option => option.id === extraControl)?.name || "Agent control"}><div className="agent-modal-heading"><h2>{fields.find(option => option.id === extraControl)?.name || "Agent control"}</h2><button className="agent-icon-button" aria-label="Close agent control" onClick={() => setExtraControl(null)}><AgentIcon name="close" /></button></div>{fields.filter(option => option.id === extraControl).map(option => <div key={option.id}>{option.description && <p>{option.description}</p>}<ConfigPicker option={option} disabled={!connectedHere || !idle(activeAgent) || configBusy} change={changeSecondaryConfig} /></div>)}{configError && <p className="agent-model-error" role="alert">{configError}</p>}</section></div>}
     {historyAction && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-history-confirm" role="dialog" aria-modal="true" aria-labelledby="agent-history-title"><h2 id="agent-history-title">{historyAction.retry ? "Retry this message?" : "Revert to this message?"}</h2><p>{historyAction.retry ? "Return to before this message and send it again with the currently selected model." : "Return to before this message. Its replies and later messages will leave the active conversation."}</p><blockquote>{historyAction.message.text.slice(0, 240)}{historyAction.message.text.length > 240 ? "…" : ""}</blockquote><p>Project files stay as they are. {current.agentId === "pi" ? "Pi continues from a fork at this point." : "This updates the agent’s conversation history."}</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" disabled={busy} onClick={() => setHistoryAction(null)}>Cancel</button><button className="agent-primary" disabled={busy || !connectedHere || !canChangeAgentHistory(current, historyAction.message.messageId || "", historyAction.retry)} onClick={() => void applyHistoryAction()}>{busy ? "Updating history…" : historyAction.retry ? "Retry message" : "Revert conversation"}</button></div></section></div>}
-    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{items.filter(item => ["user", "assistant"].includes(item.kind) && item.text.toLowerCase().includes(timelineQuery.toLowerCase())).map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>)}</div></section></div>}
+    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input ref={timelineSearch} autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
     {folderOpen && <div className="agent-confirm-backdrop"><section className="agent-modal agent-folder-picker" role="dialog" aria-modal="true" aria-labelledby="agent-project-title"><div className="agent-modal-heading"><div><h2 id="agent-project-title">Choose a project</h2><p>A folder on the server where your agent will work.</p></div><button className="agent-icon-button" aria-label="Close project picker" onClick={closeFolder}><AgentIcon name="close" /></button></div>
       {addingServer ? <form onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); const port = Number(data.get("port")), hostname = String(data.get("hostname") || "").trim(), username = String(data.get("username") || "").trim(); if (!hostname || !username || !Number.isInteger(port) || port < 1 || port > 65535) return; const key = JSON.stringify([hostname.toLowerCase(), port, username]); const profile = sessionForHost(key, hosts); folderOperation.current++; setFolderHost(key); if (profile) onSelectHost?.({ ...profile, authMethod: data.get("auth") === "key" ? "key" : "ask" }); setAddingServer(false) }}><label className="agent-field">Host<input required name="hostname" placeholder="server.example.com" /></label><div className="agent-server-fields"><label className="agent-field">Username<input required name="username" placeholder="dev" /></label><label className="agent-field">Port<input required type="number" min={1} max={65535} name="port" defaultValue="22" /></label></div><label className="agent-field">Authentication<select name="auth"><option value="ask">Password or saved credential</option><option value="key">Private key</option></select></label><div className="agent-inline-actions"><button className="agent-primary">Use this server</button><button type="button" className="agent-button" onClick={() => setAddingServer(false)}>Back</button></div></form> : <form onSubmit={e => { e.preventDefault(); void openFolder() }}><label className="agent-field">Server<select aria-label="Project server" value={folderHost} disabled={busy} onChange={e => { folderOperation.current++; setFolderHost(e.target.value); if (e.target.value) selectHost(e.target.value) }}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label><button type="button" className="agent-link-button" disabled={busy} onClick={() => setAddingServer(true)}>Add a server</button><label className="agent-field">Remote project folder<input required autoComplete="off" aria-label="Remote project folder" disabled={busy} value={folderPath} onChange={e => { folderOperation.current++; setFolderPath(e.target.value) }} placeholder="~/projects/my-app" /></label>{folderHost === host && connectionNotice}{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-primary" disabled={busy || !connected || folderHost !== host || !folderPath.trim()}>Open folder</button><button type="button" className="agent-button" onClick={closeFolder}>Cancel</button></div></form>}
     </section></div>}

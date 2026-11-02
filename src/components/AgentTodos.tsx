@@ -8,12 +8,13 @@ const durationText = (milliseconds: number) => {
   return seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m${seconds%60?` ${seconds%60}s`:""}`
 }
 
-export default function AgentTodos({ todos, sync, expanded, expand, collapse }: {
+export default function AgentTodos({ todos, sync, expanded, expand, collapse, id = "agent-todos-full" }: {
   todos?: AgentTodoSnapshot
   sync?: AgentTodoSync
   expanded: boolean
   expand: () => void
   collapse: () => void
+  id?: string
 }) {
   const collapsedButton = useRef<HTMLButtonElement>(null)
   const expandedButton = useRef<HTMLButtonElement>(null)
@@ -47,21 +48,21 @@ export default function AgentTodos({ todos, sync, expanded, expand, collapse }: 
   return <section className={`agent-todos${expanded ? " is-expanded" : ""}`} aria-label="Conversation Todos" onKeyDown={keyDown}>
     <div className={`agent-todos-states${expanded ? " is-expanded" : ""}`}>
       <div className="agent-todos-state-clip" aria-hidden={expanded} inert={expanded}>
-        <button ref={collapsedButton} type="button" className="agent-todo-progress-pill" aria-label={`${done} of ${items.length} Todos done. Expand list`} aria-expanded={expanded} aria-controls="agent-todos-full" onClick={expandAndFocus}>
+        <button ref={collapsedButton} type="button" className="agent-todo-progress-pill" aria-label={`${done} of ${items.length} Todos done. Expand list`} aria-expanded={expanded} aria-controls={id} onClick={expandAndFocus}>
           <span className="agent-todo-progress-dot" aria-hidden="true" />
           <span>{done}/{items.length} Todos done</span>
           <AgentIcon name="chevron" size={14} style={{ transform: "rotate(-90deg)" }} />
         </button>
       </div>
-      <div className="agent-todos-state-clip" id="agent-todos-full" aria-hidden={!expanded} inert={!expanded}>
+      <div className="agent-todos-state-clip" id={id} aria-hidden={!expanded} inert={!expanded}>
         <div className="agent-todo-card">
           <header className="agent-todos-heading">
             <div className="agent-todos-heading-copy"><h2>Agent Todo</h2><span className="agent-todos-progress"><i aria-hidden="true" />{done} / {items.length}</span></div>
-            <button ref={expandedButton} className="agent-icon-button agent-todos-expand" type="button" aria-label="Collapse Todos" title="Collapse Todos" aria-expanded={expanded} aria-controls="agent-todos-full" onClick={collapseAndFocus}>
+            <button ref={expandedButton} className="agent-icon-button agent-todos-expand" type="button" aria-label="Collapse Todos" title="Collapse Todos" aria-expanded={expanded} aria-controls={id} onClick={collapseAndFocus}>
               <AgentIcon name="chevron" size={15} style={{ transform: "rotate(90deg)" }} />
             </button>
           </header>
-          {items.length === 0 ? <p className="agent-todo-empty">The agent has not added any Todos to this conversation yet.</p> : <ol className="agent-todo-full-list">
+          {items.length === 0 ? <p className="agent-todo-empty">The agent has not added any Todos to this conversation yet.</p> : <ol className="agent-todo-full-list" tabIndex={expanded ? 0 : -1} aria-label="Agent tasks">
             {items.map(item => {
               const current=item.id===activeItem?.id
               return <li className={`agent-todo-readonly is-${item.status}${current?" is-current":""}`} key={item.id}>

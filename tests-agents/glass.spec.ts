@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs"
 import { test, expect } from "@playwright/test"
 import { pixelContrast, probeAuroraGlass } from "./glass-pixels.mjs"
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/__impeccable/**", route => route.abort())
+  await page.route("**/live.js?*", route => route.abort())
+})
+
 test("Windows WebView uses sRGB to avoid washed-out wide-gamut colors", () => {
   const windows = JSON.parse(readFileSync(new URL("../src-tauri/tauri.windows.conf.json", import.meta.url), "utf8"))
   const windowsMain = windows.app.windows.find((window: { label: string }) => window.label === "main")
