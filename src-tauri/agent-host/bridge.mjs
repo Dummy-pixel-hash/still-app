@@ -10,7 +10,9 @@ import { pathToFileURL } from "node:url"
 const todoHost = process.env.STILL_TODO_MODULE ? await import(pathToFileURL(process.env.STILL_TODO_MODULE).href) : null
 const todoMcp = () => ({ command: process.execPath, args: [process.env.STILL_TODO_MODULE, "mcp"], env: { STILL_TODO_SOCKET: process.env.STILL_TODO_SOCKET, STILL_TODO_TOKEN: process.env.STILL_TODO_TOKEN } })
 
-const LIMIT = 2 * 1024 * 1024
+// Provider tool results may include several encoded images in one JSON record.
+// Keep a bounded ceiling, but do not reject ordinary screenshot-heavy turns.
+const LIMIT = 16 * 1024 * 1024
 // Launch-time runtime identity supplied by the native host. Absent fields stay absent:
 // a transport name is not proof of a version, and "native" is not a provider version.
 function launchRuntime(fallback) {
@@ -21,30 +23,59 @@ function launchRuntime(fallback) {
 export function frameReader(onFrame, onError) {
   const decoder = new StringDecoder("utf8")
   let pending = ""
+  let discarding = false
   return chunk => {
     pending += decoder.write(chunk)
-    let end
-    while ((end = pending.indexOf("\n")) >= 0) {
+    for (;;) {
+      if (discarding) {
+        const end = pending.indexOf("\n")
+        if (end < 0) { pending = ""; return }
+        pending = pending.slice(end + 1); discarding = false
+        continue
+      }
+      const end = pending.indexOf("\n")
+      if (end < 0) {
+        if (Buffer.byteLength(pending) > LIMIT) {
+          pending = ""; discarding = true
+          onError(new Error("Provider protocol frame exceeded 16 MiB and was discarded"))
+        }
+        return
+      }
       const line = pending.slice(0, end).trim(); pending = pending.slice(end + 1)
       if (!line) continue
-      if (Buffer.byteLength(line) > LIMIT) { onError(new Error("Protocol frame exceeds 2 MiB")); return }
-      try { onFrame(JSON.parse(line)) } catch (error) { onError(error) }
+      if (Buffer.byteLength(line) > LIMIT) { onError(new Error("Provider protocol frame exceeded 16 MiB and was discarded")); continue }
+      let value
+      try { value = JSON.parse(line) } catch (error) { onError(error); continue }
+      onFrame(value)
     }
-    if (Buffer.byteLength(pending) > LIMIT) { pending = ""; onError(new Error("Protocol frame exceeds 2 MiB")) }
   }
 }
 export function sseReader(onEvent, onError) {
   const decoder = new StringDecoder("utf8")
   let pending = ""
+  let discarding = false
   return chunk => {
     pending += decoder.write(chunk)
-    let match
-    while ((match = /\r?\n\r?\n/.exec(pending))) {
+    for (;;) {
+      const match = /\r?\n\r?\n/.exec(pending)
+      if (discarding) {
+        if (!match) { pending = ""; return }
+        pending = pending.slice(match.index + match[0].length); discarding = false
+        continue
+      }
+      if (!match) {
+        if (Buffer.byteLength(pending) > LIMIT) {
+          pending = ""; discarding = true
+          onError(new Error("OpenCode event exceeded 16 MiB and was discarded"))
+        }
+        return
+      }
       const record = pending.slice(0, match.index); pending = pending.slice(match.index + match[0].length)
+      if (Buffer.byteLength(record) > LIMIT) { onError(new Error("OpenCode event exceeded 16 MiB and was discarded")); continue }
       const data = record.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n")
-      if (data) { try { onEvent(JSON.parse(data)) } catch (error) { onError(error) } }
+      if (!data) continue
+      try { onEvent(JSON.parse(data)) } catch (error) { onError(error) }
     }
-    if (Buffer.byteLength(pending) > LIMIT) { pending = ""; onError(new Error("OpenCode event exceeds 2 MiB")) }
   }
 }
 export const textOf = value => typeof value === "string" ? value : Array.isArray(value)
@@ -66,12 +97,12 @@ export class Peer {
     const inherited = { ...process.env, ...env }; delete inherited.CLAUDECODE
     this.child = spawn(executable, args, { stdio: ["pipe", "pipe", "pipe"], cwd: process.cwd(), env: inherited, detached: process.platform !== "win32" })
     this.pending = new Map(); this.serial = 0; this.stderr = ""; this.closed = false
-    this.onEvent = handler; this.onFailure = () => {}
-    this.child.stdout.on("data", frameReader(value => this.frame(value), error => this.fail(error)))
+    this.onEvent = handler; this.onFailure = () => {}; this.isTurnActive = () => false
+    this.child.stdout.on("data", frameReader(value => this.frame(value), error => this.onFailure(error, { executionActive: this.isTurnActive() })))
     this.child.stderr.on("data", data => { this.stderr = (this.stderr + data.toString()).slice(-16000) })
-    this.child.stdin.on("error", error => this.fail(error))
-    this.child.on("error", error => this.fail(error))
-    this.child.on("exit", (code, signal) => { this.closed = true; this.fail(new Error(`Agent exited (${signal || code}). ${this.stderr.trim()}`)) })
+    this.child.stdin.on("error", error => this.fail(error, { executionActive: !!this.child.pid && !this.closed }))
+    this.child.on("error", error => this.fail(error, { executionActive: !!this.child.pid && !this.closed }))
+    this.child.on("exit", (code, signal) => { this.closed = true; this.fail(new Error(`Agent exited (${signal || code}). ${this.stderr.trim()}`), { executionActive: false }) })
   }
   frame(value) {
     const id = value.type === "control_response" ? value.response?.request_id : value.id
@@ -81,11 +112,11 @@ export class Peer {
       const error = value.error || (value.success === false ? "Agent rejected the request" : undefined) || (value.response?.subtype === "error" ? value.response.error : undefined)
       if (error) { const failure = new Error(errorText(error)); failure.rpcResponse = true; failure.rpcCode = error.code; pending.reject(failure) }
       else pending.resolve(value.type === "control_response" ? value.response?.response || {} : value.type === "response" ? value.data : value.result)
-    } else Promise.resolve(this.onEvent(value)).catch(error => this.onFailure(error))
+    } else Promise.resolve(this.onEvent(value)).catch(error => this.onFailure(error, { executionActive: this.isTurnActive() }))
   }
   send(value) {
     if (this.closed) throw new Error("The agent process has exited")
-    this.child.stdin.write(JSON.stringify(value) + "\n", error => { if (error) this.fail(error) })
+    this.child.stdin.write(JSON.stringify(value) + "\n", error => { if (error) this.fail(error, { executionActive: !!this.child.pid && !this.closed }) })
   }
   request(method, params = {}, protocol = "jsonrpc") {
     const id = `still-${++this.serial}`
@@ -95,7 +126,11 @@ export class Peer {
     const task = new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); try { this.send(frame) } catch (error) { reject(error) } })
     return deadline(task, 45000, method).finally(() => this.pending.delete(id))
   }
-  fail(error) { for (const pending of this.pending.values()) pending.reject(error); this.pending.clear(); this.onFailure(error) }
+  fail(error, state) {
+    for (const pending of this.pending.values()) pending.reject(error)
+    this.pending.clear()
+    this.onFailure(error, state)
+  }
   async close() {
     this.onFailure = () => {}
     this.child.stdin.end()
@@ -130,7 +165,15 @@ export class Driver {
     return done
   }
   finish(cancelled = false) { const turn = this.turn; this.turn = null; turn?.resolve({ stopReason: cancelled ? "cancelled" : "end_turn" }) }
-  fail(error) { const turn = this.turn; this.turn = null; if (turn) turn.reject(error); else this.update({ sessionUpdate: "session_error", message: errorText(error) }) }
+  fail(error, { executionActive = false } = {}) {
+    if (executionActive && this.turn) {
+      this.update({ sessionUpdate: "session_error", message: errorText(error), _meta: { executionActive: true } })
+      return
+    }
+    const turn = this.turn; this.turn = null
+    if (turn) turn.reject(error)
+    else this.update({ sessionUpdate: "session_error", message: errorText(error), _meta: { executionActive: false } })
+  }
   ask(method, params) {
     this.questionCount++
     const generation = this.host.questionGeneration
@@ -153,7 +196,8 @@ export class Driver {
 export class PiDriver extends Driver {
   async start(resume) {
     this.peer = new Peer(this.executable, ["--mode", "rpc", ...(resume ? ["--session", resume] : []), ...(todoHost ? ["--extension", process.env.STILL_TODO_PI_EXTENSION] : [])], value => this.event(value))
-    this.peer.onFailure = error => this.fail(error)
+    this.peer.isTurnActive = () => !!this.turn
+    this.peer.onFailure = (error, state) => this.fail(error, state)
     this.call = (method, params) => this.peer.request(method, params, "pi")
     const state = await this.call("get_state")
     this.id = state.sessionFile || state.sessionId
@@ -177,21 +221,23 @@ export class PiDriver extends Driver {
   async prompt(text, messageId) {
     const done = this.begin()
     this.operationType = /^\/compact(?:\s|$)/.test(text) ? "compact" : "prompt"
-    let previous
+    let previous, submitted = false
     try {
       const compact = text.match(/^\/compact(?:\s+([\s\S]*))?$/)
       if (compact && this.commands.find(command => command.name === "compact")?.source === "native") {
+        submitted = true
         await this.call("compact", compact[1] ? { customInstructions: compact[1] } : {})
         this.finish(); return done
       }
       await this.catalog(await this.call("get_state"))
       if (messageId && this.historyCapabilities.revert && !text.startsWith("/")) previous = (await this.call("get_fork_messages")).messages
+      submitted = true
       const response = await this.call("prompt", { message: text })
       if (response?.disposition === "handled") {
         const state = await this.call("get_state")
         if (!state.isStreaming && !state.isCompacting && !state.pendingMessageCount) this.finish()
       }
-    } catch (error) { this.fail(error) }
+    } catch (error) { this.fail(error, { executionActive: submitted && !error.rpcResponse }) }
     try { return await done } finally {
       if (previous) {
         try {
@@ -266,7 +312,8 @@ export class PiDriver extends Driver {
 export class CodexDriver extends Driver {
   async start(resume) {
     this.peer = new Peer(this.executable, ["app-server"], value => this.event(value))
-    this.peer.onFailure = error => this.fail(error)
+    this.peer.isTurnActive = () => !!this.turn
+    this.peer.onFailure = (error, state) => this.fail(error, state)
     await this.peer.request("initialize", { clientInfo: { name: "still", title: "Still", version: "0.1.1" }, capabilities: { experimentalApi: true } })
     this.peer.send({ jsonrpc: "2.0", method: "initialized" })
     const account = await this.peer.request("account/read", {})
@@ -299,22 +346,26 @@ export class CodexDriver extends Driver {
   }
   async prompt(text, messageId) {
     const done = this.begin()
+    let submitted = false
     try {
       const command = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
       if (command?.[1] === "compact") {
+        submitted = true
         await this.peer.request("thread/compact/start", { threadId: this.id })
         return done
       }
       if (command?.[1] === "review") {
+        submitted = true
         const result = await this.peer.request("review/start", { threadId: this.id, delivery: "inline", target: command[2]?.trim() ? { type: "custom", instructions: command[2].trim() } : { type: "uncommittedChanges" } })
         this.turnId = result.turn?.id
         return done
       }
       if (command && !this.commands.some(entry => entry.name === command[1])) throw new Error(`/${command[1]} is a Codex terminal action, not a command supported in this chat. Use the conversation controls or terminal.`)
+      submitted = true
       const result = await this.peer.request("turn/start", { threadId: this.id, input: [{ type: "text", text }], ...(this.model ? { model: this.model } : {}), ...(this.effort ? { effort: this.effort } : {}) })
       this.turnId = result.turn?.id
       if (this.turnId && this.historyCapabilities.revert) this.checkpoint(messageId, { provider: "codex", threadId: this.id, turnId: this.turnId })
-    } catch (error) { this.fail(error) }
+    } catch (error) { this.fail(error, { executionActive: submitted && !error.rpcResponse }) }
     return done
   }
   async revert(checkpoint) {
@@ -383,7 +434,7 @@ export class CodexDriver extends Driver {
       if (p.turn?.status === "failed" || p.turn?.error) this.fail(new Error(p.turn?.error?.message || "Codex turn failed"))
       else this.finish(p.turn?.status === "interrupted")
     }
-    if (method === "error" && !p.willRetry) this.fail(new Error(p.error?.message || p.message || "Codex failed"))
+    if (method === "error" && !p.willRetry) this.fail(new Error(p.error?.message || p.message || "Codex failed"), { executionActive: !!this.turn && p.willRetry !== false })
   }
 }
 
@@ -391,7 +442,8 @@ export class ClaudeDriver extends Driver {
   async start(resume) {
     this.id = resume || randomUUID(); this.resumable = true; this.tasks = new Set(); this.blocks = new Map()
     this.peer = new Peer(this.executable, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--setting-sources", "user,project,local", resume ? `--resume=${resume}` : `--session-id=${this.id}`, ...(todoHost ? ["--mcp-config", JSON.stringify({ mcpServers: { "still-todos": todoMcp() } })] : [])], value => this.event(value), { CLAUDE_CODE_SDK_READS_SESSION_STATE: "1" })
-    this.peer.onFailure = error => this.fail(error)
+    this.peer.isTurnActive = () => !!this.turn
+    this.peer.onFailure = (error, state) => this.fail(error, state)
     this.call = (method, params) => this.peer.request(method, params, "claude")
     const init = await this.call("initialize", { hooks: null })
     this.models = init.models || []
@@ -401,7 +453,7 @@ export class ClaudeDriver extends Driver {
   }
   async prompt(text) {
     const done = this.begin(); this.result = null; this.sessionState = undefined; this.message++; this.streamed = false; this.cancelled = false
-    try { this.peer.send({ type: "user", session_id: this.id, parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }) } catch (error) { this.fail(error) }
+    try { this.peer.send({ type: "user", session_id: this.id, parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }) } catch (error) { this.fail(error, { executionActive: !!this.peer.child.pid && !this.peer.closed }) }
     return done
   }
   async setConfig(id, value) {
@@ -414,7 +466,7 @@ export class ClaudeDriver extends Driver {
   settle() {
     if (!this.result || this.tasks.size || this.sessionState && this.sessionState !== "idle") return
     const result = this.result; this.result = null
-    if (result.is_error) this.fail(new Error(result.errors?.join("\n") || result.result || "Claude turn failed"))
+    if (result.is_error) this.fail(new Error(result.errors?.join("\n") || result.result || "Claude turn failed"), { executionActive: false })
     else this.finish(this.cancelled)
     this.cancelled = false
   }
@@ -568,6 +620,7 @@ export class OpenCodeDriver extends Driver {
   async prompt(text, messageId) {
     const done = this.begin()
     this.commandIdleCheck = false
+    let submitted = false
     try {
       await this.catalog()
       const command = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
@@ -575,6 +628,7 @@ export class OpenCodeDriver extends Driver {
       const skill = mention && this.skills.find(skill => skill.id === mention[1])
       if (mention && !skill) throw new Error(`The skill @${mention[1]} is not available in this project's current inventory`)
       if (skill) {
+        submitted = true
         const admitted = await this.http("POST", `/api/session/${this.id}/prompt`, { text, skills: [{ id: skill.id, mention: { start: 0, end: skill.id.length + 1, text: `@${skill.id}` } }] })
         this.promptCheckpoint(messageId, admitted, text)
       }
@@ -584,15 +638,16 @@ export class OpenCodeDriver extends Driver {
         await this.catalog(true)
         this.update({ sessionUpdate: "notice", message: this.catalogWarning || "OpenCode configuration and project commands refreshed." }); this.finish()
       }
-      else if (command?.[1] === "compact" && !this.commands.some(entry => entry.name === "compact" && entry.route === "command")) { await this.http("POST", `/api/session/${this.id}/compact`, {}) }
+      else if (command?.[1] === "compact" && !this.commands.some(entry => entry.name === "compact" && entry.route === "command")) { submitted = true; await this.http("POST", `/api/session/${this.id}/compact`, {}) }
       else if (command) {
         if (!this.commands.some(entry => entry.name === command[1])) throw new Error(`/${command[1]} is not a command exposed by OpenCode in this folder`)
+        submitted = true
         await this.http("POST", `/api/session/${this.id}/command`, { name: command[1], text: command[2] || "" })
         // A command can open a form or change settings without starting a turn.
         this.commandIdleCheck = true
         await this.checkCommandIdle()
-      } else { const admitted = await this.http("POST", `/api/session/${this.id}/prompt`, { text }); this.promptCheckpoint(messageId, admitted, text) }
-    } catch (error) { this.fail(error) }
+      } else { submitted = true; const admitted = await this.http("POST", `/api/session/${this.id}/prompt`, { text }); this.promptCheckpoint(messageId, admitted, text) }
+    } catch (error) { this.fail(error, { executionActive: submitted && (!error.status || error.status >= 500) }) }
     return done
   }
   promptCheckpoint(messageId, admitted, text) {
@@ -642,15 +697,57 @@ export class OpenCodeDriver extends Driver {
   }
   async cancel() { await this.http("POST", `/api/session/${this.id}/interrupt`, {}) }
   async subscribe() {
+    const response = await this.openEventStream()
+    this.streamDisconnected = false
+    this.stream = this.watchEvents(response)
+  }
+  async openEventStream() {
     const response = await fetch(this.url + "/api/event", { headers: { Authorization: `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`, Accept: "text/event-stream" }, signal: this.abort.signal })
     if (!response.ok || !response.body) throw new Error("OpenCode event subscription failed")
-    this.stream = (async () => {
-      const parse = sseReader(event => { void this.event(event).catch(error => this.fail(error)) }, error => this.fail(error))
-      for await (const bytes of response.body) {
-        parse(Buffer.from(bytes))
+    return response
+  }
+  async watchEvents(firstResponse) {
+    let response = firstResponse, delay = 250
+    while (!this.abort.signal.aborted) {
+      try {
+        if (!response) response = await this.openEventStream()
+        if (this.streamDisconnected) {
+          this.streamDisconnected = false
+          this.update({ sessionUpdate: "still_connection_state" })
+          await this.reconcileActivity()
+        }
+        const parse = sseReader(event => { void this.event(event).catch(error => this.fail(error, { executionActive: !!this.turn })) }, error => this.fail(error, { executionActive: !!this.turn }))
+        for await (const bytes of response.body) parse(Buffer.from(bytes))
+        if (this.abort.signal.aborted) return
+        throw new Error("OpenCode event stream ended")
+      } catch (error) {
+        if (this.abort.signal.aborted) return
+        this.streamDisconnected = true
+        this.fail(error, { executionActive: !!this.turn })
+        await new Promise(resolve => {
+          const finish = () => { this.abort.signal.removeEventListener("abort", stop); resolve() }
+          const timer = setTimeout(finish, delay); timer.unref?.()
+          const stop = () => { clearTimeout(timer); finish() }
+          this.abort.signal.addEventListener("abort", stop, { once: true })
+        })
+        response = undefined
+        delay = Math.min(delay * 2, 5000)
       }
-      if (!this.abort.signal.aborted) throw new Error("OpenCode event stream ended")
-    })().catch(error => { if (!this.abort.signal.aborted) this.fail(error) })
+    }
+  }
+  async reconcileActivity() {
+    if (!this.id) return
+    try {
+      const active = await this.http("GET", "/api/session/active")
+      const sessions = active.data || active
+      const running = Object.prototype.hasOwnProperty.call(sessions, this.id)
+      if (running) {
+        if (this.turn) this.update({ sessionUpdate: "still_connection_state" })
+        else this.update({ sessionUpdate: "notice", message: "OpenCode reports an active session. Reconnect was restored; wait for its next update before sending another prompt." })
+      } else if (this.turn) this.finish()
+    } catch (error) {
+      this.update({ sessionUpdate: "notice", message: `OpenCode reconnected, but its active-session status could not be checked: ${errorText(error)}. The current turn has not been resent.` })
+    }
   }
   async event(event) {
     const p = event.data || {}
@@ -658,7 +755,7 @@ export class OpenCodeDriver extends Driver {
     if (["command.updated", "model.updated", "agent.updated", "skill.updated"].includes(event.type)) {
       if (this.id && (!event.location || event.location.directory === process.cwd())) {
         if (this.catalogTask) this.catalogDirty = true
-        else void this.catalog().catch(error => this.fail(error))
+        else void this.catalog().catch(error => this.update({ sessionUpdate: "notice", message: `OpenCode's model or command inventory could not be refreshed: ${errorText(error)}. Your current turn is unaffected.` }))
       }
       return
     }
@@ -684,7 +781,7 @@ export class OpenCodeDriver extends Driver {
     }
     if (event.type === "session.step.failed") this.lastRetryError = errorText(p.error)
     if (event.type === "session.compaction.ended") this.finish()
-    if (event.type === "session.compaction.failed") this.fail(new Error(errorText(p.error)))
+    if (event.type === "session.compaction.failed") this.fail(new Error(errorText(p.error)), { executionActive: false })
     if (event.type === "session.tool.input.started") { this.tools.set(p.id, { name: p.name }); this.tool(p.id, p.name, "in_progress") }
     if (event.type === "session.tool.called") { const tool = this.tools.get(p.id) || { name: p.name || "Tool" }; tool.input = p.input; this.tools.set(p.id, tool); this.tool(p.id, tool.name, "in_progress", p.input) }
     if (event.type === "session.tool.progress") {
@@ -698,12 +795,12 @@ export class OpenCodeDriver extends Driver {
     }
     if (event.type === "session.execution.succeeded") this.finish()
     if (event.type === "session.execution.interrupted") this.finish(true)
-    if (event.type === "session.execution.failed") this.fail(new Error(errorText(p.error)))
+    if (event.type === "session.execution.failed") this.fail(new Error(errorText(p.error)), { executionActive: false })
     if (event.type === "permission.asked" || event.type === "session.permission.requested") {
       void (async () => {
         const choice = await this.permission(p.source?.id || p.id, p.message || p.action, { resources: p.resources }, ["once", "reject"])
         await this.http("POST", `/api/session/${this.id}/permission/${encodeURIComponent(p.id)}/reply`, { decision: choice })
-      })().catch(error => this.fail(error))
+      })().catch(error => this.fail(error, { executionActive: !!this.turn }))
     }
   }
   async close() {
@@ -788,7 +885,7 @@ if (process.env.STILL_AGENT_CATALOG === "opencode") {
   if (Number(process.versions.node.split(".")[0]) < 20) throw new Error("Still's native bridge requires Node.js 20 or newer on the server")
   const write = value => process.stdout.write(JSON.stringify(value) + "\n")
   const host = createHost(write, process.env.STILL_AGENT_DRIVER, process.env.STILL_AGENT_EXECUTABLE)
-  process.stdin.on("data", frameReader(value => { void host.handle(value) }, error => { write({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "session_error", message: errorText(error) } } }); void host.close() }))
+  process.stdin.on("data", frameReader(value => { void host.handle(value) }, error => host.update({ sessionUpdate: "session_error", message: errorText(error), _meta: { executionActive: !!driver?.turn } })))
   const shutdown = () => { void host.close().then(() => process.exit(0), error => { console.error(errorText(error)); process.exit(1) }) }
   process.stdin.on("end", shutdown)
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, shutdown)

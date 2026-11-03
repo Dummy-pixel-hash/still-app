@@ -141,6 +141,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
     if (["saved", "detached", "connecting"].includes(event.state)) invalidateObservations(row)
     if (event.state === "detached") row.lastError = event.text || "The agent continues on the server. Reconnecting to catch up."
     else if (event.state === "working" || event.state === "connecting") row.lastError = undefined
+    if (event.state === "working" && event.turnActive && row.meta.submissionUnknown) row.meta = { ...row.meta, submissionUnknown: false }
     if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined }
   }
   if (event.type === "permission" && event.permission) { row.pendingPermission = event.permission; row.state = "inputRequired" }
@@ -162,7 +163,8 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   if (event.type === "commands" && event.commands) row.commands = event.commands
   if (event.type === "threadError") {
     invalidateObservations(row)
-    row.pendingPermission = undefined; row.pendingInput = undefined; row.turnActive = false
+    row.pendingPermission = undefined; row.pendingInput = undefined
+    row.turnActive = event.turnActive ?? false
     row.state = row.meta.submissionUnknown ? "submissionUnknown" : event.state || "error"; row.lastError = event.text || "Remote agent error."
     if (row.state === "submissionUnknown") row.meta = { ...row.meta, submissionUnknown: true }
   }
@@ -275,17 +277,25 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
 }
 export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false) {
   const row = rows.get(id)
-  if (!row || !["working", "complete", "cancelled"].includes(row.state) || row.turnActive || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
+  if (!row || !["working", "complete", "cancelled", "error"].includes(row.state) || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
   // Sequence numbers and the user message come from the native runner, not an optimistic counter.
+  const sequenceBeforeSend = row.lastSequence
   row.turnActive = true; row.lastError = undefined; emit()
   try { await nativeBridge.agentSend(id, message) }
   catch (error) {
     const current = rows.get(id)!
+    const submitted = current.transcript.find(event => event.type === "userMessage" && event.sequence > sequenceBeforeSend && event.text === message)
+    const completed = submitted && current.transcript.some(event => event.type === "threadComplete" && event.sequence > submitted.sequence)
+    if (completed && !current.turnActive && ["complete", "cancelled"].includes(current.state)) return
     current.state = "submissionUnknown"; current.turnActive = false
     current.meta = { ...current.meta, submissionUnknown: true }; persist(current)
     current.lastError = error instanceof Error ? error.message : "The prompt may have reached the server. Inspect it before retrying."
     emit(); throw error
   }
+}
+export async function reconcileAgentThread(id: string) {
+  await nativeBridge.agentReconcile(id)
+  await refreshAgentThread(id)
 }
 export async function respondAgentPermission(id: string, requestId: string | number, optionId: string) {
   const row = rows.get(id)
@@ -449,7 +459,7 @@ export async function changeAgentHistory(id: string, messageId: string, retry: b
 }
 export async function setAgentConfig(id: string, configId: string, value: string | boolean) {
   const row = rows.get(id)
-  if (!row || row.turnActive || historyOperations.has(id) || !["working", "complete", "cancelled"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
+  if (!row || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) || !["working", "complete", "cancelled", "error"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
   if (configOperations.has(id)) throw new Error("Wait for the previous setting update.")
   configOperations.add(id)
   try { await nativeBridge.agentSetConfig(id, configId, value); await refreshAgentThread(id) }

@@ -5,7 +5,7 @@ import { createServer } from "node:net"
 import { spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { fileURLToPath } from "node:url"
-import { createHost, frameReader, sseReader, OpenCodeDriver } from "../src-tauri/agent-host/bridge.mjs"
+import { createHost, frameReader, sseReader, PiDriver, CodexDriver, ClaudeDriver, OpenCodeDriver } from "../src-tauri/agent-host/bridge.mjs"
 
 test("JSONL framing preserves split UTF-8 and Unicode separators", () => {
   const frames = [], errors = []
@@ -21,8 +21,25 @@ test("SSE framing handles CRLF split across chunks", () => {
 })
 test("invalid JSON and oversized frames fail explicitly", () => {
   const errors = [], read = frameReader(() => {}, error => errors.push(error))
-  read(Buffer.from("{broken}\n")); read(Buffer.from("x".repeat(2 * 1024 * 1024 + 1)))
+  read(Buffer.from("{broken}\n")); read(Buffer.from("x".repeat(16 * 1024 * 1024 + 1)))
   assert.equal(errors.length, 2)
+})
+test("large screenshot-bearing JSONL frames are accepted and following provider events are parsed", () => {
+  const frames = [], errors = [], read = frameReader(frame => frames.push(frame), error => errors.push(error))
+  const imageResult = JSON.stringify({ type: "tool_execution_end", result: { content: [{ type: "image", data: "i".repeat(3 * 1024 * 1024) }, { type: "image", data: "j".repeat(900 * 1024) }] } })
+  const completion = JSON.stringify({ type: "agent_settled", aborted: false })
+  read(Buffer.from(`${imageResult}\n${completion}\n`))
+  assert.equal(frames.length, 2)
+  assert.equal(frames[1].type, "agent_settled")
+  assert.equal(errors.length, 0)
+})
+test("discarding an over-limit record never parses its tail and does not block the next frame", () => {
+  const frames = [], errors = [], read = frameReader(frame => frames.push(frame), error => errors.push(error.message))
+  const rejected = JSON.stringify({ type: "too_large", data: "x".repeat(16 * 1024 * 1024 + 1) })
+  read(Buffer.from(`${rejected}\n${JSON.stringify({ type: "agent_settled" })}\n`))
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /16 MiB/)
+  assert.deepEqual(frames, [{ type: "agent_settled" }])
 })
 test("MCP todo tool exposes the shared revision contract and returns structured snapshots", async () => {
   if (process.platform === "win32") return
@@ -97,6 +114,60 @@ test("OpenCode command completion does not discard an outstanding form", async (
   driver.questionCount = 0
   await driver.checkCommandIdle()
   assert.equal((await done).stopReason, "end_turn")
+})
+
+test("OpenCode inventory refresh failures do not reject an active prompt", async () => {
+  const updates = [], driver = new OpenCodeDriver({ update: update => updates.push(update) }, "not-spawned")
+  driver.id = "fixture"
+  const done = driver.begin()
+  driver.catalog = async () => { throw new Error("Temporary model inventory failure") }
+  await driver.event({ type: "model.updated", data: {} })
+  assert.ok(driver.turn, "an unrelated catalog failure must not discard the active prompt")
+  assert.ok(updates.some(update => update.sessionUpdate === "notice" && update.message.includes("inventory could not be refreshed")))
+  driver.finish()
+  assert.equal((await done).stopReason, "end_turn")
+})
+
+for (const { name, Driver, setup, output, complete, beforeComplete } of [
+  { name: "Pi", Driver: PiDriver, setup: driver => { driver.operationType = "prompt" }, output: { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Still working" } }, complete: { type: "agent_settled", aborted: false } },
+  { name: "Codex", Driver: CodexDriver, output: { method: "item/agentMessage/delta", params: { threadId: "fixture", itemId: "message", delta: "Still working" } }, complete: { method: "turn/completed", params: { threadId: "fixture", turn: { id: "turn", status: "completed" } } } },
+  { name: "Claude Code", Driver: ClaudeDriver, setup: driver => { driver.tasks = new Set(); driver.blocks = new Map() }, output: { type: "assistant", message: { id: "message", content: [{ type: "text", text: "Still working" }] } }, complete: { type: "result", is_error: false, result: "Finished" }, beforeComplete: { type: "system", subtype: "session_state_changed", state: "idle" } },
+  { name: "OpenCode", Driver: OpenCodeDriver, output: { type: "session.text.delta", data: { sessionID: "fixture", assistantMessageID: "message", delta: "Still working" } }, complete: { type: "session.execution.succeeded", data: { sessionID: "fixture" } } },
+]) test(`${name} keeps a provider-confirmed active turn after a transport error`, async () => {
+  const updates = [], driver = new Driver({ update: update => updates.push(update) }, "not-spawned")
+  driver.id = "fixture"; setup?.(driver)
+  const done = driver.begin()
+  driver.fail(new Error("Temporary transport interruption"), { executionActive: true })
+  assert.ok(driver.turn, "a connection error alone must not mark the provider execution complete")
+  assert.ok(updates.some(update => update.sessionUpdate === "session_error" && update._meta?.executionActive === true))
+  if (complete) {
+    await driver.event(output)
+    if (beforeComplete) await driver.event(beforeComplete)
+    await driver.event(complete)
+  }
+  assert.equal((await done).stopReason, "end_turn")
+  assert.equal(driver.turn, null)
+  assert.ok(updates.some(update => update.sessionUpdate === "agent_message_chunk" && update.content?.text === "Still working"))
+})
+
+test("OpenCode event-stream recovery reconciles provider activity before releasing a turn", async () => {
+  const originalFetch = globalThis.fetch
+  const driver = new OpenCodeDriver({ update() {} }, "not-spawned")
+  driver.url = "http://fixture.invalid"; driver.password = "fixture"; driver.abort = new AbortController(); driver.id = "fixture"
+  const done = driver.begin()
+  let requests = 0
+  globalThis.fetch = async () => {
+    requests++
+    return new Response(new ReadableStream({ start(controller) { controller.close() } }), { status: 200, headers: { "Content-Type": "text/event-stream" } })
+  }
+  driver.reconcileActivity = async () => { driver.finish(); driver.abort.abort() }
+  try {
+    const first = await driver.openEventStream()
+    await driver.watchEvents(first)
+    assert.equal(requests, 2, "the ended event stream is reconnected")
+    assert.equal((await done).stopReason, "end_turn", "provider-confirmed idle completes the held turn")
+    assert.equal(driver.turn, null)
+  } finally { driver.abort.abort(); globalThis.fetch = originalFetch }
 })
 
 test("OpenCode discovery includes nested commands and skills without creating a session", async () => {

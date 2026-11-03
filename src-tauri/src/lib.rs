@@ -121,6 +121,7 @@ pub fn run() {
             agent::still_agent_close,
             agent::still_agent_input,
             agent::still_agent_snapshot,
+            agent::still_agent_reconcile,
             agent::still_agent_flush,
             agent_git::still_agent_git_status,
             agent_git::still_agent_git_diff,

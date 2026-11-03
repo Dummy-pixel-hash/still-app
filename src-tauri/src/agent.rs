@@ -21,7 +21,7 @@ use std::{
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-const FRAME_LIMIT: usize = 2 * 1024 * 1024;
+const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 const HISTORY_LIMIT: usize = 1200;
 /// Prints the remote Node version and one bounded `--version` result per provider.
 /// Runs only where Node exists; a missing/failing probe simply omits version data.
@@ -277,6 +277,7 @@ struct Thread {
     history_lease: Option<std::fs::File>,
     messages: Vec<Event>,
     history_request: Option<PendingHistory>,
+    reconcile_request: Option<PendingReconcile>,
     load_session: bool,
     capability_notice: Option<String>,
     awaiting_catch_up: bool,
@@ -286,6 +287,10 @@ struct PendingHistory {
     request_id: u64,
     message: Event,
     previous_state: String,
+    reply: oneshot::Sender<Result<(), String>>,
+}
+struct PendingReconcile {
+    request_id: u64,
     reply: oneshot::Sender<Result<(), String>>,
 }
 struct PendingConfig {
@@ -1408,6 +1413,7 @@ pub async fn still_agent_start(
         history_lease: Some(history_lease),
         messages,
         history_request: None,
+        reconcile_request: None,
         load_session: false,
         capability_notice: None,
         awaiting_catch_up: false,
@@ -1457,6 +1463,7 @@ async fn run_stream(
 ) {
     if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{transport_lost(&row,&format!("ACP initialize failed: {error}")).await;return}
     let mut buffer = initial_data;
+    let mut discarding_frame = false;
     let mut stage = 0_u8;
     let mut session_id = None;
     let mut permission: Option<(Value, Vec<Value>)> = None;
@@ -1568,7 +1575,47 @@ async fn run_stream(
                 if let Err(error)=send(&channel,&value).await{transport_lost(&row,&format!("SSH stream closed before request send: {error}")).await;return}
             }
           },
-           incoming=channel.wait()=>match incoming{Some(ChannelMsg::Data{data})=>{buffer.extend_from_slice(&data);if buffer.len()>FRAME_LIMIT{fail(&row,"ACP frame exceeded 2 MiB.").await;return}while let Some(end)=buffer.iter().position(|byte|*byte==b'\n'){let frame:Vec<u8>=buffer.drain(..=end).collect();if frame.iter().all(u8::is_ascii_whitespace){continue;}let value=match serde_json::from_slice::<Value>(&frame){Ok(value)=>value,Err(_)=>{fail(&row,"Remote stdout was not valid ACP JSON. Check whether the login shell prints a startup banner.").await;return}};if let Err(error)=handle(channel,&row,&cwd,&mut stage,&mut session_id,&mut permission,value).await{fail(&row,&error).await;return}}},Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{transport_lost(&row,stderr.trim()).await;return},_=>{}}
+           incoming=channel.wait()=>match incoming{
+             Some(ChannelMsg::Data{data})=>{
+               buffer.extend_from_slice(&data);
+               let mut protocol_issue = None;
+               loop {
+                 if discarding_frame {
+                   if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                     buffer.drain(..=end); discarding_frame = false; continue;
+                   }
+                   buffer.clear(); break;
+                 }
+                 let Some(end) = buffer.iter().position(|byte| *byte == b'\n') else {
+                   if buffer.len() > FRAME_LIMIT {
+                     buffer.clear(); discarding_frame = true;
+                     protocol_issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
+                   }
+                   break;
+                 };
+                 if end + 1 > FRAME_LIMIT {
+                   buffer.drain(..=end);
+                   protocol_issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
+                   continue;
+                 }
+                 let frame: Vec<u8> = buffer.drain(..=end).collect();
+                 if frame.iter().all(u8::is_ascii_whitespace) { continue; }
+                 let value = match serde_json::from_slice::<Value>(&frame) {
+                   Ok(value) => value,
+                   Err(_) => { protocol_issue = Some("Remote stdout contained an invalid ACP record; it was skipped."); continue; }
+                 };
+                 if let Err(error) = handle(channel, &row, &cwd, &mut stage, &mut session_id, &mut permission, value).await {
+                   fail(&row, &error).await; return;
+                 }
+               }
+               if let Some(message) = protocol_issue {
+                 if stage < 3 { fail(&row, message).await; return; }
+                 protocol_warning(&row, message).await;
+               }
+             },
+             Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},
+             Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{transport_lost(&row,stderr.trim()).await;return},_=>{}
+           }
         }
     }
 }
@@ -1805,6 +1852,11 @@ async fn handle(
         if let Some(id) = id {
             if let Some(number) = id.as_u64() {
                 let mut thread = row.lock().await;
+                if thread.reconcile_request.as_ref().is_some_and(|pending| pending.request_id == number) {
+                    let pending = thread.reconcile_request.take().unwrap();
+                    let _ = pending.reply.send(Err(message.to_owned()));
+                    return Ok(());
+                }
                 if thread.history_request.as_ref().is_some_and(|pending| pending.request_id == number) {
                     let pending = thread.history_request.take().unwrap();
                     thread.snapshot.state = if error.pointer("/data/historyUncertain").and_then(Value::as_bool) == Some(true) { "submissionUnknown".into() } else { pending.previous_state };
@@ -1949,6 +2001,37 @@ async fn handle(
     }
     if let Some(request_id) = id.as_ref().and_then(Value::as_u64) {
         let mut thread = row.lock().await;
+        if thread.reconcile_request.as_ref().is_some_and(|pending| pending.request_id == request_id) {
+            let pending = thread.reconcile_request.take().unwrap();
+            let Some(busy) = result.get("busy").and_then(Value::as_bool) else {
+                let _ = pending.reply.send(Err("The remote worker did not report its execution state.".into()));
+                return Ok(());
+            };
+            if busy {
+                thread.snapshot.turn_active = true;
+                thread.snapshot.state = if thread.snapshot.pending_input.is_some() || thread.snapshot.pending_permission.is_some() { "inputRequired" } else { "working" }.into();
+                thread.snapshot.last_error = None;
+                let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
+            } else {
+                if result.get("activePrompt").is_some_and(|value| !value.is_null()) {
+                    let _ = pending.reply.send(Err("The remote worker reports no active turn but still identifies a prompt. Check status again before continuing.".into()));
+                    return Ok(());
+                }
+                thread.snapshot.turn_active = false;
+                if thread.prompt.take().is_some() {
+                    thread.snapshot.prompt_id = None;
+                    thread.snapshot.state = "complete".into();
+                    thread.snapshot.last_error = None;
+                    thread.snapshot.recovery_required = false;
+                    thread.recovering_uncertain = false;
+                    let mut event = Event::new("threadComplete"); event.state = Some("complete".into()); event.text = Some("Remote status confirms no active turn. The prompt was not resent.".into()); emit(&mut thread, event).await;
+                } else {
+                    let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
+                }
+            }
+            let _ = pending.reply.send(Ok(()));
+            return Ok(());
+        }
         if thread.history_request.as_ref().is_some_and(|pending| pending.request_id == request_id) {
             let pending = thread.history_request.take().unwrap();
             let sid = result["sessionId"].as_str().filter(|id| !id.is_empty());
@@ -2105,6 +2188,7 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             | "usage_update"
             | "notice"
             | "session_error"
+            | "still_connection_state"
             | "still_message_checkpoint"
     ) {
         return;
@@ -2132,6 +2216,14 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
                 let mut event = Event::new("messageCheckpoint"); event.message_id = message_id.map(str::to_owned); event.checkpoint = Some(u["checkpoint"].clone()); emit(&mut t, event).await;
             }
         }
+        return;
+    }
+    if kind == "still_connection_state" {
+        if t.snapshot.turn_active {
+            t.snapshot.state = if t.snapshot.pending_input.is_some() || t.snapshot.pending_permission.is_some() { "inputRequired" } else { "working" }.into();
+            t.snapshot.last_error = None;
+        }
+        let mut event = Event::new("threadState"); event.state = Some(t.snapshot.state.clone()); emit(&mut t, event).await;
         return;
     }
     let mut e = Event::new("toolUpdate");
@@ -2225,7 +2317,8 @@ async fn update(row: &Arc<Mutex<Thread>>, params: Value) {
             t.snapshot.last_error = e.text.clone();
             t.snapshot.state = failure_state(&t).into();
             e.state = Some(t.snapshot.state.clone());
-            t.snapshot.turn_active = false;
+            let active_reported = u.pointer("/_meta/executionActive").and_then(Value::as_bool) == Some(true);
+            if active_reported { t.snapshot.turn_active = true; }
         }
         "notice" => {
             e.kind = "notice".into();
@@ -2257,11 +2350,21 @@ async fn fail(row: &Arc<Mutex<Thread>>, message: &str) {
         let _ = pending.reply.send(Err(message.into()));
     }
     if let Some(pending) = t.history_request.take() { let _ = pending.reply.send(Err(message.into())); }
+    if let Some(pending) = t.reconcile_request.take() { let _ = pending.reply.send(Err(message.into())); }
     t.snapshot.turn_active = false;
     let mut e = Event::new("threadError");
     e.state = Some(t.snapshot.state.clone());
     e.text = Some(message.into());
     emit(&mut t, e).await
+}
+async fn protocol_warning(row: &Arc<Mutex<Thread>>, message: &str) {
+    let mut thread = row.lock().await;
+    thread.snapshot.last_error = Some(message.to_owned());
+    thread.snapshot.state = failure_state(&thread).into();
+    let mut event = Event::new("threadError");
+    event.state = Some(thread.snapshot.state.clone());
+    event.text = Some(message.to_owned());
+    emit(&mut thread, event).await;
 }
 async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     let mut thread = row.lock().await;
@@ -2282,6 +2385,7 @@ async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     for (_, pending) in thread.config_requests.drain() { let _ = pending.reply.send(Err("Connection interrupted during configuration update.".into())); }
     if let Some(pending) = thread.response_delivery.take() { let _ = pending.reply.send(Err("Response delivery was not confirmed. Reattach to check its status.".into())); }
     if let Some(pending) = thread.history_request.take() { let _ = pending.reply.send(Err("History change was not confirmed. Reattach before retrying.".into())); }
+    if let Some(pending) = thread.reconcile_request.take() { let _ = pending.reply.send(Err("The remote status check was interrupted. Reattach and check again.".into())); }
     let mut event = Event::new("threadState"); event.state = Some("detached".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread,event).await;
 }
 fn failure_state(thread: &Thread) -> &'static str {
@@ -2463,8 +2567,9 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     let mut thread = row.lock().await;
     if !matches!(
         thread.snapshot.state.as_str(),
-        "working" | "complete" | "cancelled"
+        "working" | "complete" | "cancelled" | "error"
     ) || thread.snapshot.turn_active
+        || thread.prompt.is_some()
         || !thread.config_requests.is_empty()
         || thread.history_request.is_some()
     {
@@ -2555,8 +2660,9 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
     if thread.snapshot.turn_active
         || !matches!(
             thread.snapshot.state.as_str(),
-            "working" | "complete" | "cancelled"
+            "working" | "complete" | "cancelled" | "error"
         )
+        || thread.prompt.is_some()
         || !thread.config_requests.is_empty()
         || thread.history_request.is_some()
     {
@@ -2692,7 +2798,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             prompt: snapshot.prompt_id.clone(), snapshot, app, outbound, cancel, close,
             permission: None, pending_input_id: None, config_requests: HashMap::new(), response_delivery: None,
             transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
-            unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None,
+            unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None, reconcile_request: None,
             load_session: false, capability_notice: None,
             awaiting_catch_up: true, capability_remote_cursor,
         }));
@@ -2716,6 +2822,34 @@ pub async fn still_agent_snapshot(args: IdArgs) -> Result<Snapshot, StillError> 
     let mut snapshot = thread.snapshot.clone();
     snapshot.active_message_ids = Some(thread.messages.iter().filter_map(|message| message.message_id.clone()).collect());
     Ok(snapshot)
+}
+#[tauri::command]
+pub async fn still_agent_reconcile(args: IdArgs) -> Result<(), StillError> {
+    let row = find_thread(&args.execution_id).await?;
+    let mut thread = row.lock().await;
+    if !thread.snapshot.persistent || !thread.transport_active {
+        return Err(StillError::friendly("agent_reconcile_offline", "Reconnect this conversation to its server before checking the remote agent."));
+    }
+    if thread.reconcile_request.is_some() {
+        return Err(StillError::friendly("agent_reconcile_busy", "A status check is already in progress."));
+    }
+    let request_id = next_request_id();
+    let (reply, receive) = oneshot::channel();
+    thread.reconcile_request = Some(PendingReconcile { request_id, reply });
+    if thread.outbound.send(json!({"jsonrpc":"2.0","id":request_id,"method":"_still/status","params":{}})).is_err() {
+        thread.reconcile_request = None;
+        return Err(StillError::friendly("agent_reconcile_offline", "The status request could not reach the remote worker."));
+    }
+    drop(thread);
+    match tokio::time::timeout(Duration::from_secs(15), receive).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(message))) => Err(StillError::friendly("agent_reconcile_failed", message)),
+        _ => {
+            let mut thread = row.lock().await;
+            if thread.reconcile_request.as_ref().is_some_and(|pending| pending.request_id == request_id) { thread.reconcile_request = None; }
+            Err(StillError::friendly("agent_reconcile_unknown", "The server did not confirm the agent's status. No prompt was resent; try the status check again."))
+        }
+    }
 }
 #[tauri::command]
 pub async fn still_agent_cancel(args: IdArgs) -> Result<(), StillError> {

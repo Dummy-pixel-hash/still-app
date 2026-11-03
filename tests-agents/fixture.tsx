@@ -66,7 +66,7 @@ const h = {
   pendingGitStatuses: [] as Array<() => void>, pendingGitDiffs: [] as Array<() => void>,
   releaseGitStatus(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitStatuses[index]?.() },
   releaseGitDiff(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitDiffs[index]?.() },
-  trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], deferStartup: false, startupFail: false,
+  trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], reconciles: [] as string[], reconcileActive: undefined as boolean | undefined, reconcileFail: false, deferStartup: false, startupFail: false,
   releaseStartup: () => {},
   deferChecks: false,
   pendingChecks: [] as Array<() => void>,
@@ -86,7 +86,7 @@ const h = {
     if (event.type === "userMessage") { row.turnActive = true; row.state = "working" }
     if (event.type === "threadComplete") { row.turnActive = false; row.state = event.state || "working"; row.pendingPermission = undefined; row.pendingInput = undefined; row.lastError = undefined }
     if (event.type === "threadState" && event.state) { row.state = event.state; if (event.state === "working") { row.pendingPermission = undefined; row.pendingInput = undefined } }
-    if (event.type === "threadError") { row.state = event.state || "error"; row.lastError = event.text; row.turnActive = false; row.pendingInput = undefined; row.pendingPermission = undefined }
+    if (event.type === "threadError") { row.state = event.state || "error"; row.lastError = event.text; row.turnActive = event.turnActive ?? false; row.pendingInput = undefined; row.pendingPermission = undefined }
     if (event.type === "historyReverted") { row.state = "working"; row.lastError = undefined }
     if (event.type === "permission") { row.pendingPermission = event.permission; row.state = "inputRequired" }
     if (event.type === "input") { row.pendingInput = event.input; row.state = "inputRequired" }
@@ -113,6 +113,11 @@ const h = {
   },
   get current() { return [...snapshots.keys()].at(-1)! },
   finish() { h.emit(h.current, { type: "threadComplete", state: "working" }) },
+  reconcile() {
+    const row = snapshots.get(h.current)!
+    if (h.reconcileActive === false) h.emit(row.executionId, { type: "threadComplete", state: "complete", turnActive: false })
+    else h.emit(row.executionId, { type: "threadState", state: "working", turnActive: true })
+  },
   approval() { h.emit(h.current, { type: "permission", permission: { requestId: 91, sessionId: "acp-fixture", toolCallId: "shell", title: "Run the test suite", command: "npm test", options: [{ optionId: "yes", name: "Allow once", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } }) },
   populate() {
     const id = h.current
@@ -194,10 +199,11 @@ registerNativeBridge({
     return structuredClone(row)
   },
   agentSnapshot: async id => { h.snapshotReads.push(id); if (h.failSnapshot) throw new Error("Agent connection unavailable"); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row) throw new Error("Agent execution unavailable"); snapshots.set(id, row); return structuredClone(row) },
+  agentReconcile: async id => { h.reconciles.push(id); if (h.reconcileFail) throw new Error("Remote status check failed"); const row = snapshots.get(id); if (!row) throw new Error("Agent execution unavailable"); h.reconcile() },
   agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
-    if (h.rejectSend) throw new Error("SSH disconnected. Submission is uncertain.")
+    if (h.rejectSend && !h.completeBeforeReject) throw new Error("SSH disconnected. Submission is uncertain.")
     const row = snapshots.get(id)!
     h.sends.push(message)
     h.sentConfigs.push({ agent: row.agentId, model: row.configOptions.find(option => option.category === "model")?.currentValue })
@@ -205,6 +211,7 @@ registerNativeBridge({
     h.emit(id, { type: "userMessage", text: message, messageId })
     h.emit(id, { type: "assistantChunk", text: "First " }); h.emit(id, { type: "assistantChunk", text: "second " }); h.emit(id, { type: "assistantChunk", text: "third." })
     if (row.historyCapabilities?.revert) h.emit(id, { type: "messageCheckpoint", messageId, checkpoint: { provider: row.agentId, id: messageId } })
+    if (h.completeBeforeReject) { h.emit(id, { type: "threadComplete", state: "complete" }); throw new Error("The reply arrived before its transport acknowledgement was lost.") }
   },
   agentUploadAttachment: async (nativeSessionId, conversationId, attachmentId, fileName, base64Data) => {
     if (h.rejectUpload) throw new Error("SFTP disconnected during upload")
@@ -251,7 +258,7 @@ registerNativeBridge({
     h.emit(id, { type: "threadState", state: "working" })
     if (h.unknownResponse) throw new Error("Response acknowledgement was lost")
   },
-  agentCancel: async id => { h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); h.finish() },
+  agentCancel: async id => { h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); await new Promise<void>(resolve => setTimeout(resolve, 0)); h.finish() },
   agentClose: async id => { h.closes.push(id); snapshots.delete(id); sinks.delete(id) },
   agentRespondInput: async (id, requestId, answers) => {
     const row = snapshots.get(id)!, request = row.pendingInput

@@ -9,8 +9,9 @@ test.beforeEach(async ({ page }) => {
 async function connect(page: Page, agent = "opencode", firstMessage?: string) {
   if (!await page.locator('.agent-context-line').isVisible()) await addFolder(page, "/srv/still")
   await page.locator('[data-config-id="provider"] > button').click()
-  await page.getByRole("option", { name: agent === "pi" ? /^Pi\b/ : agent === "claude" ? /^Claude Code\b/ : agent === "codex" ? /^Codex\b/ : /^OpenCode\b/ }).click()
-  const label = agent === "pi" ? "Pi" : agent === "claude" ? "Claude Code" : agent === "codex" ? "Codex" : "OpenCode"
+  const labels: Record<string, string> = { pi: "Pi", claude: "Claude Code", codex: "Codex", gemini: "Gemini CLI", opencode: "OpenCode" }
+  const label = labels[agent] || "OpenCode"
+  await page.getByRole("option", { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`) }).click()
   await page.getByLabel("Message agent").fill(firstMessage || `New ${label} conversation`)
   await page.getByRole("button", { name: "Send message", exact: true }).click()
   await expect(page.locator(".agent-message-assistant").last()).toContainText("First second third.")
@@ -254,6 +255,50 @@ test("drafts persist across switching and uncertain submissions cannot be resent
   await expect(page.getByRole("alert")).toContainText("Submission is uncertain")
   await expect(page.getByLabel("Message agent")).toHaveValue("Keep this draft")
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
+})
+
+test("a late send-acknowledgement failure cannot replace a provider-confirmed completion with uncertainty", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.rejectSend = true; h.completeBeforeReject = true })
+  await page.getByLabel("Message agent").fill("The provider completed before the acknowledgement was lost")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user")).toHaveCount(2)
+  await expect(page.locator(".agent-error")).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Model: Model A", exact: true })).toBeEnabled()
+  await expect(page.getByLabel("Message agent")).toHaveValue("")
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toHaveLength(2)
+})
+
+for (const agent of ["opencode", "pi", "codex", "claude", "gemini"]) test(`${agent} error keeps active work stoppable and recovers after remote status confirms idle`, async ({ page }) => {
+  await page.evaluate(() => { (window as any).agentFixture.persistent = true })
+  await connect(page, agent)
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "error", turnActive: true, text: "Provider updates were interrupted" })
+  })
+  await expect(page.locator(".agent-status")).toContainText("still running")
+  await expect(page.getByRole("alert")).toContainText("may still be working")
+  await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Model: Model A", exact: true })).toBeDisabled()
+  await page.getByLabel("Message agent").fill("Preserve this follow-up")
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeVisible()
+  await page.evaluate(() => { (window as any).agentFixture.reconcileActive = false })
+  await page.getByRole("button", { name: "Check remote status", exact: true }).click()
+  await expect(page.getByRole("alert")).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Model: Model A", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.reconciles)).toHaveLength(1)
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toHaveLength(1)
+})
+
+test("a confirmed stopped error keeps model, follow-up, and checkpointed history controls available", async ({ page }) => {
+  await connect(page, "pi", "Checkpoint survives an error")
+  await page.evaluate(() => (window as any).agentFixture.emit((window as any).agentFixture.current, { type: "threadError", state: "error", turnActive: false, text: "The previous turn stopped" }))
+  await expect(page.locator(".agent-message-actions").getByRole("button", { name: "Revert", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Model: Model A", exact: true })).toBeEnabled()
+  await page.getByLabel("Message agent").fill("Continue after the failed turn")
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled()
 })
 
 test("small windows retain the composer and keyboard focus", async ({ page }) => {

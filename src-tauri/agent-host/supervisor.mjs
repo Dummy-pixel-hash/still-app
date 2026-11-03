@@ -47,13 +47,27 @@ const writeLine = (target, frame) => target.write(JSON.stringify(frame) + "\n")
 
 function frames(read, onFrame, onError) {
   let buffer = Buffer.alloc(0)
+  let discarding = false
   read.on("data", bytes => {
     buffer = Buffer.concat([buffer, Buffer.from(bytes)])
-    if (buffer.length > 4 * 1024 * 1024) { onError(new Error("Persistent agent frame exceeds 4 MiB")); buffer = Buffer.alloc(0); return }
-    let end
-    while ((end = buffer.indexOf(10)) !== -1) {
+    for (;;) {
+      if (discarding) {
+        const end = buffer.indexOf(10)
+        if (end < 0) { buffer = Buffer.alloc(0); return }
+        buffer = buffer.subarray(end + 1); discarding = false
+        continue
+      }
+      const end = buffer.indexOf(10)
+      if (end < 0) {
+        if (buffer.length > 16 * 1024 * 1024) {
+          onError(new Error("Persistent agent frame exceeded 16 MiB and was discarded"))
+          buffer = Buffer.alloc(0); discarding = true
+        }
+        return
+      }
       const line = buffer.subarray(0, end).toString("utf8"); buffer = buffer.subarray(end + 1)
       if (!line.trim()) continue
+      if (Buffer.byteLength(line) > 16 * 1024 * 1024) { onError(new Error("Persistent agent frame exceeded 16 MiB and was discarded")); continue }
       try { onFrame(JSON.parse(line)) } catch (error) { onError(error) }
     }
   })
@@ -377,6 +391,11 @@ async function worker() {
     }
     if (owner !== socket) throw new Error("Attach before sending agent messages")
     if (typeof request.id === "number" && Number.isSafeInteger(request.id)) maxRequestId = Math.max(maxRequestId, request.id)
+    if (request.method === "_still/status") {
+      if (childEnded || closed) { reject(socket, request, "The remote agent worker has ended; resume its saved provider session explicitly."); return }
+      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, activePrompt } })
+      return
+    }
     if (request.method === "_still/shutdown") {
       closing = true; closed = true; remember()
       const done = () => { writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { closed: true } }); socket.end(); for (const client of clients) if (client !== socket) client.end(); server.close() }
