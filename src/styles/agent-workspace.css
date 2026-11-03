@@ -29,6 +29,17 @@
   isolation: isolate;
 }
 .agent-workspace * { box-sizing: border-box; }
+.agent-workspace,
+.agent-workspace * {
+  scrollbar-width: none !important;
+  scrollbar-color: transparent transparent !important;
+}
+.agent-workspace::-webkit-scrollbar,
+.agent-workspace *::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
 .agent-workspace :is(button, input, select, textarea) { font: inherit; }
 .agent-workspace button { cursor: pointer; border: 0; transition: background 120ms, color 120ms, border-color 120ms; }
 .agent-workspace button:disabled { opacity: .45; cursor: not-allowed; }
@@ -402,7 +413,8 @@
 .agent-attachment-error { margin: 7px 3px 0; color: var(--ag-red); font-size: 12px; }
 .agent-attachment-note { margin: -7px 2px 11px; color: var(--ag-dim); font-size: 11px; }
 .agent-composer:focus-within { border-color: #6593d9; background: #20242b; }
-.agent-composer textarea { display: block; width: 100%; min-width: 0; min-height: 55px; max-height: 156px; border: 0; outline: none !important; background: none; color: var(--ag-text); font: 15px/1.7 var(--font-sans); resize: none; padding: 0; margin: 0 0 14px; scrollbar-width: thin; }
+.agent-composer textarea { display: block; width: 100%; min-width: 0; min-height: 55px; max-height: 156px; border: 0; outline: none !important; background: none; color: var(--ag-text); font: 15px/1.7 var(--font-sans); resize: none; padding: 0; margin: 0 0 14px; scrollbar-width: none; }
+.agent-composer textarea::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .agent-composer-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; min-width: 0; }
 .agent-composer-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; }
 .agent-composer-controls > .agent-picker:not(:first-child) { margin-left: 3px; }
@@ -552,6 +564,7 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-connection-notice code { font: 11px var(--font-mono); overflow-wrap: anywhere; }
 .agent-error { background: #34262c; border: 1px solid #754952; color: #f1c5cd; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; font-size: 12px; line-height: 1.7; max-height: 180px; overflow: auto; overflow-wrap: anywhere; }
 .agent-error > span { display: block; }
+.agent-error > p { margin: 5px 0 0; color: inherit; opacity: .9; }
 .agent-error > button { margin-top: 9px; }
 .agent-storage-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 24px; background: #363226; color: #e9d6b0; font-size: 12px; line-height: 1.6; }
 .agent-storage-notice span { overflow-wrap: anywhere; }
