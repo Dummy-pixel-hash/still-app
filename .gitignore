@@ -12,11 +12,12 @@ test-results/
 playwright-report/
 .impeccable/
 
-# local docs & media scratch (videos, notes) — never committed
+# Local docs & media scratch; keep public guides and README screenshots.
 !docs/
 docs/*
 !docs/agents-t3-review.md
 !docs/agents-ui-and-persistence.md
+!docs/images/
 !docs/todo/
 
 # OS / editors
