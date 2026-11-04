@@ -9,7 +9,8 @@ laptop doesn't have to babysit it.
 
 > Your connection can drop. Your work doesn't have to.
 
-[![Latest release](https://img.shields.io/github/v/release/Dummy-pixel-hash/still-app)](https://github.com/Dummy-pixel-hash/still-app/releases/latest)
+[![Latest stable release](https://img.shields.io/github/v/release/Dummy-pixel-hash/still-app)](https://github.com/Dummy-pixel-hash/still-app/releases/latest)
+[![Agents preview](https://img.shields.io/badge/Agents_preview-v0.1.1-e58e7b)](https://github.com/Dummy-pixel-hash/still-app/releases/tag/v0.1.1)
 [![Windows ARM64 build](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml/badge.svg)](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-arm64.yml)
 [![Windows x64 build](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-x64.yml/badge.svg)](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-x64.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
@@ -38,25 +39,27 @@ You don't need to create a terminal card before using Agents.
 
 ## Download
 
+**Want the Agents panel? Get the [v0.1.1 Preview](https://github.com/Dummy-pixel-hash/still-app/releases/tag/v0.1.1).**
+It includes 11 verified packages, SHA-256 checksums, and a build manifest. Pick the
+package that matches your computer below—no GitHub sign-in or workflow ZIP needed.
+
 | Your computer | Where to get Still |
 | --- | --- |
-| Windows ARM64 | [Latest release](https://github.com/Dummy-pixel-hash/still-app/releases/latest) — choose the ARM64 setup `.exe` or `.msi`. |
-| Windows x64 | [Windows x64 workflow](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/windows-x64.yml) — download an artifact from a successful run. |
-| Linux x64 / ARM64 | [Linux workflow](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/linux.yml) — choose your architecture's `.AppImage` or `.deb`. |
-| macOS Apple Silicon / Intel | [macOS workflow](https://github.com/Dummy-pixel-hash/still-app/actions/workflows/macos.yml) — development `.dmg` builds; unsigned and not notarized. |
+| Windows x64 · Intel / AMD | [Setup .exe](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_windows-x64-setup.exe) · [MSI](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_windows-x64.msi) |
+| Windows ARM64 | [Setup .exe](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_windows-arm64-setup.exe) · [MSI](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_windows-arm64.msi) |
+| Linux x64 · Intel / AMD | [AppImage](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-x64.AppImage) · [.deb](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-x64.deb) · [.rpm](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-x64.rpm) |
+| Linux ARM64 | [AppImage](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-arm64.AppImage) · [.deb](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-arm64.deb) · [.rpm](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_linux-arm64.rpm) |
+| macOS Intel | [DMG](https://github.com/Dummy-pixel-hash/still-app/releases/download/v0.1.1/Still_0.1.1_macos-x64.dmg) — unsigned and not notarized. |
+| macOS Apple Silicon | Unavailable in this preview: GitHub could not allocate an ARM64 runner after two attempts. [Build details](https://github.com/Dummy-pixel-hash/still-app/actions/runs/41870543271). |
 
-> [!IMPORTANT]
-> The screenshots and Agents walkthrough describe the current source. The latest
-> published release, **v0.1.0**, predates the Agents panel. For these newer features,
-> use a successful workflow build from the current branch or [build from source](#develop).
-> Workflow artifacts require a GitHub sign-in and may expire; they're development builds,
-> not a stable release channel.
+> [!WARNING]
+> **v0.1.1 is a preview with known UI issues**, including narrow-window navigation
+> and the initial prompt remaining in the composer. Read the
+> [release notes](https://github.com/Dummy-pixel-hash/still-app/releases/tag/v0.1.1)
+> before installing. The latest stable release, **v0.1.0**, is unchanged and predates
+> Agents. Windows installers are unsigned; macOS builds are unsigned and not notarized.
 
-For a workflow download, open a successful run, scroll to **Artifacts**, download the
-package for your architecture, and extract the ZIP before opening the installer or app.
-
-On Linux, launch the packaged AppImage—not the standalone `still-app` verification
-binary included in the artifact:
+On Linux, make the downloaded AppImage executable, then launch it:
 
 ```sh
 chmod +x Still_*.AppImage
