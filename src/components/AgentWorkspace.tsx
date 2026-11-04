@@ -46,6 +46,7 @@ import "../styles/agent-materials.css"
 import "../styles/agent-changes.css"
 
 type Props = {
+  closing?: boolean
   session: Session | null
   sessions?: Session[]
   onSelectHost?: (session: Session | null) => void
@@ -75,7 +76,7 @@ function relativeActivity(at: number) {
 }
 function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
 
-export default function AgentWorkspace({ session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
   const [hydrated, setHydrated] = useState(false)
@@ -696,7 +697,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const composerNotice = discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : null
   const nativeShell = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
-  return <section ref={surface} className={`agent-workspace${review && current ? " is-reviewing" : ""}`} data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
+  return <section ref={surface} className={`agent-workspace${closing ? " is-closing" : ""}${review && current ? " is-reviewing" : ""}`} data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
     onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-capabilities-popover')) returnFocus.current = e.target as HTMLElement }}
     onPointerDown={e => { if (!(e.target as HTMLElement).closest(".agent-thread-menu,.agent-thread-more")) setMenu(null) }}
     onKeyDown={e => {

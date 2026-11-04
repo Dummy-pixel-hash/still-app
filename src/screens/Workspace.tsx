@@ -194,6 +194,8 @@ export default function Workspace() {
   const [showSettings, setShowSettings] = useState(false)
   const [agentFor, setAgentFor] = useState<Session | null>(null)
   const [agentsOpen, setAgentsOpen] = useState(false)
+  const [agentsClosing, setAgentsClosing] = useState(false)
+  const agentsCloseTimer = useRef(0)
   const agentSaveError = useAgentStorageError()
 
   const [authFor, setAuthFor] = useState<{
@@ -970,20 +972,50 @@ export default function Workspace() {
 
   const handleStartAgentFromCard = useCallback((session: Session) => {
     setMenuId(null)
+    window.clearTimeout(agentsCloseTimer.current)
+    setAgentsClosing(false)
     setAgentFor(session)
     setAgentsOpen(true)
   }, [])
 
   const closeAgents = useCallback(() => {
+    if (agentsClosing) return
     const pending = authForRef.current
     if (pending && agentsOpen) {
       authForRef.current = null
       setAuthFor(null)
       pending.resolve(null)
     }
-    setAgentFor(null)
-    setAgentsOpen(false)
-  }, [agentsOpen])
+    setAgentsClosing(true)
+    agentsCloseTimer.current = window.setTimeout(() => {
+      setAgentFor(null)
+      setAgentsOpen(false)
+      setAgentsClosing(false)
+    }, prefersReducedMotion() ? 0 : 150)
+  }, [agentsClosing, agentsOpen])
+
+  // Open or dismiss the agent workspace without sending the shortcut to a
+  // focused terminal or composer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat || e.isComposing || !(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return
+      if (e.key.toLowerCase() !== "a") return
+      e.preventDefault()
+      e.stopPropagation()
+      if (agentsClosing) {
+        window.clearTimeout(agentsCloseTimer.current)
+        setAgentsClosing(false)
+      } else if (agentsOpen) closeAgents()
+      else {
+        window.clearTimeout(agentsCloseTimer.current)
+        setAgentsClosing(false)
+        setAgentFor(null)
+        setAgentsOpen(true)
+      }
+    }
+    window.addEventListener("keydown", onKey, { capture: true })
+    return () => window.removeEventListener("keydown", onKey, { capture: true })
+  }, [agentsClosing, agentsOpen, closeAgents])
 
 
   // Stable handlers: the card grid is memo()'d, so re-creating these inline
@@ -1137,7 +1169,7 @@ export default function Workspace() {
                 <button
                   type="button"
                   title="Open your projects and conversations"
-                  onClick={() => { setAgentFor(null); setAgentsOpen(true) }}
+                  onClick={() => { window.clearTimeout(agentsCloseTimer.current); setAgentsClosing(false); setAgentFor(null); setAgentsOpen(true) }}
                   className="flex h-8 items-center rounded-full border border-white/10 px-3.5 text-[12px] text-dim transition hover:border-white/25 hover:text-fg"
                 >
                   Agents
@@ -1621,8 +1653,8 @@ export default function Workspace() {
         </Suspense>
       ) : null}
 
-      {!agentsOpen && agentSaveError && <div className="fixed bottom-5 left-1/2 z-[64] flex max-w-[90vw] -translate-x-1/2 items-center gap-4 rounded-lg bg-[#363226] px-4 py-3 text-[12px] text-[#e9d6b0]" role="alert"><span>Agent history needs attention: {agentSaveError}</span><button className="shrink-0 underline" onClick={() => { setAgentFor(null); setAgentsOpen(true) }}>Open conversations</button></div>}
-      {agentsOpen ? <Suspense fallback={<div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#151517] text-[14px] text-[#a4a4ae]" role="status">Opening conversations…</div>}><RemoteAgentWorkspace session={agentFor} sessions={store.sessions} onNeedAuth={onNeedAuth} keyTextFor={keyTextFor} onClose={closeAgents}
+      {!agentsOpen && agentSaveError && <div className="fixed bottom-5 left-1/2 z-[64] flex max-w-[90vw] -translate-x-1/2 items-center gap-4 rounded-lg bg-[#363226] px-4 py-3 text-[12px] text-[#e9d6b0]" role="alert"><span>Agent history needs attention: {agentSaveError}</span><button className="shrink-0 underline" onClick={() => { window.clearTimeout(agentsCloseTimer.current); setAgentsClosing(false); setAgentFor(null); setAgentsOpen(true) }}>Open conversations</button></div>}
+      {agentsOpen ? <Suspense fallback={<div className="fixed inset-0 z-[65] flex items-center justify-center bg-[#151517] text-[14px] text-[#a4a4ae]" role="status">Opening conversations…</div>}><RemoteAgentWorkspace closing={agentsClosing} session={agentFor} sessions={store.sessions} onNeedAuth={onNeedAuth} keyTextFor={keyTextFor} onClose={closeAgents}
         onOpenTerminal={target => { closeAgents(); openSession(target, document.querySelector<HTMLElement>(`[data-card="${CSS.escape(target.id)}"]`)) }} /></Suspense> : null}
 
       {authFor ? (

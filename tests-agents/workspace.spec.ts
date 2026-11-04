@@ -32,6 +32,38 @@ async function refreshSession(page: Page) {
   await page.getByLabel("Search commands").press("Enter")
 }
 
+test("Agent interface hides scrollbars without disabling scrolling", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 500 })
+  await page.goto("/tests-agents/fixture.html?demo")
+  await page.locator(".agent-recent").first().click()
+  const composer = page.getByLabel("Message agent")
+  await composer.fill("A long draft line to overflow the composer textarea\n".repeat(80))
+
+  const state = await page.evaluate(() => {
+    const textarea = document.querySelector<HTMLTextAreaElement>(".agent-composer textarea")!
+    const conversation = document.querySelector<HTMLElement>(".agent-conversation")!
+    textarea.scrollTop = 40
+    conversation.scrollTop = 100
+    return {
+      textareaScrollbar: getComputedStyle(textarea).scrollbarWidth,
+      textareaWebkitScrollbar: getComputedStyle(textarea, "::-webkit-scrollbar").display,
+      textareaScrolls: textarea.scrollHeight > textarea.clientHeight && textarea.scrollTop > 0,
+      conversationScrollbar: getComputedStyle(conversation).scrollbarWidth,
+      conversationWebkitScrollbar: getComputedStyle(conversation, "::-webkit-scrollbar").display,
+      conversationScrolls: conversation.scrollHeight > conversation.clientHeight && conversation.scrollTop > 0,
+      sidebarScrollbar: getComputedStyle(document.querySelector<HTMLElement>(".agent-thread-list")!).scrollbarWidth,
+    }
+  })
+
+  expect(state.textareaScrollbar).toBe("none")
+  expect(state.textareaWebkitScrollbar).toBe("none")
+  expect(state.textareaScrolls).toBe(true)
+  expect(state.conversationScrollbar).toBe("none")
+  expect(state.conversationWebkitScrollbar).toBe("none")
+  expect(state.conversationScrolls).toBe(true)
+  expect(state.sidebarScrollbar).toBe("none")
+})
+
 test("discovery is automatic and the installed base CLIs use project/path overrides", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.checks.length)).toBe(1)
   await page.getByRole("button", { name: "Workspace options" }).click()
@@ -441,6 +473,18 @@ test("closing Agents cancels pending authentication without creating a terminal"
   await page.getByRole("button", { name: "Close agent workspace" }).click()
   await expect(page.getByRole("dialog", { name: "Agents on Development" })).toHaveCount(0)
   await expect(page.getByRole("dialog", { name: "Development terminal" })).toHaveCount(0)
+})
+
+test("Ctrl/Cmd+Shift+A toggles the agent workspace", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?workspace")
+  await expect(page.getByRole("button", { name: "Close agent workspace" })).toHaveCount(0)
+
+  await page.keyboard.press("ControlOrMeta+Shift+a")
+  await expect(page.getByRole("button", { name: "Close agent workspace" })).toBeVisible()
+
+  await page.keyboard.press("ControlOrMeta+Shift+a")
+  await expect(page.locator(".agent-workspace")).toHaveClass(/is-closing/)
+  await expect(page.getByRole("button", { name: "Close agent workspace" })).toHaveCount(0)
 })
 
 test("unknown and changed host keys remain explicit decisions in the Agents view", async ({ page }) => {
