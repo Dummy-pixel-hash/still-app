@@ -320,7 +320,14 @@
 .agent-work-group > summary > svg { color: #baabb4; }
 .agent-work-group > summary > svg:last-child { flex: 0 0 auto; margin-left: auto; transition: transform 160ms var(--ag-ease); }
 .agent-work-group[open] > summary > svg:last-child { transform: rotate(90deg); }
-.agent-work-summary { min-width: 0; overflow: hidden; color: #c9bdc5; text-overflow: ellipsis; white-space: nowrap; }
+.agent-work-summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; color: #c9bdc5; white-space: nowrap; animation: agent-activity-update 170ms var(--ag-ease) both; }
+.agent-work-action { flex: 0 0 auto; color: #e0d9de; }
+.agent-work-summary code, .agent-work-reasoning { min-width: 0; overflow: hidden; color: #b7c6dc; font: 11px/1.45 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.agent-work-reasoning { font: 12px/1.45 var(--font-sans); color: #c7bdc6; }
+.agent-work-group > summary .agent-work-status { flex: 0 0 auto; color: var(--ag-faint); }
+.agent-work-group.is-failed > summary .agent-work-status { color: #efadb7; }
+@keyframes agent-activity-update { from { opacity: .55; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .agent-work-summary { animation: none; } }
 .agent-work-group.is-complete > summary > svg:first-child { color: #aab29e; }
 .agent-work-group > summary:focus-visible { outline: 2px solid var(--ag-accent); outline-offset: 3px; border-radius: 3px; }
 .agent-workspace ::selection { background: #5999f64d; }

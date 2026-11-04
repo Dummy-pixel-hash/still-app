@@ -71,22 +71,28 @@ const Message = memo(function Message({ item, author, agentId, actions }: { item
 function Activity({ group }: { group: ActivityGroup }) {
   const tools = group.items.filter(item => item.kind === "tool")
   const failedCount = tools.filter(item => item.status === "failed" || item.status === "error").length
-  const active = tools.some(item => item.status === "running" || item.status === "in_progress")
-  const stopped = tools.some(item => item.status === "cancelled" || item.status === "interrupted")
+  const last = group.items[group.items.length - 1]
+  const runningCount = tools.filter(item => item.status === "running" || item.status === "in_progress").length
   const allDone = tools.length > 0 && tools.every(item => item.status === "completed")
-  const pending = tools.some(item => !["completed", "failed", "error", "cancelled", "interrupted", "running", "in_progress"].includes(item.status || ""))
-  const counts = new Map<string, number>()
-  for (const item of tools) {
-    const kind = toolLabel(item).kind
-    const label = kind === "read" ? "read" : kind === "search" ? "search" : kind === "execute" ? "command" : kind === "edit" ? "edit" : "operation"
-    counts.set(label, (counts.get(label) || 0) + 1)
-  }
-  const plurals: Record<string, string> = { read: "reads", search: "searches", command: "commands", edit: "edits", operation: "operations" }
-  const countSummary = [...counts].map(([label, count]) => `${count} ${count === 1 ? label : plurals[label]}`).join(" · ") || (group.items.some(item => item.kind === "reasoning") ? "Reasoning" : "")
-  const status = group.failed ? "Interrupted" : failedCount ? `${failedCount} failed` : active ? "Working" : group.active ? "Thinking" : stopped ? "Stopped" : pending ? "Pending" : "Complete"
-  const summary = ["Activity", countSummary, status].filter(Boolean).join(" · ")
-  const icon = allDone && !failedCount && !group.failed ? "check" : "terminal"
-  return <AgentDisclosure id={group.id} className={`agent-work-group${group.failed || failedCount ? " is-failed" : ""}${allDone && !failedCount ? " is-complete" : ""}`} summary={<><AgentIcon name={icon} size={14} /><span className="agent-work-summary">{summary}</span><AgentIcon name="chevron" size={12} /></>}>
+  const reasoning = last?.kind === "reasoning"
+  const label = last && !reasoning ? toolLabel(last) : undefined
+  const detail = label?.detail || ""
+  const inProgress = last?.status === "running" || last?.status === "in_progress" || (reasoning && group.active)
+  const stopped = last?.status === "cancelled" || last?.status === "interrupted"
+  const failed = last?.status === "failed" || last?.status === "error"
+  const action = reasoning ? (inProgress ? "Thinking" : "Reasoned")
+    : failed ? `${label?.action || "Operation"} failed`
+      : stopped ? `${label?.action || "Operation"} stopped`
+        : inProgress ? ({ Read: "Reading", Edit: "Editing", Write: "Writing", Search: "Searching", Run: "Running" }[label?.action || ""] || label?.action || "Working")
+          : last?.status === "completed" ? ({ Read: "Read", Edit: "Edited", Write: "Wrote", Search: "Searched", Run: "Ran" }[label?.action || ""] || label?.action || "Completed")
+            : label?.action || "Working"
+  const excerpt = last?.text.replace(/\s+/g, " ").trim()
+  const concurrent = runningCount > 1 ? `+${runningCount - 1} running` : ""
+  const status = failedCount > 0 ? `${failedCount} failed` : group.failed ? "Interrupted" : concurrent || (failed ? "Failed" : stopped ? "Stopped" : inProgress ? "In progress" : allDone ? "Complete" : "")
+  const icon = reasoning ? "terminal" : failed ? "file" : label?.kind === "execute" ? "terminal" : label?.kind === "search" ? "search" : label?.kind === "edit" ? "edit" : allDone && !failedCount ? "check" : "file"
+  return <AgentDisclosure id={group.id} className={`agent-work-group${group.failed || failedCount ? " is-failed" : ""}${allDone && !failedCount && !group.failed ? " is-complete" : ""}`} summary={<><AgentIcon name={icon} size={14} /><span className="agent-work-summary" key={last?.id}><span className="agent-work-action">{action}</span>{reasoning
+      ? excerpt && <span className="agent-work-reasoning">{excerpt}</span>
+      : detail && <code title={detail}>{detail}</code>}</span>{status && <small className="agent-work-status">{status}</small>}<AgentIcon name="chevron" size={12} /></>}>
     <div className="agent-work-group-body">{group.items.map(item => item.kind === "reasoning"
       ? <section className="agent-activity-reasoning" key={item.id}><h3>Reasoning</h3><AgentMessage text={item.text} /></section>
       : <ToolRow key={item.id} item={item} />)}</div>
