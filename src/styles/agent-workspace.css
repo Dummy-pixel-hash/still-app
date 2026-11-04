@@ -696,11 +696,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-repository-empty { display: flex; align-items: center; justify-content: center; flex: 1; flex-direction: column; min-height: 115px; padding: 22px; color: #899cbb; text-align: center; }
 .agent-repository-empty h3 { margin: 12px 0 5px; color: #dbe5f3; font-size: 13px; font-weight: 500; }
 .agent-repository-empty p { max-width: 300px; margin: 0; color: var(--ag-faint); font-size: 11px; line-height: 1.6; }
-.agent-review-scrim { display: none; }
-.agent-main.has-review .agent-composer-area { padding: 10px 20px 14px; }
-.agent-main.has-review .agent-conversation { padding: 25px 22px 20px; }
-.agent-main.has-review .agent-composer-controls > .agent-picker { max-width: 165px; }
-.agent-main.has-review .agent-composer-provider { font-size: 12px; }
 @keyframes agent-launch-enter { from { opacity: .5; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes agent-review-enter { from { opacity: .65; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes agent-pop { from { opacity: .7; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -712,7 +707,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   .agent-context-choices { left: 30px; max-width: calc(100% - 60px); }
   .agent-topbar { padding: 0 19px; }
   .agent-control { max-width: 180px; }
-  .agent-main.has-review .agent-composer-area { padding-right: 30px; padding-left: 30px; }
   .agent-chat.is-launch > .agent-conversation { padding-top: clamp(35px, 8vh, 75px); }
 }
 @media (max-width: 520px) {
@@ -798,7 +792,6 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
   .agent-context-choices { left: 15px; max-width: calc(100% - 30px); }
   .agent-composer .agent-picker-popup { width: min(330px, calc(100vw - 45px)); }
   .agent-composer-controls > .agent-picker:not(:first-child) .agent-picker-popup { left: -80px; }
-  .agent-main.has-review .agent-composer-area { padding-left: 15px; padding-right: 15px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-workspace *, .agent-workspace *::before, .agent-workspace *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

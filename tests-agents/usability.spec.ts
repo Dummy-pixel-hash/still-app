@@ -22,36 +22,28 @@ async function expectDockWithinChat(page: Page) {
   })).toBe(true)
 }
 
-test("Changes budgets both panes after navigation and follows the same layout for focus and scrims", async ({ page }) => {
+test("Changes uses one focused workspace at desktop and compact widths", async ({ page }) => {
   await openConversation(page)
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
   const review = page.locator(".agent-review"), chat = page.locator(".agent-chat")
   for (const width of [1440, 1280, 1100, 1024, 1001, 1000, 801, 800, 620]) {
     await page.setViewportSize({ width, height: 800 })
-    const overlay = width > 800 ? width - 288 < 960 : width < 960
-    await expect(review).toHaveAttribute("role", overlay ? "dialog" : "complementary")
-    await expect(page.locator(".agent-review-scrim")).toHaveCount(overlay ? 1 : 0)
-    if (overlay) {
-      await expect(review).toHaveAttribute("aria-modal", "true")
-      await expect(chat).toHaveAttribute("inert", "")
-      await review.getByRole("button", { name: "Close changes", exact: true }).focus()
-      await page.keyboard.press("Shift+Tab")
-      expect(await page.evaluate(() => !!document.activeElement?.closest(".agent-review"))).toBe(true)
-    } else {
-      await expect(chat).not.toHaveAttribute("inert")
-      expect((await chat.boundingBox())!.width).toBeGreaterThanOrEqual(460)
-    }
+    await expect(review).toHaveAttribute("role", "region")
+    await expect(chat).toBeHidden()
+    await expect(chat).toHaveAttribute("inert", "")
+    const [screen, body] = await Promise.all([review.boundingBox(), page.locator(".agent-workbody").boundingBox()])
+    expect(screen!.width).toBeCloseTo(body!.width - (width <= 900 ? 32 : 56), 0)
   }
   await page.keyboard.press("Escape")
   await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeFocused()
   await page.setViewportSize({ width: 1024, height: 800 })
   await page.getByRole("button", { name: "Collapse project sidebar", exact: true }).click()
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
-  await expect(review).toHaveAttribute("role", "complementary")
-  expect((await chat.boundingBox())!.width).toBeGreaterThanOrEqual(460)
+  await expect(review).toHaveAttribute("role", "region")
+  await expect(chat).toBeHidden()
   await page.setViewportSize({ width: 1023, height: 800 })
-  await expect(review).toHaveAttribute("role", "dialog")
-  await expect(chat).toHaveAttribute("inert", "")
+  await expect(review).toHaveAttribute("role", "region")
+  await expect(chat).toBeHidden()
 })
 
 test("a populated draft stays visible on blur, model selection, and conversation switches", async ({ page }) => {
@@ -116,12 +108,10 @@ test("Changes counts belong to their source instead of the generic header action
   await trigger.click()
   const repository = page.getByRole("tab", { name: "Repository", exact: true })
   const conversation = page.getByRole("tab", { name: "Conversation", exact: true })
-  await expect(repository.locator("span")).toHaveText("1")
-  await expect(conversation.locator("span")).toHaveText("2")
+  await expect.poll(() => page.locator(".agent-review-count").textContent()).toContain("1 file")
   await expect(repository).toHaveAccessibleDescription("1 repository file")
-  await expect(page.locator(".agent-review-header")).toContainText("1 file")
   await conversation.click()
-  await expect(page.locator(".agent-review-header")).toContainText("2 files")
+  await expect(page.locator(".agent-review-count")).toContainText("2 files")
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(1)
 })
 

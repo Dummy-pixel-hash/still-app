@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test"
+import { test, expect, type Locator, type Page } from "@playwright/test"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__impeccable/**", route => route.abort())
@@ -25,9 +25,20 @@ async function connect(page: Page, message = "Check this repository") {
 
 async function openRepository(page: Page) {
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
-  const panel = page.getByRole("complementary", { name: "Repository changes" })
+  const panel = page.getByRole("region", { name: "Repository changes" })
   await expect(panel).toBeVisible()
   return panel
+}
+
+async function openFilePicker(panel: Locator, source: "repository" | "conversation" = "repository") {
+  const trigger = panel.getByRole("button", { name: new RegExp(`Choose ${source} file`) })
+  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click()
+}
+
+async function chooseFile(panel: Locator, path: string, source: "repository" | "conversation" = "repository") {
+  await openFilePicker(panel, source)
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  await panel.getByRole("button", { name: new RegExp(escaped) }).click()
 }
 
 test("Changes opens Repository by default, scopes each diff request, and keeps status totals separate", async ({ page }) => {
@@ -35,37 +46,39 @@ test("Changes opens Repository by default, scopes each diff request, and keeps s
   const panel = await openRepository(page)
   await expect(page.getByRole("tab", { name: "Repository" })).toHaveAttribute("aria-selected", "true")
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(1)
+  await panel.locator(".agent-repository-details > summary").click()
   await expect(panel.locator(".agent-repository-server")).toContainText("dev.example.test")
-  await expect(panel.locator(".agent-repository-identity code")).toHaveText("/srv/still")
-  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-repository-details-content code")).toHaveText("/srv/still")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitDiffCalls.length)).toBe(1)
-  await expect(panel.locator(".agent-repository-diff .agent-code-language span").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-repository-diff")).toHaveAttribute("aria-label", "Combined diff for src/current.ts")
 
   const initialRequest = await page.evaluate(() => (window as any).agentFixture.gitDiffCalls[0])
   expect(initialRequest).toMatchObject({ cwd: "/srv/still", snapshotId: "git-fixture-1", entryId: "git-fixture-source", view: "combined" })
   expect(Object.keys(initialRequest).sort()).toEqual(["cwd", "entryId", "nativeSessionId", "snapshotId", "view"])
 
-  await panel.getByRole("tab", { name: "Staged", exact: true }).click()
+  await panel.getByLabel("Diff scope").selectOption("staged")
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitDiffCalls.length)).toBe(2)
   expect(await page.evaluate(() => (window as any).agentFixture.gitDiffCalls.at(-1).view)).toBe("staged")
   await page.evaluate(() => {
     const h = (window as any).agentFixture
     h.gitEntries = [...h.gitEntries, { id:"git-fixture-manual",path:"server/manual-edit.ts",indexStatus:".",worktreeStatus:"?",kind:"untracked",additions:null,deletions:null,binary:null }]
   })
-  await panel.getByRole("button", { name: "Refresh" }).click()
+  await panel.getByRole("button", { name: "Refresh repository" }).click()
+  await openFilePicker(panel)
   await expect(panel.getByRole("button", { name: /server\/manual-edit\.ts/ })).toBeVisible()
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(2)
   const repositoryTab = panel.getByRole("tab", { name: "Repository" })
   await repositoryTab.focus()
   await page.keyboard.press("ArrowRight")
-  const conversationPanel = page.getByRole("complementary", { name: "Conversation changes" })
+  const conversationPanel = page.getByRole("region", { name: "Conversation changes" })
   await expect(conversationPanel.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "true")
   await page.keyboard.press("ArrowLeft")
-  const restoredRepositoryPanel = page.getByRole("complementary", { name: "Repository changes" })
+  const restoredRepositoryPanel = page.getByRole("region", { name: "Repository changes" })
   await expect(restoredRepositoryPanel.getByRole("tab", { name: "Repository" })).toHaveAttribute("aria-selected", "true")
   await restoredRepositoryPanel.getByRole("tab", { name: "Conversation" }).click()
-  await expect(page.getByRole("complementary", { name: "Conversation changes" })).toBeVisible()
-  await expect(page.locator(".agent-review-context")).toContainText("From this conversation")
+  await expect(page.getByRole("region", { name: "Conversation changes" })).toBeVisible()
+  await expect(page.locator(".agent-conversation-review")).toBeVisible()
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(3)
 })
 
@@ -76,9 +89,9 @@ test("the transcript summary opens historical Conversation changes without readi
     content: [{ type: "diff", path: "src/reported.ts", oldText: "before\n", newText: "after\n" }],
   }))
   await page.getByRole("button", { name: "Review 1 changed file", exact: true }).click()
-  const panel = page.getByRole("complementary", { name: "Conversation changes" })
+  const panel = page.getByRole("region", { name: "Conversation changes" })
   await expect(panel.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "true")
-  await expect(panel.locator(".agent-code-language span").first()).toHaveText("src/reported.ts")
+  await expect(panel.locator(".agent-review-diff")).toHaveAttribute("aria-label", "Diff for src/reported.ts")
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(0)
 })
 
@@ -93,28 +106,28 @@ test("first status failure has one clear recovery action instead of duplicate er
   await expect(panel.locator(".agent-repository-error")).toHaveCount(0)
   await page.evaluate(() => { (window as any).agentFixture.failGitStatus = false })
   await failure.getByRole("button", { name: "Try again" }).click()
-  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
 })
 
 test("refresh failures retain the last repository snapshot and truncated empty results never claim clean", async ({ page }) => {
   await connect(page)
   const panel = await openRepository(page)
-  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
 
   await page.evaluate(() => { (window as any).agentFixture.failGitStatus = true })
-  await panel.getByRole("button", { name: "Refresh" }).click()
+  await panel.getByRole("button", { name: "Refresh repository" }).click()
   await expect(panel.getByRole("alert")).toContainText("Git status is unavailable")
-  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
 
   await page.evaluate(() => {
     const h = (window as any).agentFixture
     h.failGitStatus = false
     h.gitStatusState = "notRepository"
   })
-  await panel.getByRole("button", { name: "Refresh" }).click()
+  await panel.getByRole("button", { name: "Refresh repository" }).click()
   await expect(panel.getByRole("heading", { name: "This folder is not inside a Git working tree." })).toBeVisible()
   await page.getByRole("tab", { name: "Conversation" }).click()
-  const conversationPanel = page.getByRole("complementary", { name: "Conversation changes" })
+  const conversationPanel = page.getByRole("region", { name: "Conversation changes" })
   await expect(conversationPanel.getByRole("heading", { name: "No reported changes yet" })).toBeVisible()
 
   await page.evaluate(() => {
@@ -124,7 +137,7 @@ test("refresh failures retain the last repository snapshot and truncated empty r
     h.gitTruncated = true
   })
   await conversationPanel.getByRole("tab", { name: "Repository" }).click()
-  const repositoryPanel = page.getByRole("complementary", { name: "Repository changes" })
+  const repositoryPanel = page.getByRole("region", { name: "Repository changes" })
   await expect(repositoryPanel.getByText(/file list reached its safety limit/i)).toBeVisible()
   await expect(repositoryPanel.getByRole("heading", { name: "No uncommitted changes." })).toHaveCount(0)
 })
@@ -143,7 +156,7 @@ test("repository status is read once per opening and once after a visible turn b
   await page.evaluate(() => (window as any).agentFixture.releaseGitStatus(0, 1))
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(2)
   await page.evaluate(() => (window as any).agentFixture.releaseGitStatus(1, 1))
-  await expect(panel.locator(".agent-repository-file-path").first()).toHaveText("src/current.ts")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(2)
 })
 
@@ -152,19 +165,19 @@ test("binary and stale diff states are explicit, and a late selected-file result
   await page.evaluate(() => { (window as any).agentFixture.deferGitDiff = true })
   const panel = await openRepository(page)
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitDiffCalls.length)).toBe(1)
-  await panel.getByRole("button", { name: /docs\/new note\.md/ }).click()
+  await chooseFile(panel, "docs/new note.md")
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitDiffCalls.length)).toBe(2)
   await page.evaluate(() => (window as any).agentFixture.releaseGitDiff(0, 1))
   await expect(panel.locator(".agent-repository-diff-message")).toContainText("Loading")
   await page.evaluate(() => (window as any).agentFixture.releaseGitDiff(1, 1))
-  await expect(panel.locator(".agent-repository-diff .agent-code-language span").first()).toHaveText("docs/new note.md")
+  await expect(panel.locator(".agent-repository-diff")).toHaveAttribute("aria-label", "Combined diff for docs/new note.md")
   expect((await page.evaluate(() => (window as any).agentFixture.gitDiffCalls.map((call: any) => call.entryId))).at(-1)).toBe("git-fixture-untracked")
 
   await page.evaluate(() => { const h = (window as any).agentFixture; h.deferGitDiff = false; h.gitDiffState = "binary" })
-  await panel.getByRole("button", { name: /src\/current\.ts/ }).click()
+  await chooseFile(panel, "src/current.ts")
   await expect(panel.locator(".agent-repository-diff-message")).toContainText("Binary content is not rendered")
   await page.evaluate(() => { (window as any).agentFixture.gitDiffState = "stale" })
-  await panel.getByRole("button", { name: /docs\/new note\.md/ }).click()
+  await chooseFile(panel, "docs/new note.md")
   await expect(panel.locator(".agent-repository-diff-message")).toContainText("Refresh repository")
 
   const cases = [
@@ -176,9 +189,10 @@ test("binary and stale diff states are explicit, and a late selected-file result
   ] as const
   for (const [state, reason] of cases) {
     await page.evaluate(state => { (window as any).agentFixture.gitDiffState = state }, state)
-    const path = await page.locator(".agent-repository-file.is-selected .agent-repository-file-path").textContent()
+    const label = await panel.getByRole("button", { name: /Choose repository file/ }).getAttribute("aria-label")
+    const path = label?.includes("src/current.ts") ? "src/current.ts" : "docs/new note.md"
     const next = path === "src/current.ts" ? "docs/new note.md" : "src/current.ts"
-    await panel.getByRole("button", { name: new RegExp(next.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click()
+    await chooseFile(panel, next)
     await expect(panel.locator(".agent-repository-diff-message")).toContainText(reason)
   }
 })
@@ -191,34 +205,37 @@ test("connection replacement and project changes discard late status responses",
   await page.evaluate(() => { const h = (window as any).agentFixture; h.gitRoot = "/srv/reconnected"; h.replaceTransport() })
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(2)
   await page.evaluate(() => (window as any).agentFixture.releaseGitStatus(1, 1))
-  const panel = page.getByRole("complementary", { name: "Repository changes" })
-  await expect(panel.locator(".agent-repository-identity code")).toHaveText("/srv/reconnected")
+  const panel = page.getByRole("region", { name: "Repository changes" })
+  await panel.locator(".agent-repository-details > summary").click()
+  await expect(panel.locator(".agent-repository-details-content code")).toHaveText("/srv/reconnected")
   await page.evaluate(() => (window as any).agentFixture.releaseGitStatus(0, 1))
-  await expect(panel.locator(".agent-repository-identity code")).toHaveText("/srv/reconnected")
+  await expect(panel.locator(".agent-repository-details-content code")).toHaveText("/srv/reconnected")
   expect(await page.evaluate(() => new Set((window as any).agentFixture.gitStatusCalls.map((call: any) => call.nativeSessionId)).size)).toBe(2)
 
-  await panel.getByRole("button", { name: "Close changes" }).click()
+  await page.getByRole("button", { name: "Back to chat" }).click()
   await addFolder(page, "/srv/other-project")
   await page.evaluate(() => { const h = (window as any).agentFixture; h.deferGitStatus = false; h.gitRoot = "/srv/other-project" })
   await connect(page, "Review the other project")
   const otherPanel = await openRepository(page)
-  await expect(otherPanel.locator(".agent-repository-identity code")).toHaveText("/srv/other-project")
+  await otherPanel.locator(".agent-repository-details > summary").click()
+  await expect(otherPanel.locator(".agent-repository-details-content code")).toHaveText("/srv/other-project")
   expect((await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.map((call: any) => call.cwd))).at(-1)).toBe("/srv/other-project")
 })
 
-test("repository inspector remains readable in a compact drawer", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 700 })
+test("repository changes fills the compact workspace", async ({ page }) => {
   await connect(page)
+  await page.setViewportSize({ width: 390, height: 700 })
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
-  const panel = page.getByRole("dialog", { name: "Repository changes" })
+  const panel = page.getByRole("region", { name: "Repository changes" })
   await expect(panel).toBeVisible()
-  await expect(panel.getByRole("button", { name: /src\/current\.ts/ })).toBeVisible()
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/current.ts")
+  await expect(page.locator(".agent-chat")).toBeHidden()
   const overflow = await page.evaluate(() => {
-    const drawer = document.querySelector<HTMLElement>(".agent-review")!
-    const repository = drawer.querySelector<HTMLElement>(".agent-repository")!
-    return { drawer: drawer.scrollWidth > drawer.clientWidth + 1, repository: repository.scrollWidth > repository.clientWidth + 1 }
+    const screen = document.querySelector<HTMLElement>(".agent-review")!
+    const repository = screen.querySelector<HTMLElement>(".agent-repository")!
+    return { screen: screen.scrollWidth > screen.clientWidth + 1, repository: repository.scrollWidth > repository.clientWidth + 1 }
   })
-  expect(overflow).toEqual({ drawer: false, repository: false })
+  expect(overflow).toEqual({ screen: false, repository: false })
 })
 
 test("a tool result cannot remove a conversation edit, including after offline reload", async ({ page }) => {
@@ -235,10 +252,10 @@ test("a tool result cannot remove a conversation edit, including after offline r
     const h = (window as any).agentFixture
     h.emit(h.current, { type: "toolUpdate", toolCallId: "durable-edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Successfully edited file" } }] })
   })
-  await expect(conversationPanel.getByRole("button", { name: /src\/durable\.ts/ })).toBeVisible()
+  await expect(conversationPanel.locator(".agent-review-selected-path")).toHaveText("src/durable.ts")
   await expect(conversationPanel.locator(".diff-add code")).toContainText("after")
-  await expect(page.getByRole("button", { name: "Review 1 changed file", exact: true })).toBeVisible()
-  await panel.getByRole("button", { name: "Close changes", exact: true }).click()
+  await expect(page.locator(".agent-review-count")).toContainText("1 file")
+  await page.getByRole("button", { name: "Back to chat" }).click()
   await page.reload()
   await page.locator(".agent-thread-open").first().click()
   await page.getByRole("button", { name: "Review 1 changed file", exact: true }).click()
@@ -257,14 +274,15 @@ test("edit inputs and write-only content have honest conversation previews witho
   const panel = page.locator('.agent-review-tabpanel[aria-labelledby="agent-review-tab-conversation"]')
   await expect(panel.locator(".agent-diff-fallback")).toContainText("supplied snippet")
   await expect(panel.locator(".diff-add code")).toContainText("const next = false;")
-  await panel.getByRole("button", { name: /src\/written\.ts/ }).click()
+  await chooseFile(panel, "src/written.ts", "conversation")
   await expect(panel.locator(".agent-written-content")).toHaveText("New content, not necessarily a new file")
   await expect(panel.locator(".agent-diff-fallback")).toContainText("did not supply the original")
+  await openFilePicker(panel, "conversation")
   await expect(panel.locator(".agent-review-files > button.is-selected .agent-change-numbers")).toHaveCount(0)
   expect(await page.evaluate(() => (window as any).agentFixture.gitStatusCalls.length)).toBe(0)
 })
 
-test("expanded review separates a searchable file index from the diff and restores the draft", async ({ page }) => {
+test("Still review replaces project navigation with a file rail and restores the draft", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await connect(page)
   await page.getByLabel("Message agent").fill("Keep this follow-up")
@@ -273,39 +291,34 @@ test("expanded review separates a searchable file index from the diff and restor
     h.gitEntries = Array.from({ length: 18 }, (_, i) => ({ id: `file-${i}`, path: `src/features/feature-${i}.ts`, indexStatus: "M", worktreeStatus: ".", kind: "modified", additions: 8, deletions: 2, binary: false }))
   })
   const panel = await openRepository(page)
-  await panel.getByRole("button", { name: "Expand changes" }).click()
-  const expanded = page.getByRole("dialog", { name: "Repository changes" })
-  await expect(expanded).toHaveAttribute("aria-modal", "true")
-  await expect(page.locator(".agent-chat")).toHaveAttribute("inert", "")
-  const index = expanded.locator(".agent-review-file-index"), editor = expanded.locator(".agent-review-editor")
-  const [left, right] = await Promise.all([index.boundingBox(), editor.boundingBox()])
-  expect(left!.x + left!.width).toBeLessThanOrEqual(right!.x + 1)
-  expect(right!.width).toBeGreaterThan(500)
-  await expanded.getByRole("textbox", { name: "Filter repository files" }).fill("feature-12")
-  await expect(expanded.locator(".agent-repository-files > button")).toHaveCount(1)
-  await expanded.getByRole("button", { name: /feature-12\.ts/ }).click()
-  await expect(expanded.locator(".agent-review-file-toolbar > span")).toHaveText("src/features/feature-12.ts")
-  await expanded.getByRole("button", { name: "Next changed file" }).click()
-  await expect(expanded.locator(".agent-review-file-toolbar > span")).toHaveText("src/features/feature-13.ts")
-  await expanded.getByRole("button", { name: "Restore changes panel" }).click()
-  await expect(page.locator(".agent-chat")).not.toHaveAttribute("inert")
-  await panel.getByRole("button", { name: "Close changes", exact: true }).click()
+  await expect(page.locator(".agent-chat")).toBeHidden()
+  const [screen, body] = await Promise.all([panel.boundingBox(), page.locator(".agent-workbody").boundingBox()])
+  expect(screen!.width).toBeCloseTo(body!.width - 56, 0)
+  await expect(page.locator(".agent-sidebar")).toBeHidden()
+  await expect(panel.locator(".agent-review-file-index")).toBeVisible()
+  await expect(panel.locator(".agent-repository-details-content")).toBeHidden()
+  await openFilePicker(panel)
+  await panel.getByRole("textbox", { name: "Filter repository files" }).fill("feature-12")
+  await expect(panel.locator(".agent-repository-files > button")).toHaveCount(1)
+  await panel.getByRole("button", { name: /feature-12\.ts/ }).click()
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/features/feature-12.ts")
+  await page.getByRole("button", { name: "Back to chat" }).click()
   await expect(page.getByLabel("Message agent")).toHaveValue("Keep this follow-up")
 })
 
-test("source tabs never enter hidden scope tabs and refresh preserves the selected path and scope", async ({ page }) => {
+test("source tabs and comparison scope remain independent, and refresh preserves the selection", async ({ page }) => {
   await connect(page)
   const panel = await openRepository(page)
-  await panel.getByRole("button", { name: /docs\/new note\.md/ }).click()
-  await panel.getByRole("tab", { name: "Combined", exact: true }).focus()
+  await chooseFile(panel, "docs/new note.md")
+  await panel.getByLabel("Diff scope").focus()
   await page.keyboard.press("ArrowRight")
-  await expect(panel.getByRole("tab", { name: "Staged", exact: true })).toHaveAttribute("aria-selected", "true")
+  await expect(panel.getByLabel("Diff scope")).toHaveValue("staged")
   await expect(panel.getByRole("tab", { name: "Repository", exact: true })).toHaveAttribute("aria-selected", "true")
-  await panel.getByRole("button", { name: "Refresh", exact: true }).click()
-  await expect(panel.locator(".agent-repository-files > button.is-selected")).toContainText("docs/new note.md")
-  await expect(panel.getByRole("tab", { name: "Staged", exact: true })).toHaveAttribute("aria-selected", "true")
+  await panel.getByRole("button", { name: "Refresh repository", exact: true }).click()
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("docs/new note.md")
+  await expect(panel.getByLabel("Diff scope")).toHaveValue("staged")
   await panel.getByRole("tab", { name: "Conversation", exact: true }).click()
-  const conversation = page.getByRole("complementary", { name: "Conversation changes" })
+  const conversation = page.getByRole("region", { name: "Conversation changes" })
   await conversation.getByRole("tab", { name: "Conversation", exact: true }).focus()
   await page.keyboard.press("End")
   await expect(conversation.getByRole("tab", { name: "Conversation", exact: true })).toBeFocused()
@@ -320,15 +333,15 @@ test("switching Git files or scopes starts the new diff at the top", async ({ pa
   await expect(diff.locator(".agent-patch")).toBeVisible()
   await diff.evaluate(element => { element.scrollTop = 1500 })
   expect(await diff.evaluate(element => element.scrollTop)).toBeGreaterThan(1000)
-  await panel.getByRole("button", { name: /docs\/new note\.md/ }).click()
-  await expect(diff.locator(".agent-review-file-toolbar > span")).toHaveText("docs/new note.md")
+  await chooseFile(panel, "docs/new note.md")
+  await expect(diff).toHaveAttribute("aria-label", "Combined diff for docs/new note.md")
   expect(await diff.evaluate(element => element.scrollTop)).toBe(0)
   await diff.evaluate(element => { element.scrollTop = 1500 })
-  await panel.getByRole("tab", { name: "Staged", exact: true }).click()
+  await panel.getByLabel("Diff scope").selectOption("staged")
   expect(await diff.evaluate(element => element.scrollTop)).toBe(0)
 })
 
-test("short windows trade the file rail for a picker instead of hiding code behind chrome", async ({ page }) => {
+test("short windows use the same compact file picker without hiding the diff", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 400 })
   await connect(page)
   await page.evaluate(() => {
@@ -339,7 +352,100 @@ test("short windows trade the file rail for a picker instead of hiding code behi
   const diff = panel.locator(".agent-repository-diff")
   await expect(diff.locator(".agent-patch")).toBeVisible()
   expect((await diff.boundingBox())!.height).toBeGreaterThanOrEqual(120)
-  await expect(panel.getByRole("combobox", { name: "Choose repository file" })).toBeVisible()
-  await panel.getByRole("combobox", { name: "Choose repository file" }).selectOption("short-12")
-  await expect(diff.locator(".agent-review-file-toolbar > span")).toHaveText("src/short-12.ts")
+  await expect(panel.getByRole("button", { name: /Choose repository file/ })).toBeVisible()
+  await chooseFile(panel, "src/short-12.ts")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("src/short-12.ts")
+})
+
+test("compact review switches between files and code, with local Escape dismissal", async ({ page }) => {
+  await connect(page)
+  await page.setViewportSize({ width: 760, height: 600 })
+  const panel = await openRepository(page)
+  const trigger = panel.getByRole("button", { name: /Choose repository file/ })
+  const editor = panel.locator(".agent-review-editor")
+  await expect(editor).toBeVisible()
+  await trigger.click()
+  await expect(editor).toBeHidden()
+  await expect(panel.getByRole("textbox", { name: "Filter repository files" })).toBeVisible()
+  await panel.getByRole("button", { name: /docs\/new note\.md/ }).click()
+  await expect(editor).toBeVisible()
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("docs/new note.md")
+  await expect(trigger).toBeFocused()
+  await trigger.click()
+  await page.keyboard.press("Escape")
+  await expect(editor).toBeVisible()
+  await expect(panel).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(page.locator(".agent-review")).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeFocused()
+})
+
+test("desktop review restores the user's expanded sidebar and supports keyboard file selection", async ({ page }) => {
+  await connect(page)
+  const sidebar = page.locator(".agent-sidebar")
+  const originalClass = await sidebar.getAttribute("class")
+  const panel = await openRepository(page)
+  await expect(sidebar).toBeHidden()
+  const firstFile = panel.locator(".agent-repository-files > button").first()
+  await firstFile.focus()
+  await page.keyboard.press("ArrowDown")
+  await page.keyboard.press("Enter")
+  await expect(panel.locator(".agent-review-selected-path")).toHaveText("docs/new note.md")
+  await page.getByRole("button", { name: "Back to chat" }).click()
+  await expect(sidebar).toBeVisible()
+  await expect(sidebar).toHaveAttribute("class", originalClass!)
+})
+
+test("review renders source safely and repository details dismiss without closing review", async ({ page }) => {
+  await connect(page)
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.gitPatch = '--- a/current.ts\n+++ b/current.ts\n@@ -1,1 +1,2 @@\n-const html = "before";\n+const html = "<img src=x onerror=window.reviewInjected=true>";\n+export default html;\n'
+  })
+  const panel = await openRepository(page)
+  await expect(panel.locator(".diff-add code").first()).toContainText("<img src=x")
+  await expect(panel.locator(".diff-add img")).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).reviewInjected)).toBeUndefined()
+  const details = panel.locator(".agent-repository-details > summary")
+  await details.click()
+  await expect(panel.locator(".agent-repository-details-content")).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(panel.locator(".agent-repository-details-content")).toBeHidden()
+  await expect(panel).toBeVisible()
+  await expect(details).toBeFocused()
+})
+
+for (const focusTarget of ["search", "file"] as const) {
+  test(`resizing review preserves keyboard focus from the ${focusTarget} when files disappear`, async ({ page }) => {
+    await connect(page)
+    const panel = await openRepository(page)
+    const trigger = panel.getByRole("button", { name: /Choose repository file/ })
+    const focusFileControl = async () => {
+      if (focusTarget === "search") await panel.getByRole("textbox", { name: "Filter repository files" }).focus()
+      else await panel.locator(".agent-repository-files > button").first().focus()
+    }
+    await focusFileControl()
+    await page.setViewportSize({ width: 760, height: 600 })
+    await expect(trigger).toBeFocused()
+    await expect(trigger).toHaveAttribute("aria-expanded", "false")
+
+    // Keep the desktop rail collapsed, then open compact navigation and grow again.
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await expect(trigger).toHaveAttribute("aria-expanded", "true")
+    await trigger.click()
+    await page.setViewportSize({ width: 760, height: 600 })
+    await trigger.click()
+    await focusFileControl()
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await expect(trigger).toHaveAttribute("aria-expanded", "false")
+    await expect(trigger).toBeFocused()
+  })
+}
+
+test("tabbing from the active source goes directly to a visible review control", async ({ page }) => {
+  await connect(page)
+  const panel = await openRepository(page)
+  await panel.getByRole("tab", { name: "Repository", exact: true }).focus()
+  await page.keyboard.press("Tab")
+  await expect(panel.getByRole("button", { name: /Choose repository file/ })).toBeFocused()
 })

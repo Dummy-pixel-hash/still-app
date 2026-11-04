@@ -140,18 +140,21 @@ test("questions link descriptions and preserve zero numeric answers", async ({ p
   expect(await page.evaluate(() => (window as any).agentFixture.inputs.at(-1))).toMatchObject({ answers: { retries: 0 } })
 })
 
-test("a roomy desktop workspace keeps review beside an editable conversation", async ({ page }) => {
+test("Changes becomes a dedicated view and preserves an editable conversation draft", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 })
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
+  await page.getByLabel("Message agent").fill("Keep writing after review")
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
   await page.getByRole("tab", { name: "Conversation" }).click()
-  const review = page.getByRole("complementary", { name: "Conversation changes", exact: true })
+  const review = page.getByRole("region", { name: "Conversation changes", exact: true })
   const conversationPanel = review.locator('.agent-review-tabpanel[aria-labelledby="agent-review-tab-conversation"]')
   await expect(review).toBeVisible()
-  await expect(page.locator(".agent-chat")).not.toHaveAttribute("inert")
-  await page.getByLabel("Message agent").fill("Follow-up while reviewing")
+  await expect(page.locator(".agent-chat")).toBeHidden()
+  await expect(page.locator(".agent-chat")).toHaveAttribute("inert", "")
   expect(await conversationPanel.locator(".agent-patch").evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(13)
+  await page.getByRole("button", { name: "Back to chat" }).click()
+  await expect(page.getByLabel("Message agent")).toHaveValue("Keep writing after review")
 })
 
 test("failed conversations retain an explicit sidebar state on compact screens", async ({ page }) => {

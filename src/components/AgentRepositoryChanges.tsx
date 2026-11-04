@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { AgentGitDiff, AgentGitEntry, AgentGitSnapshot, AgentGitView } from "../agents/git"
 import { describeChanges } from "../agents/changes"
 import type { AgentGitStatusState } from "../session/agentGit"
 import { agentGitDiffKey } from "../session/agentGit"
 import AgentIcon from "./AgentIcon"
-import { AgentChangeView } from "./AgentMessage"
+import AgentReviewDiff from "./AgentReviewDiff"
 import { ChangeNumbers } from "./AgentChanges"
-import AgentReviewFiles, { ReviewFileSelect } from "./AgentReviewFiles"
+import AgentReviewFiles, { ReviewPath } from "./AgentReviewFiles"
 
 const views: AgentGitView[] = ["combined", "staged", "unstaged"]
 const viewLabels: Record<AgentGitView, string> = { combined: "Combined", staged: "Staged", unstaged: "Unstaged" }
@@ -57,6 +57,7 @@ export default function AgentRepositoryChanges({
   const entries = ready?.entries || []
   const [selectedPath, setSelectedPath] = useState("")
   const [view, setView] = useState<AgentGitView>("combined")
+  const details = useRef<HTMLDetailsElement>(null)
   const selected = entries.find(entry => entry.path === selectedPath) || entries[0]
   const activeDiffKey = selected && ready ? agentGitDiffKey(ready.snapshotId, selected.id, view) : ""
   const activeDiff = diff.key === activeDiffKey ? diff : undefined
@@ -69,44 +70,58 @@ export default function AgentRepositoryChanges({
     if (active && selected && ready && connected && status.phase !== "loading") void loadDiff(selected, view)
   }, [active, selected?.id, ready?.snapshotId, view, connected, status.phase, loadDiff])
 
-  const onScopeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const currentIndex = views.indexOf(view)
-    const nextIndex = event.key === "ArrowRight" ? (currentIndex + 1) % views.length
-      : event.key === "ArrowLeft" ? (currentIndex + views.length - 1) % views.length
-        : event.key === "Home" ? 0 : event.key === "End" ? views.length - 1 : -1
-    if (nextIndex < 0) return
-    event.preventDefault()
-    event.stopPropagation()
-    setView(views[nextIndex])
-    event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=tab]")[nextIndex]?.focus()
-  }
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      if (details.current?.open && !details.current.contains(event.target as Node)) details.current.open = false
+    }
+    document.addEventListener("pointerdown", dismiss)
+    return () => document.removeEventListener("pointerdown", dismiss)
+  }, [])
 
   const canRefresh = connected && status.phase !== "loading"
   const lastChecked = checkedLabel(snapshot)
 
-  return <section className="agent-repository" aria-label="Repository changes" aria-busy={status.phase === "loading"}>
-    <header className="agent-repository-header">
-      <div className="agent-repository-identity">
-        <span className="agent-repository-server">{host}</span>
-        {ready && <>
-          <div className="agent-repository-location">
-            <span className="agent-repository-branch"><AgentIcon name="code" size={13} />{branchLabel(ready)}</span>
-            <code title={ready.root}>{ready.root}</code>
-          </div>
-        </>}
-        {!ready && cwd && <code title={cwd}>{cwd}</code>}
-      </div>
-      <div className="agent-repository-refresh">
-        <button type="button" className="agent-button" title={lastChecked} onClick={() => { void refresh() }} disabled={!canRefresh}>
-          <AgentIcon name="refresh" size={13} /> Refresh
-        </button>
-      </div>
-    </header>
-
+  return <section className="agent-repository" aria-busy={status.phase === "loading"}>
     {!connected && <p className="agent-repository-notice" role="status">{snapshot ? "Offline · showing the last read snapshot." : "Connect to this server to inspect its repository."}</p>}
     {connected && status.phase === "stale" && snapshot && !status.error && <p className="agent-repository-notice" role="status">Showing the last checked snapshot until this connection is refreshed.</p>}
     {status.phase === "loading" && <p className="agent-repository-notice" role="status">{snapshot ? "Refreshing repository status…" : "Reading repository status…"}</p>}
     {status.error && snapshot && <p className="agent-repository-error" role="alert">{status.error}</p>}
+    {ready?.truncated && <p className="agent-repository-notice" role="status">The file list reached its safety limit. Refresh to check again; this partial list is not a clean result.</p>}
+
+    <div className="agent-review-browser">
+      {selected && <AgentReviewFiles source="repository" selected={selected.id} select={id => setSelectedPath(entries.find(entry => entry.id === id)?.path || "")} files={entries.map(entry => ({
+          id: entry.id, path: entry.path, originalPath: entry.originalPath,
+          label: `${kindLabel[entry.kind]}, index ${entry.indexStatus}, worktree ${entry.worktreeStatus}`,
+          status: entry.kind === "untracked" ? "U" : entry.kind === "conflicted" ? "!" : entry.kind === "added" ? "A" : entry.kind === "deleted" ? "D" : entry.kind === "renamed" ? "R" : "M",
+          counts: entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : undefined,
+      }))} />}
+      <div className="agent-review-editor">
+      <header className="agent-repository-header agent-review-file-header">
+        <div className="agent-review-file-identity"><AgentIcon name={selected ? "file" : "folder"} size={16} /><span className="agent-review-selected-path" title={selected?.path || cwd}>{selected ? <ReviewPath path={selected.path} /> : "Working tree"}</span></div>
+        <div className="agent-review-file-actions">
+        {selected?.additions != null && selected.deletions != null && <ChangeNumbers additions={selected.additions} deletions={selected.deletions} />}
+        {selected && <label className="agent-repository-scope"><select aria-label="Diff scope" value={view} onChange={event => setView(event.target.value as AgentGitView)}>
+          {views.map(scope => <option key={scope} value={scope}>{viewLabels[scope]}</option>)}
+        </select><AgentIcon name="chevron" size={12} /></label>}
+        <button type="button" className="agent-review-refresh" aria-label="Refresh repository" title="Refresh repository" onClick={() => { void refresh() }} disabled={!canRefresh}><AgentIcon name="refresh" size={15} /></button>
+        <details ref={details} className="agent-repository-details" onKeyDown={event => {
+          if (event.key !== "Escape" || !details.current?.open) return
+          event.preventDefault(); event.stopPropagation()
+          details.current.open = false
+          details.current.querySelector("summary")?.focus({ preventScroll: true })
+        }}>
+          <summary aria-label="Repository details" title="Repository details"><AgentIcon name="more" size={16} /></summary>
+          <div className="agent-repository-details-content">
+            <span className="agent-repository-server">{host}</span>
+            <div className="agent-repository-location">
+              {ready && <span className="agent-repository-branch"><AgentIcon name="code" size={13} />{branchLabel(ready)}</span>}
+              <code title={ready?.root || cwd}>{ready?.root || cwd}</code>
+            </div>
+            <small>{lastChecked}{!connected || status.phase === "stale" ? " · saved snapshot" : " · read-only"}</small>
+          </div>
+        </details>
+        </div>
+      </header>
 
     {snapshot?.state === "notRepository" && <div className="agent-repository-empty"><AgentIcon name="file" size={22} /><h3>This folder is not inside a Git working tree.</h3><p>Conversation changes are still available in the Conversation view.</p></div>}
     {snapshot?.state === "gitUnavailable" && <div className="agent-repository-empty"><AgentIcon name="terminal" size={22} /><h3>Git is unavailable on this server.</h3><p>{snapshot.reason}</p></div>}
@@ -118,30 +133,9 @@ export default function AgentRepositoryChanges({
     </div>}
 
     {ready && <>
-      {ready.truncated && <p className="agent-repository-notice" role="status">The file list reached its safety limit. Refresh to check again; this partial list is not a clean result.</p>}
       {ready.entries.length === 0 && !ready.truncated && <div className="agent-repository-empty"><AgentIcon name="check" size={22} /><h3>No uncommitted changes.</h3><p>Refresh to check the current server-side working tree.</p></div>}
-      {ready.entries.length > 0 && <div className="agent-review-browser">
-        <AgentReviewFiles source="repository" selected={selected?.id} select={id => setSelectedPath(entries.find(entry => entry.id === id)?.path || "")} files={entries.map(entry => ({
-          id: entry.id, path: entry.path, originalPath: entry.originalPath,
-          label: `${kindLabel[entry.kind]}, index ${entry.indexStatus}, worktree ${entry.worktreeStatus}`,
-          status: entry.kind === "untracked" ? "U" : entry.kind === "conflicted" ? "!" : entry.kind === "added" ? "A" : entry.kind === "deleted" ? "D" : entry.kind === "renamed" ? "R" : "M",
-          counts: entry.binary ? <small className="agent-repository-binary">Binary</small> : entry.additions !== null && entry.deletions !== null ? <ChangeNumbers additions={entry.additions} deletions={entry.deletions} /> : undefined,
-        }))} />
-        {selected && <>
-          <div className="agent-review-editor">
-          <ReviewFileSelect source="repository" files={entries.map(entry => ({ id: entry.id, path: entry.path }))} selected={selected.id} select={id => setSelectedPath(entries.find(entry => entry.id === id)?.path || "")} />
-          <div className="agent-repository-scope" role="tablist" aria-label="Diff scope" onKeyDown={onScopeKeyDown}>
-            <span>Compare</span>
-            {views.map(scope => <button type="button" role="tab" key={scope} aria-selected={view === scope} tabIndex={view === scope ? 0 : -1}
-              onClick={() => setView(scope)}>{viewLabels[scope]}</button>)}
-          </div>
+      {ready.entries.length > 0 && selected && <>
           <div key={JSON.stringify([selected.path, view])} className="agent-review-diff agent-repository-diff" role="region" aria-label={`${viewLabels[view]} diff for ${selected.path}`} tabIndex={0}>
-            <div className="agent-code-language agent-review-file-toolbar"><AgentIcon name="file" size={14} /><span title={selected.path}>{selected.path}</span>
-              <div className="agent-review-file-pager"><span>{entries.indexOf(selected) + 1} / {entries.length}</span>
-                <button type="button" aria-label="Previous changed file" disabled={entries.indexOf(selected) <= 0} onClick={() => setSelectedPath(entries[entries.indexOf(selected) - 1].path)}><AgentIcon name="back" size={14} /></button>
-                <button type="button" aria-label="Next changed file" disabled={entries.indexOf(selected) >= entries.length - 1} onClick={() => setSelectedPath(entries[entries.indexOf(selected) + 1].path)}><AgentIcon name="back" size={14} style={{ transform: "rotate(180deg)" }} /></button>
-              </div>
-            </div>
             {selected.originalPath && <p className="agent-review-origin">Renamed from <code>{selected.originalPath}</code></p>}
             {activeDiff?.phase === "loading" && <p className="agent-repository-diff-message" role="status">Loading {viewLabels[view].toLowerCase()} diff…</p>}
             {activeDiff?.error && <div className="agent-repository-error" role="alert">{activeDiff.error}<button type="button" className="agent-link-button" disabled={!connected} onClick={() => { void loadDiff(selected, view) }}>Retry diff</button></div>}
@@ -149,15 +143,14 @@ export default function AgentRepositoryChanges({
               <strong>{stateMessage(activeDiff.diff.state, activeDiff.diff.reason)}</strong>
               {activeDiff.diff.state === "stale" && <button type="button" className="agent-link-button" onClick={() => { void refresh() }}>Refresh repository</button>}
             </div>}
-            {parsed.map((change, index) => <AgentChangeView key={`${selected.id}:${view}:${index}`} change={{ ...change, path: selected.path }} sourceLabel="Repository diff" header={false} />)}
+            {parsed.map((change, index) => <AgentReviewDiff key={`${selected.id}:${view}:${index}`} change={{ ...change, path: selected.path }} sourceLabel="Repository diff" />)}
             {activeDiff?.diff?.state === "ready" && (!activeDiff.diff.patch || parsed.length === 0) && <p className="agent-repository-diff-message">No changes in this diff scope.</p>}
             {!activeDiff && connected && selected && <p className="agent-repository-diff-message" role="status">Loading selected diff…</p>}
             {!activeDiff && !connected && selected && <p className="agent-repository-diff-message" role="status">Reconnect to load this file’s diff.</p>}
           </div>
-          </div>
-        </>}
-      </div>}
+      </>}
     </>}
-    {snapshot && <footer className="agent-review-note"><span className={`agent-review-freshness ${!connected || status.phase === "stale" ? "is-stale" : ""}`} /><span>{lastChecked}{!connected || status.phase === "stale" ? " · saved snapshot" : " · read-only"}</span></footer>}
+      </div>
+    </div>
   </section>
 }

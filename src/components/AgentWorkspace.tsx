@@ -1,9 +1,9 @@
 /* THESIS: A real coding workspace: choose a project, make a request, inspect its changes.
  * OWN-WORLD: Neutral black, a horizontal red particle horizon, frosted writing surfaces,
  * identifiable providers, syntax-colored code and honest red/green file changes.
- * STORY: Start in the centered composer or reopen local work; review beside the chat.
+ * STORY: Start a task, follow the conversation, then switch to a focused changes view.
  * FIRST VIEWPORT: 272px collapsible project navigation, 54px work header, a centered
- * launch area that becomes a 960px transcript and floating composer. Review opens right.
+ * launch area that becomes a 960px transcript and floating composer. Changes replace chat.
  * FORM: User-pinned T3 Code/Codex desktop canon, grounded in their actual screenshots.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
@@ -84,6 +84,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const [view, setView] = useState<"home" | "draft" | "project" | "settings">("home")
   const [sidebar, setSidebar] = useState(false), [query, setQuery] = useState(""), [archived, setArchived] = useState(false)
   const [narrowNavigation, setNarrowNavigation] = useState(() => matchMedia("(max-width: 800px)").matches)
+  const reviewReturnFocus = useRef<HTMLElement | null>(null)
   const [menu, setMenu] = useState<string | null>(null)
   const [rename, setRename] = useState<{ id: string; title: string; project?: AgentProject } | null>(null)
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
@@ -455,6 +456,22 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   }
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
   const selectHost = (key: string) => { const server = sessionForHost(key, hosts); if (server) onSelectHost?.(server) }
+  const openReview = (mode: "repository" | "conversation", trigger?: HTMLElement) => {
+    reviewReturnFocus.current = trigger || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setReviewMode(mode)
+    setReview(true)
+  }
+  const closeReview = () => {
+    setReview(false)
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const target = reviewReturnFocus.current?.isConnected && !reviewReturnFocus.current.closest("[inert]")
+          ? reviewReturnFocus.current
+          : surface.current?.querySelector<HTMLElement>(".agent-review-toggle")
+        target?.focus({ preventScroll: true })
+      })
+    })
+  }
   const revealProjects = (focusSearch = false) => {
     setMenu(null)
     setCommandOpen(false); setProjectChoices(false); setModelMenu(null)
@@ -679,7 +696,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
   const composerNotice = discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : null
   const nativeShell = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
-  return <section ref={surface} className="agent-workspace" data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
+  return <section ref={surface} className={`agent-workspace${review && current ? " is-reviewing" : ""}`} data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
     onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-capabilities-popover')) returnFocus.current = e.target as HTMLElement }}
     onPointerDown={e => { if (!(e.target as HTMLElement).closest(".agent-thread-menu,.agent-thread-more")) setMenu(null) }}
     onKeyDown={e => {
@@ -687,10 +704,11 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       if (!dialogOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p") { e.preventDefault(); setSidebar(false); setProjectChoices(false); setModelMenu(null); setAgentDetailsOpen(false); if (!showComposer) newThread(); setCommandQuery(""); setCommandOpen(true) }
       if (!folderOpen && !timelineOpen && !deleting && !historyAction && (e.ctrlKey || e.metaKey) && e.key === "\\") {
         e.preventDefault()
+        if (review) closeReview()
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) setReview(false); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) closeReview(); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
       if (e.key === "Tab") {
         const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || surface.current?.querySelector('.agent-review[aria-modal="true"]') || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
@@ -756,26 +774,34 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
     <main className={`agent-main ${review && current ? "has-review" : ""}`} inert={sidebarOverlay || dialogOpen}>
       <div className="agent-sr-only" role="status" aria-atomic="true">{current?.pendingPermission ? `Approval needed: ${current.pendingPermission.title}` : current?.pendingInput ? `Agent question: ${current.pendingInput.title}` : ""}</div>
 
-      <header className="agent-topbar agent-topbar--stacked" data-tauri-drag-region>
-            <div className="agent-topbar-leading agent-topbar-leading--focused">
-              {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
-              {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
-              {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
-            </div>
-            <div className="agent-topbar-actions">
-              {current && <>
-                <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
-                <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
-                <button className={`agent-review-toggle ${review ? "is-active" : ""}`} aria-label="Review changes" aria-expanded={review} onClick={() => { if (review) setReview(false); else { setReviewMode("repository"); setReview(true) } }}><AgentIcon name="changes" size={16} /><span>Changes</span></button>
-              </>}
-              {onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
-              <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
-            </div>
+      <header className={`agent-topbar agent-topbar--stacked${review && current ? " is-reviewing" : ""}`} data-tauri-drag-region>
+        <div className="agent-topbar-leading agent-topbar-leading--focused">
+          {review && current ? <>
+            <button type="button" className="agent-review-back" aria-label="Back to chat" onClick={closeReview}><AgentIcon name="back" size={15} /><span>Chat</span></button>
+            <span className="agent-review-topbar-divider" aria-hidden="true" />
+            <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>
+          </> : <>
+            {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
+            {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
+            {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
+          </>}
+        </div>
+        <div className="agent-topbar-actions">
+          {current && <>
+            <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
+            {!review && <>
+              <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
+              <button className="agent-review-toggle" aria-label="Review changes" aria-expanded={false} onClick={event => openReview("repository", event.currentTarget)}><AgentIcon name="changes" size={16} /><span>Changes</span></button>
+            </>}
+          </>}
+          {!review && onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
+          <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
+        </div>
       </header>
 
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       <div className="agent-workbody">
-      <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`}>
+      <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`} inert={review || undefined} aria-hidden={review || undefined}>
       {view === "settings" ? <section className="agent-setup">
         <div className="agent-settings-heading"><h1>Agent settings</h1><p>Use the coding agents already installed on your server.</p></div>
         <label className="agent-field">Server<select aria-label="Settings server" value={host} onChange={e => selectHost(e.target.value)}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label>
@@ -792,7 +818,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
       </section> : <>
         <div ref={scroll.viewport} className="agent-conversation" tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
           <div ref={scroll.content} className="agent-message-list">
-            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={() => { setReviewMode("conversation"); setReview(true) }} />}</>
+            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}</>
               : startScreen ? <div className="agent-welcome"><h1>What will you <em>build?</em></h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
@@ -852,7 +878,7 @@ export default function AgentWorkspace({ session, sessions = [], onSelectHost, o
         {startScreen && <div className="agent-launch-extras"><div className="agent-starters">{promptStarters.map(starter => <button key={starter.label} disabled={!!draft.trim() || busy} onClick={() => useStarter(starter.prompt)}><span>{starter.label}</span></button>)}</div>{recent.length > 0 && <section className="agent-recents"><div className="agent-section-label"><span>Recent conversations</span><button className="agent-link-button" onClick={() => revealProjects(true)}>View all {recent.length} conversations <AgentIcon name="chevron" size={12} /></button></div>{recent.slice(0, 3).map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</section>}</div>}
       </>}
       </div>
-      {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} close={() => setReview(false)} />}
+      {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} />}
       </div>
       {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
