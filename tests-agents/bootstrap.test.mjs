@@ -1,10 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtemp, readFile, stat, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { todoStorePath } from "../src-tauri/agent-host/todos.mjs"
 
 const bootstrap = fileURLToPath(new URL("../src-tauri/agent-host/bootstrap.mjs", import.meta.url))
 
@@ -24,7 +25,7 @@ test("remote bootstrap receives bundled sources on stdin before forwarding ACP",
   })
   try {
     const source = 'process.stdout.write("FIXTURE_ATTACHED\\n");process.stdin.once("data",data=>process.stdout.write(`FORWARDED:${data.toString().trim()}\\n`))'
-    const config = { executionId: "agent-bootstrap-test", conversationId: "test", agentId: "pi", cwd: home, create: true, after: 0, command: [], env: {}, source, todosSource: "export const todoFixture = true", todoPiSource: "export default function fixture() {}" }
+     const config = { executionId: "agent-bootstrap-test", conversationId: "test", agentId: "pi", cwd: home, create: true, after: 0, command: [], env: {}, source, todosSource: "export const todoFixture = true", todoPiSource: "export default function fixture() {}", recoverySource: "export const recoveryFixture = true" }
     child.stdin.write(`${Buffer.from(JSON.stringify(config)).toString("base64")}\n`)
     await waitFor("STILL_BOOTSTRAP_READY\n")
     await waitFor("FIXTURE_ATTACHED\n")
@@ -33,7 +34,9 @@ test("remote bootstrap receives bundled sources on stdin before forwarding ACP",
     const directory = join(home, ".local", "state", "still", "agents", config.executionId)
     assert.equal(await readFile(join(directory, "transport.mjs"), "utf8"), source)
     assert.equal(await readFile(join(directory, "todos.mjs"), "utf8"), config.todosSource)
-    assert.equal(await readFile(join(directory, "todo-pi.mjs"), "utf8"), config.todoPiSource)
+     assert.equal(await readFile(join(directory, "todo-pi.mjs"), "utf8"), config.todoPiSource)
+     assert.equal(await readFile(join(directory, "recovery.mjs"), "utf8"), config.recoverySource)
+     assert.equal((await stat(join(directory, "recovery.mjs"))).mode & 0o777, 0o600)
     assert.equal((await stat(join(directory, "transport.mjs"))).mode & 0o777, 0o600)
 
     child.stdin.write("ACP bootstrap-stream-check\n")
@@ -88,6 +91,48 @@ test("near-limit Todo seed is moved to a private file before the worker config b
     child.stdin.end()
     const [code] = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (...result) => resolve(result)) })
     assert.equal(code, 0, stderr)
+  } finally {
+    if (child.exitCode === null) child.kill("SIGTERM")
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+for (const live of [true, false]) test(`recovery bootstrap ${live ? "refuses a live provider before signalling readiness" : "checks a dead provider without releasing ownership before worker startup"}`, { timeout: 10000 }, async () => {
+  const home = await mkdtemp("/tmp/opencode/still-recovery-bootstrap-")
+  const conversationId = "bootstrap-recovery", previousId = "previous-execution"
+  const previousDirectory = join(home, ".local", "state", "still", "agents", previousId)
+  const todoDirectory = dirname(todoStorePath(home, conversationId))
+  for (const path of [previousDirectory, todoDirectory]) await mkdir(path, { recursive: true, mode: 0o700 })
+  const pid = live ? process.pid : 2_000_000_000
+  const ownerPath = join(todoDirectory, "owner.lock"), owner = JSON.stringify({ executionId: previousId, pid })
+  await writeFile(ownerPath, owner, { mode: 0o600 })
+  await writeFile(join(previousDirectory, "state.json"), JSON.stringify({ executionId: previousId, pid, childPid: pid, sessionResult: { sessionId: "saved-session" } }), { mode: 0o600 })
+  const child = spawn(process.execPath, [bootstrap], { env: { ...process.env, HOME: home }, stdio: ["pipe", "pipe", "pipe"] })
+  let stdout = "", stderr = ""
+  child.stdout.on("data", chunk => { stdout += chunk }); child.stderr.on("data", chunk => { stderr += chunk })
+  try {
+    const config = {
+      executionId: "new-execution", conversationId, agentId: "pi", cwd: home, create: true, command: [], env: {},
+      recoverFrom: { executionId: previousId, agentSessionId: "saved-session" },
+      source: 'console.log("FIXTURE_LAUNCHED")',
+      todosSource: await readFile(new URL("../src-tauri/agent-host/todos.mjs", import.meta.url), "utf8"),
+      todoPiSource: "export default function fixture() {}",
+      recoverySource: await readFile(new URL("../src-tauri/agent-host/recovery.mjs", import.meta.url), "utf8"),
+    }
+    const exit = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve) })
+    child.stdin.end(`${Buffer.from(JSON.stringify(config)).toString("base64")}\n`)
+    const code = await exit
+    assert.equal(await readFile(ownerPath, "utf8"), owner, "preflight must never transfer the Todo lock")
+    if (live) {
+      assert.equal(code, 1)
+      assert.match(stdout, /STILL_BOOTSTRAP_ERROR:.*still running/)
+      assert.equal(stdout.includes("STILL_BOOTSTRAP_READY"), false)
+      assert.equal(stdout.includes("FIXTURE_LAUNCHED"), false)
+    } else {
+      assert.equal(code, 0, stderr)
+      assert.match(stdout, /STILL_BOOTSTRAP_READY/)
+      assert.match(stdout, /FIXTURE_LAUNCHED/)
+    }
   } finally {
     if (child.exitCode === null) child.kill("SIGTERM")
     await rm(home, { recursive: true, force: true })

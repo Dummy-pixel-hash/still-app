@@ -158,6 +158,7 @@ export interface AgentThreadEvent {
   capabilities?: AgentCapabilityReport
   remoteCursor?: number
   turnActive?: boolean
+  recoveryReason?: "workerUnavailable"
 }
 
 export interface AgentInputField {
@@ -214,6 +215,9 @@ export interface AgentThreadSnapshot {
   persistent?: boolean
   remoteCursor?: number
   promptId?: string | number
+  /** Confirmed worker loss, distinct from an SSH disconnection. */
+  recoveryReason?: "workerUnavailable"
+  recoveryRequired?: boolean
   todos?: AgentTodoSnapshot
   todoSync?: AgentTodoSync
   capabilities?: AgentCapabilityReport

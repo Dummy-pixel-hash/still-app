@@ -27,6 +27,16 @@ New agent executions are owned by a detached Node.js worker **on the SSH server*
 not by the laptop's SSH channel. Node.js 20 or newer is required for all providers,
 including Gemini's ACP transport.
 
+If the server restarts or the provider process ends, Still distinguishes the lost
+worker from a temporary SSH disconnection. **Resume saved session** explicitly
+starts a replacement execution for the same provider session and conversation;
+it never resends the last prompt or submits the draft. History, drafts, and the
+conversation Todo list are retained. Recovery checks the prior execution's
+identity and processes before releasing its stale Todo ownership, and refuses
+live, mismatched, or ambiguous owners. Unconfirmed operations stay blocked for
+inspection. When the provider has not confirmed resume support, the saved
+conversation remains readable without offering a nonfunctional recovery action.
+
 - Each execution has a private directory under
   `~/.local/state/still/agents/<execution-id>/` and a user-owned Unix socket in
   `/tmp`. No listening TCP port or new external service is exposed.

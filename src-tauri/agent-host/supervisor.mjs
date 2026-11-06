@@ -5,6 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { existsSync, mkdirSync, chmodSync, lstatSync, openSync, closeSync, writeSync, readFileSync, writeFileSync, renameSync, unlinkSync, fsyncSync, fstatSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { acquireTodoOwner, createTodoStore, readTodoSeed, todoStorePath } from "./todos.mjs"
+import { recoverExecutionOwner, workerBootId } from "./recovery.mjs"
 
 const mode = process.argv[2]
 const encoded = process.argv[3]
@@ -107,7 +108,7 @@ async function worker() {
   if (Object.hasOwn(config, "todoSeed")) throw new Error("Todo seed must be delivered through the private bootstrap file")
   if (config.hasTodoSeed !== undefined && typeof config.hasTodoSeed !== "boolean") throw new Error("Invalid Todo seed marker")
   if (config.hasTodoSeed && config.create !== true) throw new Error("Todo seed is only valid for a new execution")
-  const todoOwner = acquireTodoOwner(todoDirectory, config.executionId)
+  const todoOwner = config.recoverFrom ? recoverExecutionOwner(directory, todoDirectory, config) : acquireTodoOwner(todoDirectory, config.executionId)
   let todoOwnerActive = true
   process.once("exit", todoOwner.release)
   const todoSeed = config.hasTodoSeed ? readTodoSeed(directory) : undefined
@@ -124,9 +125,10 @@ async function worker() {
   let runtime = { transport: transports[config.agentId] || "acp-v1", ...(config.providerRuntime || {}) }
   const pending = new Map(), inflight = new Map(), history = []
   const journal = openSync(journalPath, "a", 0o600)
+  const bootId = workerBootId()
   const remember = () => {
     const tmp = `${statePath}.tmp`
-    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, activePrompt, closed, ended: childEnded, initializeResult, sessionResult }), { mode: 0o600 })
+    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, conversationId: conversation, cwd: config.cwd, agentId: config.agentId, bootId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, activePrompt, closed, ended: childEnded, initializeResult, sessionResult }), { mode: 0o600 })
     renameSync(tmp, statePath)
   }
   const publish = message => {
@@ -301,7 +303,11 @@ async function worker() {
     })
     child.on("exit", (code, signal) => {
       childEnded = true; busy = false; retireTodoOwner(); remember()
-      if (!closing) failure(`Remote agent process exited (${signal || code}). Its saved conversation remains available.`)
+      if (!closing) {
+        failure(`Remote agent process exited (${signal || code}). Its saved conversation remains available.`)
+        publish({ jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
+        owner?.end()
+      }
     })
     remember()
   }
@@ -379,7 +385,10 @@ async function worker() {
     }
     if (request.method === "_still/attach") {
       if (request.params?.executionId !== config.executionId) throw new Error("Persistent execution identity mismatch")
-      if (closed || childEnded) throw new Error("The remote agent process has ended. Resume its provider session explicitly.")
+      if (closed || childEnded) {
+        writeLine(socket, { jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
+        socket.end(); return
+      }
       if (owner && owner !== socket) {
         writeLine(owner, { jsonrpc: "2.0", method: "_still/replaced" }); owner.end()
       }
@@ -392,7 +401,10 @@ async function worker() {
     if (owner !== socket) throw new Error("Attach before sending agent messages")
     if (typeof request.id === "number" && Number.isSafeInteger(request.id)) maxRequestId = Math.max(maxRequestId, request.id)
     if (request.method === "_still/status") {
-      if (childEnded || closed) { reject(socket, request, "The remote agent worker has ended; resume its saved provider session explicitly."); return }
+      if (childEnded || closed) {
+        writeLine(socket, { jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
+        socket.end(); return
+      }
       writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, activePrompt } })
       return
     }
@@ -493,8 +505,12 @@ function connect() {
 async function transport() {
   let socket
   try { socket = await connect() }
-  catch {
-    if (!config.create || existsSync(statePath)) throw new Error("Persistent worker is not available. The remote server may have restarted; its saved provider session can be resumed.")
+  catch (error) {
+    if (!["ENOENT", "ECONNREFUSED"].includes(error.code)) throw error
+    if (!config.create || existsSync(statePath)) {
+      writeLine(process.stdout, { jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
+      process.exitCode = 1; return
+    }
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const info = lstatSync(directory)
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.()) throw new Error("Persistent agent directory has unsafe ownership")

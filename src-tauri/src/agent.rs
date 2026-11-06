@@ -76,6 +76,12 @@ fn next_request_id() -> u64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryReason { WorkerUnavailable }
+
+const WORKER_UNAVAILABLE: &str = "The server-side worker is no longer available. Resume the saved provider session to continue; no prompt has been resent.";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
@@ -140,6 +146,8 @@ pub struct Event {
     pub todo_sync: Option<TodoSync>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<RecoveryReason>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -175,6 +183,7 @@ impl Event {
             todos: None,
             todo_sync: None,
             capabilities: None,
+            recovery_reason: None,
         }
     }
 }
@@ -214,6 +223,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub recovery_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<RecoveryReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_todo_sync")]
     pub todo_sync: Option<TodoSync>,
@@ -232,6 +243,7 @@ impl Snapshot {
             history_capabilities: self.history_capabilities.clone(),
             active_message_ids: None,
             persistent: self.persistent, remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
+            recovery_reason: self.recovery_reason,
             todos: self.todos.clone(),
             todo_sync: self.todo_sync.clone(),
             capabilities: self.capabilities.clone(),
@@ -1046,6 +1058,7 @@ async fn emit(thread: &mut Thread, mut e: Event) {
     e.attempt_id = Some(thread.snapshot.execution_id.clone());
     e.remote_cursor = thread.snapshot.persistent.then_some(thread.snapshot.remote_cursor);
     e.turn_active = Some(thread.snapshot.turn_active);
+    e.recovery_reason = thread.snapshot.recovery_reason;
     if e.kind == "userMessage" { thread.messages.push(e.clone()); }
     else { apply_history_event(&mut thread.messages, &e); }
     append_history(&mut thread.snapshot.transcript, e.clone());
@@ -1181,7 +1194,7 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>) -> Result<(String, String), StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -1198,6 +1211,8 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
         payload["source"] = json!(include_str!("../agent-host/supervisor.mjs"));
         payload["todosSource"] = json!(include_str!("../agent-host/todos.mjs"));
         payload["todoPiSource"] = json!(include_str!("../agent-host/todo-pi.mjs"));
+        payload["recoverySource"] = json!(include_str!("../agent-host/recovery.mjs"));
+        if let Some(previous) = recover_from { payload["recoverFrom"] = previous.clone(); }
         if let Some(seed) = todo_seed { payload["todoSeed"] = seed.clone(); }
         if let Some(runtime) = runtime {
             // The worker may replace the version with stronger runtime evidence;
@@ -1323,15 +1338,16 @@ pub async fn still_agent_start(
     }
     let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let default_todos = || json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":true});
-    let saved_todos = if args.conversation_id.is_some() {
+    let (saved_todos, recover_from) = if args.conversation_id.is_some() {
         let saved = agent_store::load_snapshot(&app, conversation_id.clone()).await?;
         if saved.conversation_id != conversation_id {
             return Err(StillError::friendly("agent_resume_identity", "The saved conversation identity does not match this resume request."));
         }
         validate_resume_scope(&saved, &host_key, &args.agent_id, &cwd, args.resume_session_id.as_deref())
             .map_err(|error| StillError::friendly("agent_resume_identity", error))?;
-        saved.todos
-    } else { None };
+        let recover_from = saved.persistent.then(|| json!({"executionId":saved.execution_id,"agentSessionId":saved.agent_session_id}));
+        (saved.todos, recover_from)
+    } else { (None, None) };
     let validated_saved_todos = saved_todos.and_then(|todos| validate_todos(&todos).ok());
     let mut initial_todos = validated_saved_todos.clone().unwrap_or_else(default_todos);
     initial_todos["toolAvailable"] = json!(false);
@@ -1342,7 +1358,7 @@ pub async fn still_agent_start(
         seed
     });
     let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref())?;
+    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -1378,6 +1394,7 @@ pub async fn still_agent_start(
             todo_sync: Some(TodoSync { state: "stale".into(), reason: Some("Waiting for this execution to confirm the conversation Todo list.".into()) }),
         active_message_ids: None,
         persistent: true, remote_cursor: 0, prompt_id: None, recovery_required: false,
+        recovery_reason: None,
         capabilities: None,
     };
     if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
@@ -1461,7 +1478,6 @@ async fn run_stream(
     cwd: String,
     initial_data: Vec<u8>,
 ) {
-    if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await{transport_lost(&row,&format!("ACP initialize failed: {error}")).await;return}
     let mut buffer = initial_data;
     let mut discarding_frame = false;
     let mut stage = 0_u8;
@@ -1469,8 +1485,20 @@ async fn run_stream(
     let mut permission: Option<(Value, Vec<Value>)> = None;
     let mut stderr = String::new();
 
+    // Bootstrap can deliver a complete terminal worker report with READY. Do not
+    // wait for another SSH data packet (or write to an already-closed transport)
+    // before consuming those buffered records.
+    match receive_agent_frames(channel, &row, &cwd, &mut stage, &mut session_id, &mut permission, &mut buffer, &mut discarding_frame).await {
+        Ok(true) => {}, Ok(false) => return,
+        Err(error) => { fail(&row, &error).await; return; }
+    }
+    let initialize_failed = match send(&channel,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"still","title":"Still","version":env!("CARGO_PKG_VERSION")}}})).await {
+        Ok(()) => false,
+        Err(error) => { stderr = format!("ACP initialize failed: {error}"); true }
+    };
+
     let mut cancel_received = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(if initialize_failed { 5 } else { 45 });
 
     loop {
         tokio::select! {
@@ -1506,7 +1534,11 @@ async fn run_stream(
             let _ = reply.send(result);
             return;
           },
-          _ = tokio::time::sleep_until(deadline), if stage < 3 => { fail(&row, &format!("Remote ACP initialization timed out. Check installation and authentication in the server terminal. {}", stderr.trim())).await; return; },
+          _ = tokio::time::sleep_until(deadline), if stage < 3 => {
+            if initialize_failed { transport_lost(&row, stderr.trim()).await; }
+            else { fail(&row, &format!("Remote ACP initialization timed out. Check installation and authentication in the server terminal. {}", stderr.trim())).await; }
+            return;
+          },
          _ = cancel.recv(), if !cancel_received => {
             cancel_received=true;
              if let Some((request_id,_))=permission.take(){
@@ -1576,42 +1608,12 @@ async fn run_stream(
             }
           },
            incoming=channel.wait()=>match incoming{
-             Some(ChannelMsg::Data{data})=>{
-               buffer.extend_from_slice(&data);
-               let mut protocol_issue = None;
-               loop {
-                 if discarding_frame {
-                   if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                     buffer.drain(..=end); discarding_frame = false; continue;
-                   }
-                   buffer.clear(); break;
-                 }
-                 let Some(end) = buffer.iter().position(|byte| *byte == b'\n') else {
-                   if buffer.len() > FRAME_LIMIT {
-                     buffer.clear(); discarding_frame = true;
-                     protocol_issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
-                   }
-                   break;
-                 };
-                 if end + 1 > FRAME_LIMIT {
-                   buffer.drain(..=end);
-                   protocol_issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
-                   continue;
-                 }
-                 let frame: Vec<u8> = buffer.drain(..=end).collect();
-                 if frame.iter().all(u8::is_ascii_whitespace) { continue; }
-                 let value = match serde_json::from_slice::<Value>(&frame) {
-                   Ok(value) => value,
-                   Err(_) => { protocol_issue = Some("Remote stdout contained an invalid ACP record; it was skipped."); continue; }
-                 };
-                 if let Err(error) = handle(channel, &row, &cwd, &mut stage, &mut session_id, &mut permission, value).await {
-                   fail(&row, &error).await; return;
-                 }
-               }
-               if let Some(message) = protocol_issue {
-                 if stage < 3 { fail(&row, message).await; return; }
-                 protocol_warning(&row, message).await;
-               }
+              Some(ChannelMsg::Data{data})=>{
+                buffer.extend_from_slice(&data);
+                match receive_agent_frames(channel, &row, &cwd, &mut stage, &mut session_id, &mut permission, &mut buffer, &mut discarding_frame).await {
+                  Ok(true) => {}, Ok(false) => return,
+                  Err(error) => { fail(&row, &error).await; return; }
+                }
              },
              Some(ChannelMsg::ExtendedData{data,..})=>{stderr.push_str(&String::from_utf8_lossy(&data));if stderr.len()>16384{let mut cut=stderr.len()-16384;while !stderr.is_char_boundary(cut){cut+=1;}stderr.drain(..cut);}},
              Some(ChannelMsg::Eof|ChannelMsg::Close)|None=>{transport_lost(&row,stderr.trim()).await;return},_=>{}
@@ -1619,6 +1621,52 @@ async fn run_stream(
         }
     }
 }
+fn next_agent_frame(buffer: &mut Vec<u8>, discarding: &mut bool, issue: &mut Option<&'static str>) -> Option<Value> {
+    loop {
+        if *discarding {
+            if let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                buffer.drain(..=end); *discarding = false; continue;
+            }
+            buffer.clear(); return None;
+        }
+        let Some(end) = buffer.iter().position(|byte| *byte == b'\n') else {
+            if buffer.len() > FRAME_LIMIT {
+                buffer.clear(); *discarding = true;
+                *issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
+            }
+            return None;
+        };
+        if end + 1 > FRAME_LIMIT {
+            buffer.drain(..=end);
+            *issue = Some("A remote ACP frame exceeded 16 MiB and was discarded.");
+            continue;
+        }
+        let frame: Vec<u8> = buffer.drain(..=end).collect();
+        if frame.iter().all(u8::is_ascii_whitespace) { continue; }
+        match serde_json::from_slice::<Value>(&frame) {
+            Ok(value) => return Some(value),
+            Err(_) => *issue = Some("Remote stdout contained an invalid ACP record; it was skipped."),
+        }
+    }
+}
+
+async fn receive_agent_frames(
+    channel: &mut Channel<client::Msg>, row: &Arc<Mutex<Thread>>, cwd: &str,
+    stage: &mut u8, session_id: &mut Option<String>, permission: &mut Option<(Value, Vec<Value>)>,
+    buffer: &mut Vec<u8>, discarding: &mut bool,
+) -> Result<bool, String> {
+    let mut issue = None;
+    while let Some(value) = next_agent_frame(buffer, discarding, &mut issue) {
+        handle(channel, row, cwd, stage, session_id, permission, value).await?;
+        if row.lock().await.snapshot.recovery_reason.is_some() { return Ok(false); }
+    }
+    if let Some(message) = issue {
+        if *stage < 3 { return Err(message.into()); }
+        protocol_warning(row, message).await;
+    }
+    Ok(true)
+}
+
 async fn send(channel: &Channel<client::Msg>, value: &Value) -> Result<(), String> {
     let mut frame = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     frame.push(b'\n');
@@ -1639,6 +1687,15 @@ async fn handle(
         thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(cursor);
     }
     if let Some(method) = value.get("method").and_then(Value::as_str) {
+        if method == "_still/unavailable" {
+            let execution = row.lock().await.snapshot.execution_id.clone();
+            if value.pointer("/params/executionId").and_then(Value::as_str) != Some(execution.as_str())
+                || value.pointer("/params/reason").and_then(Value::as_str) != Some("workerUnavailable") {
+                return Err("Worker recovery report does not match this execution.".into());
+            }
+            worker_unavailable(row).await;
+            return Ok(());
+        }
         if method == "_still/request_outcome" {
             let outcome = value.get("params").cloned().ok_or("Missing request outcome")?;
             let mut thread = row.lock().await;
@@ -1853,6 +1910,11 @@ async fn handle(
             if let Some(number) = id.as_u64() {
                 let mut thread = row.lock().await;
                 if thread.reconcile_request.as_ref().is_some_and(|pending| pending.request_id == number) {
+                    if thread.snapshot.persistent && legacy_worker_unavailable(message) {
+                        drop(thread);
+                        worker_unavailable(row).await;
+                        return Ok(());
+                    }
                     let pending = thread.reconcile_request.take().unwrap();
                     let _ = pending.reply.send(Err(message.to_owned()));
                     return Ok(());
@@ -2368,9 +2430,12 @@ async fn protocol_warning(row: &Arc<Mutex<Thread>>, message: &str) {
 }
 async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     let mut thread = row.lock().await;
+    if thread.snapshot.recovery_reason.is_some() { return; }
     if !thread.snapshot.persistent { drop(thread); fail(row,detail).await; return; }
-    if detail.contains("Persistent worker is not available") || detail.contains("remote agent process has ended") || detail.contains("Cannot find module") {
-        drop(thread); fail(row, "The server-side worker is no longer available. Resume the provider’s saved session explicitly; no prompt has been resent.").await; return;
+    // Compatibility with already-deployed workers. Missing transport modules do
+    // not prove that the provider has stopped, so they must not enable replacement.
+    if legacy_worker_unavailable(detail) {
+        drop(thread); worker_unavailable(row).await; return;
     }
     thread.recovering_uncertain = thread.recovering_uncertain || thread.history_request.is_some() || matches!(thread.snapshot.state.as_str(), "submissionUnknown" | "rewinding");
     thread.snapshot.recovery_required = thread.recovering_uncertain;
@@ -2388,8 +2453,26 @@ async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     if let Some(pending) = thread.reconcile_request.take() { let _ = pending.reply.send(Err("The remote status check was interrupted. Reattach and check again.".into())); }
     let mut event = Event::new("threadState"); event.state = Some("detached".into()); event.text = thread.snapshot.last_error.clone(); emit(&mut thread,event).await;
 }
+fn legacy_worker_unavailable(detail: &str) -> bool {
+    detail.contains("Persistent worker is not available") || detail.contains("remote agent process has ended") || detail.contains("remote agent worker has ended")
+}
+
+async fn worker_unavailable(row: &Arc<Mutex<Thread>>) {
+    let mut thread = row.lock().await;
+    thread.recovering_uncertain |= thread.history_request.is_some() || thread.response_delivery.is_some() || thread.snapshot.recovery_required || thread.snapshot.state == "submissionUnknown";
+    thread.snapshot.recovery_required = thread.recovering_uncertain;
+    thread.snapshot.recovery_reason = Some(RecoveryReason::WorkerUnavailable);
+    thread.transport_active = false;
+    let message = thread.snapshot.last_error.as_deref()
+        .filter(|detail| thread.snapshot.state == "error" && !detail.contains(WORKER_UNAVAILABLE))
+        .map(|detail| format!("{detail} {WORKER_UNAVAILABLE}"))
+        .unwrap_or_else(|| WORKER_UNAVAILABLE.to_owned());
+    drop(thread);
+    fail(row, &message).await;
+}
+
 fn failure_state(thread: &Thread) -> &'static str {
-    if thread.history_request.is_some() || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
+    if thread.history_request.is_some() || thread.recovering_uncertain || thread.snapshot.recovery_required || thread.snapshot.state == "submissionUnknown" { "submissionUnknown" } else { "error" }
 }
 
 const TODO_CONFLICT_REASON: &str = "Showing saved Todos; the remote list does not match.";
@@ -2569,6 +2652,7 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
         thread.snapshot.state.as_str(),
         "working" | "complete" | "cancelled" | "error"
     ) || thread.snapshot.turn_active
+        || thread.snapshot.recovery_reason.is_some()
         || thread.prompt.is_some()
         || !thread.config_requests.is_empty()
         || thread.history_request.is_some()
@@ -2759,7 +2843,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None)?;
+    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None)?;
     let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -2827,6 +2911,9 @@ pub async fn still_agent_snapshot(args: IdArgs) -> Result<Snapshot, StillError> 
 pub async fn still_agent_reconcile(args: IdArgs) -> Result<(), StillError> {
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
+    if thread.snapshot.recovery_reason.is_some() {
+        return Err(StillError::friendly("agent_worker_unavailable", WORKER_UNAVAILABLE));
+    }
     if !thread.snapshot.persistent || !thread.transport_active {
         return Err(StillError::friendly("agent_reconcile_offline", "Reconnect this conversation to its server before checking the remote agent."));
     }
@@ -2973,7 +3060,7 @@ mod tests {
             version_source: Some("executable".into()),
             version_observed_at: Some(1_793_372_400_000),
         };
-        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None).unwrap();
+        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None, None).unwrap();
         assert!(command.len() < 8 * 1024, "SSH exec command must stay far below Linux's 128 KiB argument limit");
         assert!(!command.contains(&payload), "base64 configuration belongs on stdin, never in the SSH exec argument");
         assert!(payload.len() > 128 * 1024, "test fixture should exercise the Linux per-argument overflow boundary");
@@ -2986,7 +3073,7 @@ mod tests {
         let worker_env: Value = serde_json::from_str(config["env"]["STILL_PROVIDER_RUNTIME"].as_str().unwrap()).unwrap();
         assert_eq!(worker_env, config["providerRuntime"], "the worker must receive the same launch-time runtime facts");
 
-        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None).unwrap();
+        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None, None).unwrap();
         assert!(attach_command.len() < 8 * 1024);
         assert!(attach_payload.len() < 1024, "reattach does not need to retransmit bundled source code");
         let attach_config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(attach_payload).unwrap()).unwrap();
@@ -3004,7 +3091,7 @@ mod tests {
         assert_eq!(parsed.get("claude").map(String::as_str), Some("2.0.1 (Claude Code)"));
         assert_eq!(parsed.len(), 2, "empty ids/versions and the Node line are not provider versions");
         let unknown = ProviderRuntime { transport: "pi-rpc".into(), executable: Some("pi".into()), version: None, version_source: None, version_observed_at: None };
-        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None).unwrap();
+        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None, None).unwrap();
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
         assert!(config["providerRuntime"].get("version").is_none(), "an unknown version stays absent rather than guessed");
         assert_eq!(config["providerRuntime"]["transport"], "pi-rpc");
@@ -3024,7 +3111,7 @@ mod tests {
         let seed_bytes = serde_json::to_vec(&seed).unwrap();
         assert!(seed_bytes.len() > 128 * 1024, "fixture should exceed Linux's per-argument limit if copied into argv");
         assert!(seed_bytes.len() < 1024 * 1024, "valid seed remains under the private file limit");
-        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed)).unwrap();
+        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed), None).unwrap();
         assert!(command.len() < 8 * 1024);
         assert!(!command.contains("Resume the prior checklist") && !command.contains("task-0"));
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
@@ -3057,6 +3144,62 @@ mod tests {
         assert!(validate_resume_scope(&legacy, "host", "pi", "/srv/project", Some("session-1")).is_ok(), "an explicitly resumed closed legacy snapshot remains compatible");
     }
     #[test]
+    fn worker_loss_recovery_is_durable_and_does_not_clear_uncertain_operations() {
+        let mut saved = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        saved.state = "error".into();
+        saved.recovery_reason = Some(RecoveryReason::WorkerUnavailable);
+        let restored: Snapshot = serde_json::from_value(serde_json::to_value(saved.history_header()).unwrap()).unwrap();
+        assert_eq!(restored.recovery_reason, Some(RecoveryReason::WorkerUnavailable));
+        assert!(validate_resume_scope(&restored, "host", "pi", "/srv/project", Some("session-1")).is_ok());
+        saved.recovery_required = true;
+        assert!(validate_resume_scope(&saved, "host", "pi", "/srv/project", Some("session-1")).is_err());
+        saved.recovery_required = false; saved.state = "submissionUnknown".into();
+        assert!(validate_resume_scope(&saved, "host", "pi", "/srv/project", Some("session-1")).is_err());
+        let event: Event = serde_json::from_value(json!({"sequence":1,"type":"threadError","recoveryReason":"workerUnavailable"})).unwrap();
+        assert_eq!(event.recovery_reason, Some(RecoveryReason::WorkerUnavailable));
+    }
+    #[test]
+    fn missing_modules_and_network_failures_are_not_proof_of_worker_death() {
+        assert!(legacy_worker_unavailable("Persistent worker is not available. The remote server may have restarted."));
+        assert!(legacy_worker_unavailable("The remote agent process has ended. Resume its provider session explicitly."));
+        assert!(legacy_worker_unavailable("The remote agent worker has ended; resume its saved provider session explicitly."));
+        assert!(!legacy_worker_unavailable("Cannot find module '/home/user/transport.mjs'"));
+        assert!(!legacy_worker_unavailable("SSH connection timed out"));
+        assert!(!legacy_worker_unavailable("Permission denied"));
+    }
+    #[test]
+    fn bootstrap_buffered_worker_reports_are_consumed_without_another_ssh_packet() {
+        let report = json!({"jsonrpc":"2.0","method":"_still/unavailable","params":{"executionId":"execution-1","reason":"workerUnavailable","message":"Already stopped λ"}});
+        let mut buffer = serde_json::to_vec(&report).unwrap();
+        let mut discarding = false; let mut issue = None;
+        assert!(next_agent_frame(&mut buffer, &mut discarding, &mut issue).is_none(), "split records must wait for their newline");
+        buffer.push(b'\n');
+        assert_eq!(next_agent_frame(&mut buffer, &mut discarding, &mut issue), Some(report));
+        assert!(buffer.is_empty() && issue.is_none() && !discarding);
+    }
+    #[test]
+    fn native_frame_recovery_discards_oversized_tails_but_keeps_the_next_worker_report() {
+        let mut buffer = vec![b'x'; FRAME_LIMIT + 1];
+        let mut discarding = false; let mut issue = None;
+        assert!(next_agent_frame(&mut buffer, &mut discarding, &mut issue).is_none());
+        assert!(discarding && issue.is_some());
+        let report = json!({"method":"_still/unavailable","params":{"executionId":"execution-1","reason":"workerUnavailable"}});
+        buffer.extend_from_slice(b"not a JSON record\n");
+        buffer.extend_from_slice(&serde_json::to_vec(&report).unwrap()); buffer.push(b'\n');
+        assert_eq!(next_agent_frame(&mut buffer, &mut discarding, &mut issue), Some(report));
+        assert!(buffer.is_empty() && !discarding);
+    }
+    #[test]
+    fn replacement_bootstrap_carries_explicit_recovery_scope_but_never_a_prompt() {
+        let previous = json!({"executionId":"old-execution","agentSessionId":"saved-session"});
+        let (command, payload) = persistent_command("new-execution", "conversation", "/srv/project", "pi", "pi", true, 0, None, None, Some(&previous)).unwrap();
+        let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
+        assert_eq!(config["recoverFrom"], previous);
+        assert!(config["recoverySource"].as_str().unwrap().contains("recoverExecutionOwner"));
+        assert!(config.get("prompt").is_none());
+        assert!(!command.contains("old-execution") && !command.contains("saved-session"));
+    }
+    #[test]
     fn discovery_availability_reports_identity_without_claiming_support() {
         let runtime = ProviderRuntime { transport: "acp-v1".into(), executable: Some("/home/user/.local/bin/gemini".into()), version: None, version_source: None, version_observed_at: None };
         assert_eq!(serde_json::to_value(&runtime).unwrap(), json!({"transport":"acp-v1","executable":"/home/user/.local/bin/gemini"}));
@@ -3085,6 +3228,7 @@ mod tests {
             config_options: Vec::new(), commands: Vec::new(), pending_input: None, resumable: true,
             history_capabilities: json!({"revert":false,"retry":false}), active_message_ids: None,
             persistent: true, remote_cursor: 12, prompt_id: None, recovery_required: false,
+            recovery_reason: None,
             todos: None, todo_sync: None, capabilities: Some(report),
         }
     }

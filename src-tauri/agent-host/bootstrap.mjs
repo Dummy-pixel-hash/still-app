@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process"
 import { mkdirSync, chmodSync, lstatSync, openSync, closeSync, fsyncSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 
 const READY = "STILL_BOOTSTRAP_READY"
 const ERROR = "STILL_BOOTSTRAP_ERROR:"
@@ -61,10 +62,16 @@ try {
       if (typeof source !== "string") throw new Error(`Missing remote source: ${name}`)
       writeFileSync(join(directory, name), source, { mode: 0o600, flag: "wx" })
     }
+    if (typeof config.recoverySource === "string") writeFileSync(join(directory, "recovery.mjs"), config.recoverySource, { mode: 0o600, flag: "wx" })
   }
   delete config.source
   delete config.todosSource
   delete config.todoPiSource
+  delete config.recoverySource
+  if (config.recoverFrom) {
+    const { verifyExecutionRecovery } = await import(pathToFileURL(join(directory, "recovery.mjs")).href)
+    verifyExecutionRecovery(directory, config)
+  }
   const child = spawn(process.execPath, [join(directory, "transport.mjs"), "attach", Buffer.from(JSON.stringify(config)).toString("base64")], { stdio: ["pipe", "pipe", "inherit"] })
   await new Promise((resolve, reject) => {
     child.once("spawn", resolve)

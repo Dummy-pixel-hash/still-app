@@ -52,7 +52,7 @@ const h = {
   releaseResponse: () => {}, releaseConfig: () => {},
   reasoningByModel: {} as Record<string, AgentConfigOption | null>,
   configOptions: () => structuredClone(snapshots.get(h.current)!.configOptions),
-  closed: false, resumable: false, persistent: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
+  closed: false, resumable: false, persistent: false, workerUnavailable: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   gitStatusCalls: [] as Array<{ nativeSessionId: string; cwd: string }>,
   gitDiffCalls: [] as Array<{ nativeSessionId: string; cwd: string; snapshotId: string; entryId: string; view: AgentGitView }>,
   gitStatusState: "ready" as "ready" | "notRepository" | "gitUnavailable", gitRoot: "/srv/still", gitTruncated: false,
@@ -67,7 +67,7 @@ const h = {
   releaseGitStatus(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitStatuses[index]?.() },
   releaseGitDiff(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitDiffs[index]?.() },
   trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], reconciles: [] as string[], reconcileActive: undefined as boolean | undefined, reconcileFail: false, deferStartup: false, startupFail: false,
-  releaseStartup: () => {},
+  releaseStartup: () => {}, startupError: "Agent startup was rejected",
   deferChecks: false,
   pendingChecks: [] as Array<() => void>,
   releaseChecks(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingChecks[index]?.() },
@@ -75,6 +75,7 @@ const h = {
   emit(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
     const value = { ...event, attemptId: event.attemptId || row.executionId, sequence: ++row.lastSequence }
+    if (event.recoveryReason) row.recoveryReason = event.recoveryReason
     if (event.type === "capabilities" && event.capabilities && (!event.attemptId || event.attemptId === row.executionId)
       && (!row.capabilities || event.capabilities.configGeneration >= row.capabilities.configGeneration)) row.capabilities = event.capabilities
     const apply = (events: AgentThreadEvent[]) => {
@@ -191,16 +192,16 @@ registerNativeBridge({
     h.releaseStartup = () => {
       const current = snapshots.get(row.executionId)!
       current.state = h.startupFail ? "error" : "working"
-      if (h.startupFail) current.lastError = "Agent startup was rejected"
+      if (h.startupFail) current.lastError = h.startupError
       else { h.emit(current.executionId, { type: "configOptions", configOptions: structuredClone(modelOptions) }); h.emit(current.executionId, { type: "commands", commands: projectCommands }) }
-      h.emit(current.executionId, h.startupFail ? { type: "threadError", text: "Agent startup was rejected" } : { type: "threadState", state: "working" })
+      h.emit(current.executionId, h.startupFail ? { type: "threadError", text: h.startupError } : { type: "threadState", state: "working" })
     }
     h.releaseStartups.set(row.executionId, h.releaseStartup)
     return structuredClone(row)
   },
   agentSnapshot: async id => { h.snapshotReads.push(id); if (h.failSnapshot) throw new Error("Agent connection unavailable"); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row) throw new Error("Agent execution unavailable"); snapshots.set(id, row); return structuredClone(row) },
   agentReconcile: async id => { h.reconciles.push(id); if (h.reconcileFail) throw new Error("Remote status check failed"); const row = snapshots.get(id); if (!row) throw new Error("Agent execution unavailable"); h.reconcile() },
-  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }); return structuredClone(row) },
+  agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (h.workerUnavailable) h.emit(id, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available. Resume the saved provider session; no prompt has been resent." }); else { if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }) } return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
   agentSend: async (id, message) => {
     if (h.rejectSend && !h.completeBeforeReject) throw new Error("SSH disconnected. Submission is uncertain.")

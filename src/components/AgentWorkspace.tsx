@@ -62,7 +62,7 @@ type Props = {
   onResolveFolder?: (cwd: string) => Promise<string>
 }
 const messageOf = (e: unknown) => e && typeof e === "object" && "message" in e ? String(e.message) : String(e || "Operation failed")
-const idle = (row: AgentThreadRow | null) => !!row && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
+const idle = (row: AgentThreadRow | null) => !!row && !row.recoveryReason && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
 const statusOf = (row: AgentThreadRow) => row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? row.turnActive ? "Connection issue · still running" : "Turn failed" : row.turnActive ? "Working" : "Ready"
 const historyWindows = new Map<string, string>()
 const promptStarters = [
@@ -456,6 +456,21 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     void removeAttachmentFile(id).catch(failure => setAttachmentError(`Could not remove the local attachment: ${messageOf(failure)}`))
   }
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
+  const resumeSavedSession = () => {
+    if (!current || !connectedHere || !transportId || !onStart || !canResumeAgentThread(current)) return
+    const revision = navigation.current
+    void run(async () => {
+      setRestoring(true)
+      try {
+        const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
+        const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, options), resumeExecutable)
+        if (mounted.current && revision === navigation.current) {
+          setSelected(next.meta.id)
+          setGitRefreshEpoch(epoch => epoch + 1)
+        }
+      } finally { if (mounted.current) setRestoring(false) }
+    })
+  }
   const selectHost = (key: string) => { const server = sessionForHost(key, hosts); if (server) onSelectHost?.(server) }
   const openReview = (mode: "repository" | "conversation", trigger?: HTMLElement) => {
     reviewReturnFocus.current = trigger || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
@@ -833,7 +848,18 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
           }}><span className="agent-status-dot attention" />{activeRequestKind === "permission" ? "Approval needed" : "Your answer is needed"}<span>Review request</span><AgentIcon name="chevron" size={13} /></button>}
            {current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{restoring || !connectedHere ? "Connecting to the server to restore this agent…" : "Agent execution is kept on your server"}</span></div> : current?.state === "saved" ? <div className="agent-saved-notice" role="status"><span><AgentIcon name={restoring ? "refresh" : "check"} size={15} />{restoring ? "Restoring this conversation from the server…" : canResumeAgentThread(current) ? connectedHere ? "Resuming the saved provider session…" : "Connecting to the saved server…" : "Saved on this device"}</span></div> : null}
           {session && connectionNotice}
-            {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert"><span>{error || current?.lastError}</span>{current?.turnActive && <p>The remote agent may still be working. Stop it to request cancellation; don’t send a duplicate prompt.</p>}{current && ["error", "submissionUnknown"].includes(current.state) && current.persistent && connectedHere && <button className="agent-button" type="button" disabled={busy} onClick={() => void run(() => reconcileAgentThread(current.executionId))}>Check remote status</button>}</div>}
+            {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert">
+              <span>{error || current?.lastError}</span>
+              {current?.turnActive && <p>The remote agent may still be working. Stop it to request cancellation; don’t send a duplicate prompt.</p>}
+              {current?.recoveryReason === "workerUnavailable" ? <>
+                <p>{current.state === "submissionUnknown" || current.meta.submissionUnknown || current.recoveryRequired
+                  ? "The last operation was not confirmed. Inspect the provider’s saved session before continuing; nothing will be resent."
+                  : current.resumable && current.agentSessionId
+                    ? "Your conversation and draft are kept. Resume the saved provider session without resending the last message."
+                    : "Your saved conversation is read-only. This provider did not confirm a resumable session; start a new conversation to continue."}</p>
+                {current.resumable && current.agentSessionId && <button className="agent-button" type="button" disabled={busy || restoring || configBusy || !connectedHere || !onStart || !canResumeAgentThread(current)} onClick={resumeSavedSession}>{restoring ? "Resuming…" : "Resume saved session"}</button>}
+              </> : current && ["error", "submissionUnknown"].includes(current.state) && current.persistent && connectedHere && <button className="agent-button" type="button" disabled={busy} onClick={() => void run(() => reconcileAgentThread(current.executionId))}>Check remote status</button>}
+            </div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
            {current && (current.todos?.items.length || 0) > 0 && <div className={`agent-todos-dock${todosOpen && !todosDialog ? " is-expanded" : ""}`}><AgentTodos todos={current.todos} sync={current.todoSync} expanded={todosOpen && !todosDialog} expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></div>}
           </div>

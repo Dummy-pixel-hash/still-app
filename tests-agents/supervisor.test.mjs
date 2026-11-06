@@ -16,7 +16,7 @@ const input = readline.createInterface({input:process.stdin});
 input.on('line',line=>{
  const m=JSON.parse(line);
  if(m.method==='initialize')write({jsonrpc:'2.0',id:m.id,result:{protocolVersion:1,agentInfo:{name:'Fixture agent'}}});
-  else if(m.method==='session/new')write({jsonrpc:'2.0',id:m.id,result:{sessionId:'server-session',configOptions:[{id:'model',name:'Model',type:'select',currentValue:'a',options:[{value:'a',name:'A'},{value:'b',name:'B'}]}],receivedMcpServers:m.params?.mcpServers||[],fixtureTodoRoute:{socket:process.env.STILL_TODO_SOCKET,token:process.env.STILL_TODO_TOKEN}}});
+   else if(['session/new','session/load'].includes(m.method))write({jsonrpc:'2.0',id:m.id,result:{sessionId:m.params?.sessionId||'server-session',resumed:m.method==='session/load',configOptions:[{id:'model',name:'Model',type:'select',currentValue:'a',options:[{value:'a',name:'A'},{value:'b',name:'B'}]}],receivedMcpServers:m.params?.mcpServers||[],fixtureTodoRoute:{socket:process.env.STILL_TODO_SOCKET,token:process.env.STILL_TODO_TOKEN}}});
  else if(m.method==='session/set_config_option')write({jsonrpc:'2.0',id:m.id,result:{configOptions:[{id:'model',name:'Model',type:'select',currentValue:m.params.value,options:[{value:'a',name:'A'},{value:'b',name:'B'}]}]}});
  else if(m.method==='session/prompt'){
   write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Started'}}}});
@@ -85,17 +85,19 @@ async function fixture(fn) {
   const directory=await mkdtemp("/tmp/opencode/still-worker-")
   const todoHome=directory+"/home";await mkdir(todoHome,{recursive:true})
   const config={directory,executionId:"agent-fixture",cwd:directory,command:[process.execPath,"--input-type=module","-e",peer],create:true,todoHome}
-  const clients=[]
-  const make=(extra={})=>{const client=attach({...config,...extra});clients.push(client);return client}
+  const clients=[], workers=new Map([[directory,config]])
+  const make=(extra={})=>{const value={...config,...extra};workers.set(value.directory,value);const client=attach(value);clients.push(client);return client}
   try{await fn({config,make,directory})}
   finally{
     for(const client of clients)await client.close()
-    try{
-      const shutdown=attach({...config,create:false},"stop")
-      await shutdown.wait(frame=>frame.id==="close")
-      await shutdown.close()
-    }catch{
-      try{const state=JSON.parse(await readFile(directory+"/state.json","utf8"));if(state.pid)process.kill(-state.pid,"SIGTERM")}catch{}
+    for(const value of [...workers.values()].reverse()) {
+      const shutdown=attach({...value,create:false},"stop")
+      try{
+        const result=await shutdown.wait(frame=>frame.id==="close"||frame.method==="_still/unavailable")
+        if(result.method==="_still/unavailable")throw new Error("Worker already ended")
+      }catch{
+        try{const state=JSON.parse(await readFile(value.directory+"/state.json","utf8"));if(state.pid)process.kill(-state.pid,"SIGTERM")}catch{}
+      }finally{await shutdown.close()}
     }
     await rm(directory,{recursive:true,force:true})
   }
@@ -134,6 +136,51 @@ test("remote worker survives transport death and replays offline output without 
   assert.equal(current.pid,original.pid);assert.equal(current.childPid,original.childPid)
   second.send({jsonrpc:"2.0",id:102,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"build"}],_meta:{messageId:"message-1"}}})
   assert.match((await second.wait(frame=>frame.id===102)).error.message,/already submitted/)
+}))
+
+test("a missing worker reports structured unavailability without creating a replacement",{timeout:15000},()=>fixture(async({make,directory})=>{
+  const client=make({create:false})
+  const frame=await client.wait(frame=>frame.method==="_still/unavailable")
+  assert.deepEqual(frame.params,{executionId:"agent-fixture",reason:"workerUnavailable"})
+  await assert.rejects(stat(join(directory,"state.json")),{code:"ENOENT"})
+  await assert.rejects(stat(join(directory,"worker.log")),{code:"ENOENT"})
+}))
+
+test("provider exit reports recoverable worker loss to both the current transport and later attaches",{timeout:15000},()=>fixture(async({make,directory})=>{
+  const first=make();await initialize(first)
+  const state=JSON.parse(await readFile(join(directory,"state.json"),"utf8"))
+  process.kill(state.childPid,"SIGTERM")
+  const frame=await first.wait(frame=>frame.method==="_still/unavailable")
+  assert.equal(frame.params.reason,"workerUnavailable")
+  const second=make({create:false})
+  assert.equal((await second.wait(frame=>frame.method==="_still/unavailable")).params.executionId,"agent-fixture")
+}))
+
+test("explicit recovery after worker death resumes the same provider session and retains Todos without replaying prompts",{timeout:20000},()=>fixture(async({make,directory,config})=>{
+  const previousId="agent-before-restart", nextId="agent-after-restart", conversationId="restart-conversation"
+  const previousDirectory=join(directory,previousId), nextDirectory=join(directory,nextId)
+  const first=make({directory:previousDirectory,executionId:previousId,conversationId})
+  const session=await initialize(first)
+  const route=session.result.fixtureTodoRoute
+  const list=await requestTodos(route,{action:"list"},"restart:list")
+  const added=await requestTodos(route,{action:"add",expectedRevision:list.revision,title:"Retain work across restart"},"restart:add")
+  first.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"already submitted"}],_meta:{messageId:"old-message"}}})
+  await first.wait(frame=>frame.params?.update?.content?.text==="Started")
+  const state=JSON.parse(await readFile(join(previousDirectory,"state.json"),"utf8"))
+  process.kill(-state.pid,"SIGKILL")
+  await first.close()
+  const missing=make({directory:previousDirectory,executionId:previousId,conversationId,create:false})
+  await missing.wait(frame=>frame.method==="_still/unavailable")
+  const replacement=make({directory:nextDirectory,executionId:nextId,conversationId,recoverFrom:{executionId:previousId,agentSessionId:session.result.sessionId}})
+  const resumed=await initialize(replacement,session.result.sessionId)
+  assert.equal(resumed.result.sessionId,session.result.sessionId)
+  assert.equal(resumed.result.resumed,true)
+  const restored=await requestTodos(resumed.result.fixtureTodoRoute,{action:"list"},"restart:reread")
+  assert.equal(restored.revision,added.revision)
+  assert.deepEqual(restored.items,added.items)
+  assert.equal((await readFile(join(nextDirectory,"events.jsonl"),"utf8")).includes("Started"),false)
+  assert.equal((await readFile(join(previousDirectory,"events.jsonl"),"utf8")).includes("Started"),true)
+  assert.notEqual(JSON.parse(await readFile(join(nextDirectory,"state.json"),"utf8")).pid,state.pid)
 }))
 
 test("a pending question returns after reattach even when its original cursor was saved",{timeout:15000},()=>fixture(async({make})=>{

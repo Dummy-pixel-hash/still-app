@@ -423,6 +423,144 @@ test("selecting a persistent conversation automatically reattaches and catches u
   await expect(page.locator(".agent-message-user")).toContainText("Server-side conversation")
 })
 
+test("worker loss offers explicit saved-session recovery and keeps the draft without resending a prompt", async ({ page }, testInfo) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page, "opencode", "Keep the original message")
+  await page.getByLabel("Message agent").fill("An unsent recovery draft")
+  const before = await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    const result = { executionId: h.current, starts: h.starts.length, sends: [...h.sends], conversationId: h.saved().rows[0].conversationId }
+    h.emit(h.current, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available; no prompt has been resent." })
+    return result
+  })
+  const resume = page.getByRole("button", { name: "Resume saved session", exact: true })
+  await expect(resume).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Check remote status", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Model: Model A" })).toBeDisabled()
+  await page.screenshot({ path: testInfo.outputPath("worker-recovery-desktop.png") })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(resume).toBeInViewport()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath("worker-recovery-mobile.png") })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  // Two clicks before React renders must still launch only one replacement.
+  await resume.evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click() })
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(before.starts + 1)
+  await expect(resume).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled()
+  await expect(page.getByLabel("Message agent")).toHaveValue("An unsent recovery draft")
+  await expect(page.locator(".agent-message-user")).toHaveCount(1)
+  await expect(page.locator(".agent-message-user")).toContainText("Keep the original message")
+  await expect(page.locator(".agent-thread-open")).toHaveCount(1)
+  const after = await page.evaluate(async () => {
+    const h = (window as any).agentFixture; await h.flush()
+    return { current: h.current, sends: h.sends, start: h.starts.at(-1), closes: h.closes, rows: h.saved().rows }
+  })
+  expect(after.current).not.toBe(before.executionId)
+  expect(after.sends).toEqual(before.sends)
+  expect(after.closes).toContain(before.executionId)
+  expect(after.start.options).toMatchObject({ cwd: "/srv/still", conversationId: before.conversationId, resumeSessionId: "acp-fixture" })
+  expect(after.rows).toHaveLength(1)
+  expect(after.rows[0].meta.draft).toBe("An unsent recovery draft")
+})
+
+test("a server restart discovered during reattach requires explicit recovery rather than starting or replaying work", async ({ page }) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page, "pi", "Survive a server restart")
+  await page.evaluate(() => (window as any).agentFixture.flush())
+  await page.reload()
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.workerUnavailable = true; h.persistent = true; h.resumable = true })
+  await page.locator(".agent-thread-open").filter({ hasText: "Survive a server restart" }).click()
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toBeEnabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.attaches)).toHaveLength(1)
+  expect(await page.evaluate(() => (window as any).agentFixture.starts)).toEqual([])
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual([])
+  await page.getByRole("button", { name: "Resume saved session", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Model: Model A" })).toBeEnabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.starts)).toHaveLength(1)
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual([])
+  await expect(page.locator(".agent-message-user")).toContainText("Survive a server restart")
+})
+
+test("confirmed worker loss remains recoverable after a reload without another attach loop", async ({ page }) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page, "opencode", "Durable recovery state")
+  await page.evaluate(async () => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available." })
+    await h.flush()
+  })
+  await page.reload()
+  await page.locator(".agent-thread-open").filter({ hasText: "Durable recovery state" }).click()
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toBeEnabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.attaches)).toEqual([])
+  expect(await page.evaluate(() => (window as any).agentFixture.starts)).toEqual([])
+})
+
+test("worker recovery stays blocked when the last operation is uncertain", async ({ page }) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page)
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "submissionUnknown", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available." })
+  })
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toBeDisabled()
+  await expect(page.locator(".agent-error")).toContainText("The last operation was not confirmed")
+  await expect(page.getByRole("button", { name: "Check remote status", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
+})
+
+test("saved-session recovery waits for this conversation's verified server connection", async ({ page }) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page)
+  const starts = await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available." })
+    h.setConnected(false)
+    return h.starts.length
+  })
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toBeDisabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(starts)
+  await page.evaluate(() => (window as any).agentFixture.setConnected(true))
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toBeEnabled()
+})
+
+test("worker loss without a resumable provider session keeps readable history and does not offer a fake recovery", async ({ page }) => {
+  await page.evaluate(() => { (window as any).agentFixture.persistent = true })
+  await connect(page, "gemini", "Keep this read-only history")
+  await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available." })
+  })
+  await expect(page.locator(".agent-error")).toContainText("Your saved conversation is read-only")
+  await expect(page.getByRole("button", { name: "Resume saved session", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Check remote status", exact: true })).toHaveCount(0)
+  await expect(page.locator(".agent-message-user")).toContainText("Keep this read-only history")
+  await page.getByLabel("Message agent").fill("Keep this draft too")
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
+})
+
+test("a missing provider session during recovery preserves one conversation, its history, and its unsent draft", async ({ page }) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page, "opencode", "Local history must remain")
+  await page.getByLabel("Message agent").fill("Do not send this while resuming")
+  const before = await page.evaluate(() => {
+    const h = (window as any).agentFixture
+    h.emit(h.current, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available." })
+    h.deferStartup = true; h.startupFail = true; h.startupError = "The saved provider session was not found. Your local history is kept."
+    return { starts: h.starts.length, sends: [...h.sends] }
+  })
+  await page.getByRole("button", { name: "Resume saved session", exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as any).agentFixture.starts.length)).toBe(before.starts + 1)
+  await page.evaluate(() => (window as any).agentFixture.releaseStartup())
+  await expect(page.locator(".agent-error")).toContainText("The saved provider session was not found")
+  await expect(page.locator(".agent-thread-open")).toHaveCount(1)
+  await expect(page.locator(".agent-message-user")).toContainText("Local history must remain")
+  await expect(page.getByLabel("Message agent")).toHaveValue("Do not send this while resuming")
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual(before.sends)
+})
+
 test("folder order and collapse are persistent rather than tied to stream output", async ({ page }) => {
   await addFolder(page, "/srv/still")
   await addFolder(page, "/srv/second")

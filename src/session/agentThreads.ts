@@ -14,6 +14,7 @@ const subscribing = new Map<string, Promise<void>>()
 const restored = new Set<string>()
 const tombstones = new Set<string>()
 const historyOperations = new Set<string>()
+const resumeOperations = new Set<string>()
 const requestOperations = new Set<string>()
 const unconfirmedRequests = new Set<string>()
 const todoRefreshRevisions = new Map<string, number>()
@@ -90,7 +91,7 @@ export function loadAgentThreads() {
       rows.set(row.executionId, { ...row, meta: metadata(row), configOptions: Array.isArray(row.configOptions) ? row.configOptions : [],
         ...restoreTodos(row.todos, row.todoSync), capabilities: restoredCapabilities(row), transcript,
         previousTranscript: previousCount ? transcript.slice(0, previousCount) : undefined,
-        state: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? "submissionUnknown" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown ? row.lastError || "The last operation was not confirmed. Inspect the provider session before continuing." : undefined })
+        state: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown || row.recoveryRequired ? "submissionUnknown" : row.recoveryReason ? "error" : "saved", turnActive: false, pendingPermission: undefined, pendingInput: undefined, lastError: row.state === "submissionUnknown" || row.state === "rewinding" || row.meta?.submissionUnknown || row.recoveryRequired ? row.lastError || "The last operation was not confirmed. Inspect the provider session before continuing." : row.recoveryReason ? row.lastError || "The server-side worker is no longer available. Resume the saved provider session; no prompt has been resent." : undefined })
       if (!library.liveExecutions?.includes(row.executionId)) restored.add(row.executionId)
     }
     emit()
@@ -134,6 +135,7 @@ function receive(row: AgentThreadRow, event: AgentThreadEvent) {
   row.lastSequence = event.sequence
   if (event.remoteCursor !== undefined) row.remoteCursor = event.remoteCursor
   if (event.turnActive !== undefined) row.turnActive = event.turnActive
+  if (event.recoveryReason) row.recoveryReason = event.recoveryReason
   if (["userMessage", "threadComplete", "permission", "input", "requestOutcome", "threadError"].includes(event.type)) { row.touchedAt = Date.now(); row.meta = { ...row.meta, activityAt: row.touchedAt } }
   if (event.type === "userMessage") { row.turnActive = true; row.lastError = undefined; if (!row.meta.title) row.meta = { ...row.meta, title: event.text?.split("\n")[0].slice(0, 160) || "", titleSource: "prompt" } }
   if (event.type === "threadState" && event.state) {
@@ -277,7 +279,7 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
 }
 export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false) {
   const row = rows.get(id)
-  if (!row || !["working", "complete", "cancelled", "error"].includes(row.state) || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
+  if (!row || row.recoveryReason || resumeOperations.has(id) || !["working", "complete", "cancelled", "error"].includes(row.state) || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
   // Sequence numbers and the user message come from the native runner, not an optimistic counter.
   const sequenceBeforeSend = row.lastSequence
   row.turnActive = true; row.lastError = undefined; emit()
@@ -410,23 +412,27 @@ export async function discardPreparedAgent(id: string) {
   }
 }
 export function canResumeAgentThread(row: AgentThreadRow) {
-  return row.state !== "submissionUnknown" && row.state !== "rewinding" && !historyOperations.has(row.executionId) && !row.meta.submissionUnknown && !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
+  return row.state !== "submissionUnknown" && row.state !== "rewinding" && !historyOperations.has(row.executionId) && !resumeOperations.has(row.executionId) && !row.meta.submissionUnknown && !row.recoveryRequired && (!row.persistent || row.recoveryReason === "workerUnavailable") && !!row.resumable && !!row.agentSessionId && !row.turnActive && !row.pendingInput && !row.pendingPermission && (restored.has(row.executionId) || row.state === "error")
 }
 export async function resumeAgentThread(id: string, start: (agent: string, options: AgentLaunchOptions) => Promise<AgentThreadRow>, executable?: string) {
   const row = rows.get(id)
   if (!row || !canResumeAgentThread(row)) throw new Error("Refresh this conversation before resuming. An uncertain or active execution cannot be replaced safely.")
-  if (!restored.has(id)) await nativeBridge.agentClose(id)
-  await flushAgentSaves()
-  const next = await start(row.agentId, { cwd: row.cwd, resumeSessionId: row.agentSessionId, conversationId: row.meta.id, executable })
-  if (!idleState(next)) throw new Error(next.lastError || "The saved agent session could not be resumed.")
-  if (!next.previousTranscript) { next.previousTranscript = withoutObservationEvents(row.transcript); next.transcript = withoutObservationEvents([...row.transcript, ...next.transcript]) }
-  tombstones.add(id); rows.delete(id); restored.delete(id)
-  subscriptions.get(id)?.(); subscriptions.delete(id)
-  persist(next); emit(); return next
+  resumeOperations.add(id)
+  try {
+    if (!restored.has(id)) await nativeBridge.agentClose(id)
+    await flushAgentSaves()
+    const next = await start(row.agentId, { cwd: row.cwd, resumeSessionId: row.agentSessionId, conversationId: row.meta.id, executable })
+    if (!idleState(next)) throw new Error(next.lastError || "The saved agent session could not be resumed.")
+    if (!next.previousTranscript) { next.previousTranscript = withoutObservationEvents(row.transcript); next.transcript = withoutObservationEvents([...row.transcript, ...next.transcript]) }
+    tombstones.add(id); rows.delete(id); restored.delete(id)
+    todoRefreshRevisions.delete(id)
+    subscriptions.get(id)?.(); subscriptions.delete(id)
+    persist(next); emit(); return next
+  } finally { resumeOperations.delete(id) }
 }
 const idleState = (row: AgentThreadRow) => ["working", "complete", "cancelled"].includes(row.state) && !row.turnActive
 export function canChangeAgentHistory(row: AgentThreadRow, messageId: string, retry = false) {
-  return !!row.historyCapabilities?.[retry ? "retry" : "revert"] && !restored.has(row.executionId) && !historyOperations.has(row.executionId)
+  return !!row.historyCapabilities?.[retry ? "retry" : "revert"] && !row.recoveryReason && !resumeOperations.has(row.executionId) && !restored.has(row.executionId) && !historyOperations.has(row.executionId)
     && !row.turnActive && !row.pendingInput && !row.pendingPermission && !row.meta.submissionUnknown && !row.meta.archivedAt
     && ["working", "complete", "cancelled", "error"].includes(row.state)
     && row.transcript.some(event => event.type === "userMessage" && event.messageId === messageId && !!event.checkpoint)
