@@ -23,7 +23,7 @@ export default function RemoteAgentWorkspace({ closing, session, sessions, onNee
     connected={connection.state === "connected"} connectionNotice={target && <AgentConnectionNotice connection={connection} />}
     onClose={onClose} onOpenTerminal={target ? () => onOpenTerminal(target) : undefined}
     onStart={(agentId, options, onCreated) => startRemoteAgent(connection.nativeId || "", target?.id || "", agentId, options, target || undefined, onCreated)}
-    onCheck={(agentId, executable) => nativeBridge.agentCheck(connection.nativeId || "", agentId, executable)}
+    onCheck={(agentId, executable, customAgent, testConnection) => nativeBridge.agentCheck(connection.nativeId || "", agentId, executable, customAgent, testConnection)}
     onCatalog={(agentId, cwd, executable) => nativeBridge.agentCatalog(connection.nativeId || "", agentId, cwd, executable)}
     onResolveFolder={cwd => nativeBridge.agentResolveFolder(connection.nativeId || "", cwd)} />
 }

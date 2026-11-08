@@ -196,7 +196,7 @@ pub fn timestamp() -> u128 {
 fn fields(snapshot: &Snapshot) -> Value {
     json!({"conversationId": snapshot.conversation_id, "hostKey": snapshot.host_key,
         "executionId": snapshot.execution_id, "localSessionId": snapshot.local_session_id,
-        "agentId": snapshot.agent_id, "agentName": snapshot.agent_name,
+        "agentId": snapshot.agent_id, "agentName": snapshot.agent_name, "customAgent": snapshot.custom_agent,
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
         "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities,

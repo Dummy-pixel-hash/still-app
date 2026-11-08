@@ -119,7 +119,7 @@ async function worker() {
   const todoSnapshot = () => ({ ...todos.snapshot(), protocolVersion: 3, toolAvailable: todoOwnerActive && todoToolAvailable, available: todoOwnerActive })
   // Capability facts belong to this worker: only it sees registration, calls, plans,
   // and setting changes, and only it can state which generation they describe.
-  const planCapable = config.agentId === "codex" || config.agentId === "gemini"
+  const planCapable = config.agentId === "codex" || (transports[config.agentId] || "acp-v1") === "acp-v1"
   let todoRegistered = false, todoObserved = false, planObserved = false
   let configGeneration = 0, configKey = "", capabilitiesKey = "", observedAt = Date.now()
   let runtime = { transport: transports[config.agentId] || "acp-v1", ...(config.providerRuntime || {}) }
@@ -211,7 +211,7 @@ async function worker() {
   const applyInitializeRuntime = result => {
     // Only a direct ACP provider reports its own version here. The wrapper's
     // "native" label is never a provider version.
-    if (config.agentId !== "gemini") return
+    if (runtime.transport !== "acp-v1") return
     const reported = result?.agentInfo?.version
     if (typeof reported !== "string") return
     const version = [...reported.replace(/\p{Cc}/gu, " ").trim()].slice(0, 200).join("")
@@ -430,7 +430,7 @@ async function worker() {
       }
       if (sessionOperation !== null) return
       sessionOperation = request.id
-      if (config.agentId === "gemini") {
+      if (runtime.transport === "acp-v1") {
         request = { ...request, params: { ...request.params, mcpServers: [
           ...(request.params?.mcpServers || []),
           { name: "still-todos", command: process.execPath, args: [join(directory, "todos.mjs"), "mcp"], env: [{ name: "STILL_TODO_SOCKET", value: socketPath }, { name: "STILL_TODO_TOKEN", value: todoToken }] },

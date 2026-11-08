@@ -1,6 +1,6 @@
 import type { ConnectionStatus } from "../types"
 import type { OrbBridge } from "../orb/types"
-import type { AgentAvailability, AgentCatalog, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentCatalog, CustomAgent, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../agents/git"
 import type { ConversationMeta } from "../agents/workspace"
 
@@ -169,7 +169,7 @@ export interface NativeBridge extends OrbBridge {
   agentGitDiff(nativeSessionId: string, cwd: string, request: { snapshotId: string; entryId: string; view: AgentGitView }): Promise<AgentGitDiff>
 
   agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>
-  agentCheck(nativeSessionId:string,agentId?:string,executable?:string):Promise<AgentAvailability[]>
+  agentCheck(nativeSessionId:string,agentId?:string,executable?:string,customAgent?:CustomAgent,testConnection?:boolean):Promise<AgentAvailability[]>
   agentSend(executionId:string,message:string):Promise<void>
   agentUploadAttachment(nativeSessionId: string, conversationId: string, attachmentId: string, fileName: string, base64Data: string): Promise<{ remotePath: string }>
   agentRevert(executionId:string,messageId:string,expectedSequence:number):Promise<AgentThreadSnapshot>

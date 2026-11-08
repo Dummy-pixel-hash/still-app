@@ -7,8 +7,10 @@
  * FORM: User-pinned T3 Code/Codex desktop canon, grounded in their actual screenshots.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { AGENTS, type AgentAvailability, type AgentCatalog, type AgentCommand, type AgentLaunchOptions } from "../agents/types"
+import { AGENTS, type AgentAvailability, type AgentCatalog, type AgentCommand, type AgentLaunchOptions, type CustomAgent } from "../agents/types"
 import { conversation } from "../agents/transcript"
+import { agentsForHost, customLaunchOptions } from "../agents/customAgents"
+import CustomAgentSetup from "./CustomAgentSetup"
 import { attachmentId, loadAttachmentFile, removeAttachmentFile, saveAttachmentFile, validateAttachments, type AgentDraftAttachment } from "../agents/attachments"
 import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, projectKey, readLibraryPreferences, sessionForHost, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
 import { useConversationScroll } from "../agents/useConversationScroll"
@@ -57,7 +59,7 @@ type Props = {
   onClose: () => void
   onOpenTerminal?: () => void
   onStart: (agentId: string, options?: AgentLaunchOptions, onCreated?: (row: AgentThreadRow) => void) => Promise<AgentThreadRow>
-  onCheck: (agentId?: string, executable?: string) => Promise<AgentAvailability[]>
+  onCheck: (agentId?: string, executable?: string, customAgent?: CustomAgent, testConnection?: boolean) => Promise<AgentAvailability[]>
   onCatalog?: (agentId: string, cwd: string, executable?: string) => Promise<AgentCatalog>
   onResolveFolder?: (cwd: string) => Promise<string>
 }
@@ -80,6 +82,8 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
   const [hydrated, setHydrated] = useState(false)
+  const [customSetup, setCustomSetup] = useState<CustomAgent | null>(null)
+  const [removingCustom, setRemovingCustom] = useState<CustomAgent | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [project, setProject] = useState<AgentProject | null>(null)
   const [view, setView] = useState<"home" | "draft" | "project" | "settings">("home")
@@ -131,13 +135,15 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const folderOperation = useRef(0)
   const callbacks = useRef({ onCheck, onCatalog, onStart }); callbacks.current = { onCheck, onCatalog, onStart }; prefsRef.current = prefs
   const host = session ? hostKey(session) : ""
+  const agents = agentsForHost(host, prefs.customAgents)
+  const customDiscoveryKey = JSON.stringify(prefs.customAgents[host] || [])
   const executableSelections = prefs.executables[host] || {}
-  const discoverySelectionKey = agentDiscoverySelectionKey(transportId, executableSelections, AGENTS.map(agent => agent.id))
+  const discoverySelectionKey = agentDiscoverySelectionKey(transportId, executableSelections, agents.map(agent => agent.id), prefs.customAgents[host])
   const discovery = useAgentDiscovery(host, discoverySelectionKey)
   const discoveryCurrent = !discovery.stale && discovery.selectionKey === discoverySelectionKey
   const discoveryStatus = (info?: AgentAvailability) => {
     const status = info?.installed
-      ? info.available ? info.runtime === "acp" ? "Installed · ACP connection" : "Installed · native connection" : info.message || "Integration unavailable"
+      ? info.available ? info.agentId.startsWith("custom-") ? "Installed · connection not tested" : info.runtime === "acp" ? "Installed · ACP connection" : "Installed · native connection" : info.message || "Integration unavailable"
       : discovery.checking ? "Checking installation…" : info ? "Not found" : "Select a server to check"
     return discovery.stale && info ? `Cached · ${status}` : status
   }
@@ -164,7 +170,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     setRestoring(true)
     const start = (agent: string, options: AgentLaunchOptions) => {
       const launch = callbacks.current.onStart
-      return launch ? launch(agent, options) : Promise.reject(new Error("Connect an agent before resuming this conversation."))
+      return launch ? launch(agent, { ...options, customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }) : Promise.reject(new Error("Connect an agent before resuming this conversation."))
     }
     const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
     void resumeAgentThread(current.executionId, start, resumeExecutable).then(next => {
@@ -175,15 +181,16 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
       if (mounted.current && revision === navigation.current) setRestoring(false)
     })
   }, [current?.executionId, current?.state, current?.persistent, current?.meta.hostKey, current?.agentId, transportId, connectedHere, onStart])
-  const agentId = current?.agentId || prefs.agent
-  const definition = AGENTS.find(agent => agent.id === agentId) || AGENTS[0]
-  const executable = context ? prefs.executables[context.host]?.[agentId]?.trim() || undefined : undefined
+  const agentId = current?.agentId || (agents.some(agent => agent.id === prefs.agent) ? prefs.agent : AGENTS[0].id)
+  const definition = agents.find(agent => agent.id === agentId) || AGENTS[0]
+  const customAgent = context ? prefs.customAgents[context.host]?.find(agent => agent.id === agentId) : undefined
+  const executable = customAgent?.executable || (context ? prefs.executables[context.host]?.[agentId]?.trim() || undefined : undefined)
   const available = discovery.agents.find(agent => agent.agentId === agentId)
   const draftKey = project ? projectKey(project) : "unassigned"
-  const configurationKey = JSON.stringify([contextKey, agentId, executable])
+  const configurationKey = JSON.stringify([contextKey, agentId, executable, customAgent])
   const startScreen = !current && !archived && view !== "settings"
   const preparing = hydrated && startScreen && connectedHere && discoveryCurrent && available?.available === true && !discovery.checking
-  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable }, context?.host || "", onStart)
+  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent }, context?.host || "", onStart)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
   const repositoryCwd = activeAgent?.cwd || current?.meta.folder || ""
@@ -201,7 +208,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     if (previous?.executionId === executionId && previous.active && !active && repositoryEnabled) void git.refreshAfterCurrent()
     lastGitTurn.current = { executionId, active }
   }, [activeAgent?.executionId, activeAgent?.turnActive, repositoryEnabled, git.refreshAfterCurrent])
-  const capabilityProviderLabel = activeAgent?.agentName || AGENTS.find(agent => agent.id === activeAgent?.agentId)?.label || activeAgent?.agentId || definition.label
+  const capabilityProviderLabel = activeAgent?.agentName || agents.find(agent => agent.id === activeAgent?.agentId)?.label || activeAgent?.agentId || definition.label
   const capabilityState: "connecting" | "live" | "offline" | "unavailable" = !activeAgent
     ? "unavailable"
     : activeAgent.state === "connecting" ? "connecting"
@@ -260,7 +267,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const sidebarExpanded = sidebar || !prefs.sidebarCollapsed
   const sidebarOverlay = sidebar && narrowNavigation
   const todosDialog = compactChat && todosOpen && !!current?.todos?.items.length
-  const dialogOpen = folderOpen || !!deleting || timelineOpen || !!historyAction || !!extraControl || !!expandedRequest || todosDialog
+  const dialogOpen = !!customSetup || !!removingCustom || folderOpen || !!deleting || timelineOpen || !!historyAction || !!extraControl || !!expandedRequest || todosDialog
   const attentionCount = allThreads.filter(row => row.pendingPermission || row.pendingInput).length
   const activeRequestKind = current?.pendingPermission ? "permission" : current?.pendingInput ? "question" : undefined
   const activeRequestId = current?.pendingPermission?.requestId ?? current?.pendingInput?.requestId
@@ -345,9 +352,10 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     const currentHost = host
     const paths = { ...(prefsRef.current.executables[currentHost] || {}) }
     const selectedCheck = callbacks.current.onCheck
+    const custom = prefsRef.current.customAgents[currentHost] || []
     return discoverAgents(currentHost, discoverySelectionKey, () => {
-      return AGENTS.some(agent => paths[agent.id]?.trim())
-        ? Promise.all(AGENTS.map(agent => selectedCheck(agent.id, paths[agent.id]?.trim() || undefined))).then(rows => rows.flat())
+      return custom.length || AGENTS.some(agent => paths[agent.id]?.trim())
+        ? Promise.all(agentsForHost(currentHost, prefsRef.current.customAgents).map(agent => selectedCheck(agent.id, paths[agent.id]?.trim() || undefined, custom.find(row => row.id === agent.id)))).then(rows => rows.flat())
         : selectedCheck()
     })
   }
@@ -360,7 +368,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   useEffect(() => {
     if (!hydrated || !host || !connected) return
     void checkDiscovery()
-  }, [host, connected, transportId, hydrated])
+  }, [host, connected, transportId, hydrated, customDiscoveryKey])
   useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
   useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setCommandOpen(false) }, [selected, current?.executionId])
   useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
@@ -402,15 +410,16 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     const previous = returnFocus.current
     const modal = surface.current?.querySelector<HTMLElement>(".agent-modal")
     const controls = [...(modal?.querySelectorAll<HTMLElement>('input:not(:disabled),select:not(:disabled),button:not(:disabled)') || [])].filter(node => node.getClientRects().length && !node.closest("[inert]"))
-    const target = expandedRequest ? modal?.querySelector<HTMLElement>('[aria-label="Close expanded request"]') : controls.find(node => node.matches("input,select")) || controls[0]
+    const target = expandedRequest ? modal?.querySelector<HTMLElement>('[aria-label="Close expanded request"]') : controls.find(node => node.matches("input:not([readonly]),select")) || controls[0]
     target?.focus({ preventScroll: true })
     return () => { requestAnimationFrame(() => {
       if (surface.current?.querySelector(".agent-modal")) return
       if (previous?.isConnected && !previous.closest("[inert]")) previous.focus({ preventScroll: true })
       else if (expandedRequest) (surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(expandedRequest)}"] .agent-request-expand`) || textarea.current)?.focus({ preventScroll: true })
+      else if (removingCustom) surface.current?.querySelector<HTMLButtonElement>(".agent-custom-section > button")?.focus({ preventScroll: true })
       else textarea.current?.focus({ preventScroll: true })
     }) }
-  }, [folderOpen, !!deleting, timelineOpen, !!historyAction, extraControl, expandedRequest, todosDialog])
+  }, [!!customSetup, !!removingCustom, folderOpen, !!deleting, timelineOpen, !!historyAction, extraControl, expandedRequest, todosDialog])
   useEffect(() => {
     if (!projectChoices) return
     const outside = (event: PointerEvent) => {
@@ -463,7 +472,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
       setRestoring(true)
       try {
         const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
-        const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, options), resumeExecutable)
+        const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, { ...options, customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }), resumeExecutable)
         if (mounted.current && revision === navigation.current) {
           setSelected(next.meta.id)
           setGitRefreshEpoch(epoch => epoch + 1)
@@ -703,7 +712,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     setTimelineOpen(false)
     requestAnimationFrame(() => scroll.jumpTo(id))
   }
-  const providerOption = { id: "provider", name: "Coding agent", category: "provider", type: "select", currentValue: prefs.agent, options: AGENTS.map(agent => {
+  const providerOption = { id: "provider", name: "Coding agent", category: "provider", type: "select", currentValue: agentId, options: agents.map(agent => {
     const found = discovery.agents.find(info => info.agentId === agent.id)
     return { value: agent.id, name: agent.label, description: found?.available ? "Installed on this server" : found?.installed ? found.message || "Integration unavailable" : found ? "Not installed on this server" : discovery.checking ? "Checking installation…" : "Not checked" }
   }) }
@@ -724,7 +733,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) closeReview(); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (customSetup) setCustomSetup(null); else if (removingCustom) setRemovingCustom(null); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) closeReview(); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
       if (e.key === "Tab") {
         const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || surface.current?.querySelector('.agent-review[aria-modal="true"]') || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
@@ -828,6 +837,13 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
           const checkedLabel = Number.isSafeInteger(checkedAt) ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(checkedAt) : "Not checked"
           return <details className="agent-provider-setting" key={provider.id}><summary><span className="agent-provider-logo"><AgentProviderMark id={provider.id} size={23} /></span><span><strong>{provider.label}</strong><small>{discoveryStatus(info)}</small></span><AgentIcon name="chevron" size={14} /></summary><div className="agent-provider-details"><p>{provider.note}</p><dl className="agent-provider-runtime"><div><dt>Version</dt><dd>{info?.providerRuntime?.version || "Version not reported"}</dd></div><div><dt>Transport</dt><dd>{agentProviderTransportLabel(info?.providerRuntime?.transport)}</dd></div><div><dt>Last checked</dt><dd>{discovery.stale ? "Cached · " : ""}{checkedLabel}</dd></div></dl><label className="agent-field">Executable path<input aria-label={`${provider.label} executable path`} disabled={!host} value={prefs.executables[host]?.[provider.id] || ""} placeholder={info?.executable || provider.executable} onChange={e => setPrefs(old => ({ ...old, executables: { ...old.executables, [host]: { ...old.executables[host], [provider.id]: e.target.value } } }))} /></label>{!info?.installed && <><span>Install on the server</span><code className="agent-install-command">{provider.installCommand}</code></>}<span>Sign in on the server</span><code className="agent-install-command">{provider.loginCommand}</code></div></details>
         })}</div>
+        <div className="agent-custom-section"><h2>Custom agents</h2><p>ACP-compatible CLIs configured only for this server.</p>
+          {(prefs.customAgents[host] || []).map(agent => {
+            const info = discovery.agents.find(row => row.agentId === agent.id)
+            return <div className="agent-custom-row" key={agent.id}><AgentProviderMark id={agent.id} size={23} /><div><strong>{agent.name}</strong><small>{info ? discoveryStatus(info) : "Not checked"}</small><code>{agent.executable}</code></div><div className="agent-inline-actions"><button className="agent-button" onClick={() => setCustomSetup(agent)}>Edit</button><button className="agent-button" onClick={() => setRemovingCustom(agent)}>Remove</button></div></div>
+          })}
+          <button className="agent-button" disabled={!host} onClick={() => setCustomSetup({ id: `custom-${crypto.randomUUID()}`, hostKey: host, name: "", executable: "", args: [], transport: "acp-v1" })}>Add custom agent</button>
+        </div>
         <div className="agent-inline-actions"><button className="agent-button" disabled={!host || !connected || discovery.checking} onClick={() => void check()}><AgentIcon name="refresh" />{discovery.checking ? "Checking…" : "Refresh"}</button><button className="agent-button" onClick={home}>Back to conversations</button></div>
         {discovery.error && <p className="agent-error" role="alert">{discovery.error}</p>}
         <div className="agent-local-settings"><h2>History on this device</h2><p>Conversations and drafts stay available when your server is offline.</p><code>{storage.path || "Opening local storage…"}</code></div>
@@ -857,6 +873,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
                   : current.resumable && current.agentSessionId
                     ? "Your conversation and draft are kept. Resume the saved provider session without resending the last message."
                     : "Your saved conversation is read-only. This provider did not confirm a resumable session; start a new conversation to continue."}</p>
+                {current.customAgent && !prefs.customAgents[current.meta.hostKey]?.some(agent => agent.id === current.agentId) && <button className="agent-button" onClick={() => setCustomSetup(current.customAgent!)}>Configure agent again</button>}
                 {current.resumable && current.agentSessionId && <button className="agent-button" type="button" disabled={busy || restoring || configBusy || !connectedHere || !onStart || !canResumeAgentThread(current)} onClick={resumeSavedSession}>{restoring ? "Resuming…" : "Resume saved session"}</button>}
               </> : current && ["error", "submissionUnknown"].includes(current.state) && current.persistent && connectedHere && <button className="agent-button" type="button" disabled={busy} onClick={() => void run(() => reconcileAgentThread(current.executionId))}>Check remote status</button>}
             </div>}
@@ -914,6 +931,15 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     {extraControl && <div className="agent-confirm-backdrop"><section className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-label={fields.find(option => option.id === extraControl)?.name || "Agent control"}><div className="agent-modal-heading"><h2>{fields.find(option => option.id === extraControl)?.name || "Agent control"}</h2><button className="agent-icon-button" aria-label="Close agent control" onClick={() => setExtraControl(null)}><AgentIcon name="close" /></button></div>{fields.filter(option => option.id === extraControl).map(option => <div key={option.id}>{option.description && <p>{option.description}</p>}<ConfigPicker option={option} disabled={!connectedHere || !idle(activeAgent) || configBusy} change={changeSecondaryConfig} /></div>)}{configError && <p className="agent-model-error" role="alert">{configError}</p>}</section></div>}
     {historyAction && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-history-confirm" role="dialog" aria-modal="true" aria-labelledby="agent-history-title"><h2 id="agent-history-title">{historyAction.retry ? "Retry this message?" : "Revert to this message?"}</h2><p>{historyAction.retry ? "Return to before this message and send it again with the currently selected model." : "Return to before this message. Its replies and later messages will leave the active conversation."}</p><blockquote>{historyAction.message.text.slice(0, 240)}{historyAction.message.text.length > 240 ? "…" : ""}</blockquote><p>Project files stay as they are. {current.agentId === "pi" ? "Pi continues from a fork at this point." : "This updates the agent’s conversation history."}</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" disabled={busy} onClick={() => setHistoryAction(null)}>Cancel</button><button className="agent-primary" disabled={busy || !connectedHere || !canChangeAgentHistory(current, historyAction.message.messageId || "", historyAction.retry)} onClick={() => void applyHistoryAction()}>{busy ? "Updating history…" : historyAction.retry ? "Retry message" : "Revert conversation"}</button></div></section></div>}
     {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input ref={timelineSearch} autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
+    {customSetup && <CustomAgentSetup key={customSetup.id} agent={customSetup} serverName={hosts.find(server => hostKey(server) === customSetup.hostKey)?.name || hostLabel(customSetup.hostKey)} connected={connected && host === customSetup.hostKey} onTest={agent => callbacks.current.onCheck(agent.id, undefined, agent, true)} onClose={() => setCustomSetup(null)} onSave={agent => {
+      setPrefs(old => ({ ...old, customAgents: { ...old.customAgents, [agent.hostKey]: [...(old.customAgents[agent.hostKey] || []).filter(row => row.id !== agent.id), agent] } }))
+      setCustomSetup(null)
+    }} />}
+    {removingCustom && <div className="agent-confirm-backdrop"><div className="agent-modal" role="alertdialog" aria-modal="true" aria-labelledby="remove-custom-heading"><h2 id="remove-custom-heading">Remove {removingCustom.name}?</h2><p>Existing history and running executions stay available. To start another execution, you will need to configure this agent again.</p><div className="agent-inline-actions"><button className="agent-button" onClick={() => setRemovingCustom(null)}>Cancel</button><button className="agent-primary" onClick={() => {
+      const removed = removingCustom
+      setPrefs(old => ({ ...old, agent: old.agent === removed.id ? AGENTS[0].id : old.agent, customAgents: { ...old.customAgents, [removed.hostKey]: (old.customAgents[removed.hostKey] || []).filter(agent => agent.id !== removed.id) } }))
+      setRemovingCustom(null)
+    }}>Remove agent</button></div></div></div>}
     {folderOpen && <div className="agent-confirm-backdrop"><section className="agent-modal agent-folder-picker" role="dialog" aria-modal="true" aria-labelledby="agent-project-title"><div className="agent-modal-heading"><div><h2 id="agent-project-title">Choose a project</h2><p>A folder on the server where your agent will work.</p></div><button className="agent-icon-button" aria-label="Close project picker" onClick={closeFolder}><AgentIcon name="close" /></button></div>
       {addingServer ? <form onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); const port = Number(data.get("port")), hostname = String(data.get("hostname") || "").trim(), username = String(data.get("username") || "").trim(); if (!hostname || !username || !Number.isInteger(port) || port < 1 || port > 65535) return; const key = JSON.stringify([hostname.toLowerCase(), port, username]); const profile = sessionForHost(key, hosts); folderOperation.current++; setFolderHost(key); if (profile) onSelectHost?.({ ...profile, authMethod: data.get("auth") === "key" ? "key" : "ask" }); setAddingServer(false) }}><label className="agent-field">Host<input required name="hostname" placeholder="server.example.com" /></label><div className="agent-server-fields"><label className="agent-field">Username<input required name="username" placeholder="dev" /></label><label className="agent-field">Port<input required type="number" min={1} max={65535} name="port" defaultValue="22" /></label></div><label className="agent-field">Authentication<select name="auth"><option value="ask">Password or saved credential</option><option value="key">Private key</option></select></label><div className="agent-inline-actions"><button className="agent-primary">Use this server</button><button type="button" className="agent-button" onClick={() => setAddingServer(false)}>Back</button></div></form> : <form onSubmit={e => { e.preventDefault(); void openFolder() }}><label className="agent-field">Server<select aria-label="Project server" value={folderHost} disabled={busy} onChange={e => { folderOperation.current++; setFolderHost(e.target.value); if (e.target.value) selectHost(e.target.value) }}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label><button type="button" className="agent-link-button" disabled={busy} onClick={() => setAddingServer(true)}>Add a server</button><label className="agent-field">Remote project folder<input required autoComplete="off" aria-label="Remote project folder" disabled={busy} value={folderPath} onChange={e => { folderOperation.current++; setFolderPath(e.target.value) }} placeholder="~/projects/my-app" /></label>{folderHost === host && connectionNotice}{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-primary" disabled={busy || !connected || folderHost !== host || !folderPath.trim()}>Open folder</button><button type="button" className="agent-button" onClick={closeFolder}>Cancel</button></div></form>}
     </section></div>}

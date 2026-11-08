@@ -5,7 +5,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager"
 import { diagRecord, diagWatchdog } from "../session/diag"
 import type { OrbAction, OrbSnapshot } from "../orb/types"
 import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../agents/git"
-import type { AgentAvailability, AgentCatalog, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentCatalog, CustomAgent, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
 import type {
   ConnectArgs,
   ConnectResult,
@@ -44,7 +44,7 @@ export const tauriBridge: NativeBridge = {
   agentGitStatus: (nativeSessionId, cwd) => invoke<AgentGitSnapshot>("still_agent_git_status", { args: { nativeSessionId, cwd } }),
   agentGitDiff: (nativeSessionId, cwd, request) => invoke<AgentGitDiff>("still_agent_git_diff", { args: { nativeSessionId, cwd, request } }),
   agentStart(nativeSessionId:string,localSessionId:string,agentId:string,options?:AgentLaunchOptions):Promise<AgentThreadSnapshot>{return invoke<AgentThreadSnapshot>("still_agent_start",{args:{nativeSessionId,localSessionId,agentId,...options}})},
-  agentCheck(nativeSessionId:string,agentId?:string,executable?:string){return invoke<AgentAvailability[]>("still_agent_check",{args:{nativeSessionId,agentId,executable}})},
+  agentCheck(nativeSessionId:string,agentId?:string,executable?:string,customAgent?:CustomAgent,testConnection?:boolean){return invoke<AgentAvailability[]>("still_agent_check",{args:{nativeSessionId,agentId,executable,customAgent,testConnection}})},
   agentSend(executionId:string,message:string){return invoke<void>("still_agent_send",{args:{executionId,message}})},
   agentUploadAttachment(nativeSessionId:string,conversationId:string,attachmentId:string,fileName:string,base64Data:string){return invoke<{remotePath:string}>("still_agent_upload_attachment",{args:{nativeSessionId,conversationId,attachmentId,fileName,base64Data}})},
   agentRevert(executionId:string,messageId:string,expectedSequence:number){return invoke<AgentThreadSnapshot>("still_agent_revert",{args:{executionId,messageId,expectedSequence}})},

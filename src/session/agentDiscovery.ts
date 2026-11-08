@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react"
-import type { AgentAvailability } from "../agents/types"
+import type { AgentAvailability, CustomAgent } from "../agents/types"
 
 type Discovery = { agents: AgentAvailability[]; checking: boolean; checkedAt?: number; error?: string; selectionKey?: string; stale: boolean }
 const cache = new Map<string, Discovery>()
@@ -10,8 +10,8 @@ const emit = () => { version++; listeners.forEach(fn => fn()) }
 const subscribe = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }
 const storageKey = (host: string) => `still.agents.discovery.v2:${host}`
 
-export function agentDiscoverySelectionKey(transportId: string | undefined, overrides: Record<string, string | undefined>, providerIds: readonly string[]) {
-  return JSON.stringify([transportId || "", providerIds.map(id => [id, overrides[id]?.trim() || ""])])
+export function agentDiscoverySelectionKey(transportId: string | undefined, overrides: Record<string, string | undefined>, providerIds: readonly string[], customAgents?: readonly CustomAgent[]) {
+  return JSON.stringify([transportId || "", providerIds.map(id => [id, overrides[id]?.trim() || ""]), customAgents || []])
 }
 
 function state(host: string): Discovery {

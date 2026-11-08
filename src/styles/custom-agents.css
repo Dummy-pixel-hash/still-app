@@ -1,0 +1,20 @@
+/* Inherit the agent workspace: flat rows for identity, existing dialog for setup. */
+.agent-custom-section { margin: 28px 0; }
+.agent-custom-section > h2 { margin-bottom: 8px; font-size: 15px; }
+.agent-custom-section > p { margin-bottom: 16px; color: var(--ag-dim); }
+.agent-custom-row { display: flex; align-items: center; gap: 12px; padding: 16px 0; border-top: 1px solid var(--ag-line); }
+.agent-custom-row > div:first-of-type { flex: 1; min-width: 0; display: grid; gap: 5px; }
+.agent-custom-row small { color: var(--ag-dim); }
+.agent-custom-row code { overflow-wrap: anywhere; font-size: 12px; }
+.agent-modal.agent-custom-setup { width: min(540px, 100%); max-height: min(90dvh, 840px); overflow-y: auto; }
+.agent-custom-setup fieldset { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 16px; }
+.agent-custom-setup .agent-field > span, .agent-custom-test-note { line-height: 1.5; font-size: 12px; color: var(--ag-dim); }
+.agent-custom-setup input { width: 100%; min-width: 0; box-sizing: border-box; }
+.agent-custom-arguments h3 { font-size: 13px; margin: 0 0 8px; }
+.agent-custom-arguments p { margin-bottom: 12px; }
+.agent-custom-argument { display: flex; align-items: end; gap: 10px; margin-bottom: 12px; }
+.agent-custom-argument .agent-field { flex: 1; min-width: 0; }
+@media (max-width: 560px) {
+  .agent-custom-row { flex-wrap: wrap; }
+  .agent-custom-row > .agent-inline-actions { width: 100%; }
+}

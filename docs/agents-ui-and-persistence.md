@@ -100,3 +100,37 @@ Run `npm run dev -- --host 0.0.0.0 --port 1433`, then open:
 
 These are explicitly synthetic examples; the browser preview does not execute a
 real local or remote coding agent.
+
+## Server-scoped custom CLI agents
+
+In **Agents → Agent settings**, choose a server and select **Add custom agent**.
+Give it a name, a command on the remote server's PATH (or an absolute executable
+path), and ordered arguments. Each argument row is a literal value: spaces and
+shell metacharacters are not interpreted. Do not add shell quotes or put arguments
+in the executable field.
+
+Custom agents must implement **ACP v1 over stdio**. Install and authenticate the
+CLI on that server first; Still does not install it, store its API keys, or adapt
+arbitrary interactive terminal output. Persistent conversations also require
+Node.js 20 or newer on the server, as with the built-in agents.
+
+**Test connection** explicitly launches the supplied executable, negotiates ACP
+initialization, then terminates the test process. It does not create a provider
+session or submit a prompt. A successful test verifies ACP compatibility, not
+that authentication or every optional feature will succeed in a conversation.
+Changing a field clears the displayed test result. You can save without testing;
+normal conversation startup performs the actual session negotiation. Opening
+settings/discovery checks installation only and never launches custom CLIs for
+version detection.
+
+Definitions are saved in the device-owned agent library and associated with one
+SSH server/account identity. They appear only in that server's coding-agent
+picker. Editing applies to new conversations; running executions are unchanged.
+Saved conversations retain their original executable and arguments for explicit
+resume/recovery, so an edited command cannot silently replace their provider.
+
+Removing a definition preserves history and running executions, including
+reattachment. A new execution requires configuring the agent again. A saved
+conversation offers **Configure agent again** to restore its original definition
+and identity before resuming. Optional capabilities come from ACP negotiation
+and observed worker activity, not the agent's display name.

@@ -198,6 +198,8 @@ pub struct Snapshot {
     pub local_session_id: String,
     pub agent_id: String,
     pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_agent: Option<CustomAgent>,
     pub agent_session_id: Option<String>,
     pub cwd: String,
     pub state: String,
@@ -236,7 +238,7 @@ impl Snapshot {
         Self {
             conversation_id: self.conversation_id.clone(), host_key: self.host_key.clone(),
             execution_id: self.execution_id.clone(), local_session_id: self.local_session_id.clone(),
-            agent_id: self.agent_id.clone(), agent_name: self.agent_name.clone(), agent_session_id: self.agent_session_id.clone(),
+            agent_id: self.agent_id.clone(), agent_name: self.agent_name.clone(), custom_agent: self.custom_agent.clone(), agent_session_id: self.agent_session_id.clone(),
             cwd: self.cwd.clone(), state: self.state.clone(), last_error: self.last_error.clone(),
             last_sequence: self.last_sequence, turn_active: self.turn_active, resumable: self.resumable,
             transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
@@ -328,6 +330,7 @@ pub struct StartArgs {
     executable: Option<String>,
     resume_session_id: Option<String>,
     conversation_id: Option<String>,
+    custom_agent: Option<CustomAgent>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -367,6 +370,44 @@ struct Definition {
     args: &'static [&'static str],
     install: &'static str,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomAgent {
+    id: String,
+    host_key: String,
+    name: String,
+    executable: String,
+    args: Vec<String>,
+    transport: String,
+}
+fn custom_id(id: &str) -> bool {
+    id.strip_prefix("custom-").is_some_and(|suffix| !suffix.is_empty() && suffix.len() <= 80
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+}
+fn validate_custom(agent_id: &str, custom: Option<&CustomAgent>) -> Result<(), StillError> {
+    if let Some(agent) = custom {
+        if !custom_id(agent_id) || agent.id != agent_id || agent.transport != "acp-v1"
+            || agent.name.trim().is_empty() || agent.name.chars().count() > 80 || agent.name.chars().any(char::is_control)
+            || agent.host_key.is_empty() || agent.host_key.len() > 4096 {
+            return Err(StillError::friendly("agent_custom_invalid", "Invalid custom ACP agent definition."));
+        }
+        if agent.executable.is_empty() || agent.executable.len() > 4096 || agent.executable.chars().any(char::is_control)
+            || (!agent.executable.starts_with('/') && !agent.executable.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte)))
+            || agent.args.len() > 64 || agent.args.iter().any(|arg| arg.len() > 4096 || arg.contains('\0'))
+            || agent.args.iter().map(String::len).sum::<usize>() > 16384 {
+            return Err(StillError::friendly("agent_custom_invalid", "Use a command on PATH or an absolute executable path and at most 64 arguments (16 KiB total), without null characters."));
+        }
+    } else if custom_id(agent_id) {
+        return Err(StillError::friendly("agent_custom_missing", "Configure this custom agent in Agent settings before starting a new execution."));
+    }
+    Ok(())
+}
+fn validate_custom_host(custom: Option<&CustomAgent>, host: &str) -> Result<(), StillError> {
+    if custom.is_some_and(|agent| agent.host_key != host) {
+        return Err(StillError::friendly("agent_custom_server", "This custom agent belongs to another server."));
+    }
+    Ok(())
+}
 fn definition(id: &str) -> Option<Definition> {
     Some(match id {
         "opencode" => Definition {
@@ -399,6 +440,7 @@ fn definition(id: &str) -> Option<Definition> {
             args: &["--acp"],
             install: "Gemini CLI ACP mode",
         },
+        id if custom_id(id) => Definition { name: "Custom ACP agent", command: "", args: &[], install: "your custom ACP CLI" },
         _ => return None,
     })
 }
@@ -593,9 +635,9 @@ async fn probe_versions(
 /// Launch-time runtime identity. A failed probe leaves version unknown; it never blocks launch.
 async fn probe_runtime(session_id: &str, agent_id: &str, executable: &str) -> Option<ProviderRuntime> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    let observed = probe_versions(session_id, &[(agent_id.to_owned(), executable.to_owned())], deadline)
-        .await
-        .unwrap_or_default();
+    let observed = if custom_id(agent_id) { VersionProbeResult::default() } else {
+        probe_versions(session_id, &[(agent_id.to_owned(), executable.to_owned())], deadline).await.unwrap_or_default()
+    };
     let version = observed.versions.get(agent_id).cloned();
     let version_observed_at = version.as_ref().map(|_| agent_store::timestamp() as u64);
     Some(ProviderRuntime {
@@ -835,7 +877,7 @@ fn capability_is_older(
 }
 
 fn provider_resumable(agent_id: &str, reported: Option<bool>, load_session: bool, session_id: &str) -> bool {
-    reported.unwrap_or(agent_id == "gemini" && load_session && !session_id.is_empty())
+    reported.unwrap_or(agent_transport(agent_id) == "acp-v1" && load_session && !session_id.is_empty())
 }
 
 fn capability_observation_freshness(fresh: bool, transport_active: bool, awaiting_catch_up: bool, config_pending: bool, history_pending: bool) -> &'static str {
@@ -906,6 +948,9 @@ pub struct CheckArgs {
     native_session_id: String,
     agent_id: Option<String>,
     executable: Option<String>,
+    custom_agent: Option<CustomAgent>,
+    #[serde(default)]
+    test_connection: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -922,7 +967,15 @@ pub struct Availability {
     checked_at: u64,
 }
 #[tauri::command]
-pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, StillError> {
+pub async fn still_agent_check(state: State<'_, AppState>, args: CheckArgs) -> Result<Vec<Availability>, StillError> {
+    validate_custom(args.agent_id.as_deref().unwrap_or(""), args.custom_agent.as_ref())?;
+    if let Some(custom) = args.custom_agent.as_ref() {
+        let owner = state.sessions.lock().await.get(&args.native_session_id).cloned()
+            .ok_or_else(|| StillError::friendly("agent_session", "Connect the selected server first."))?;
+        let session = owner.lock().await;
+        let host = json!([session.config.host.to_lowercase(), session.config.port, session.config.username]).to_string();
+        validate_custom_host(Some(custom), &host)?;
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let ids: Vec<&str> = args
         .agent_id
@@ -936,7 +989,7 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         let def = definition(id).ok_or_else(|| {
             StillError::friendly("agent_unknown", "Choose a supported ACP agent.")
         })?;
-        let path = executable(&def, args.executable.as_deref())?;
+        let path = if let Some(custom) = &args.custom_agent { custom.executable.clone() } else { executable(&def, args.executable.as_deref())? };
         script.push_str(&format!("p=$(command -v {} 2>/dev/null) && [ -x \"$p\" ] && printf 'STILL_AGENT:%s:%s\\n' {} \"$p\"; ", quote(&path), quote(id)));
     }
     let command = login_command(&script);
@@ -973,9 +1026,14 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
                 .map(|path| ((*id).to_owned(), path.to_owned()))
         })
         .collect();
+    let probe_error = if args.test_connection && node_ready {
+        if let Some(custom) = &args.custom_agent {
+            if installed.iter().any(|(id, _)| id == &custom.id) { test_custom_connection(&args.native_session_id, custom).await.err() } else { None }
+        } else { None }
+    } else { None };
     // Version lookup uses the remaining discovery budget; absence never changes install state.
     let versions = if node_ready {
-        probe_versions(&args.native_session_id, &installed, deadline).await.unwrap_or_default().versions
+        probe_versions(&args.native_session_id, &installed.iter().filter(|(id, _)| !custom_id(id)).cloned().collect::<Vec<_>>(), deadline).await.unwrap_or_default().versions
     } else {
         std::collections::HashMap::new()
     };
@@ -999,13 +1057,13 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
             });
             Availability {
                 agent_id: id.to_owned(),
-                available: path.is_some() && node_ready,
+                available: path.is_some() && node_ready && probe_error.is_none(),
                 installed: path.is_some(),
-                runtime: if id == "gemini" { "acp" } else { "native" }.into(),
+                runtime: if agent_transport(id) == "acp-v1" { "acp" } else { "native" }.into(),
                 runtime_available: node_ready,
-                message: if path.is_some() && !node_ready {
+                message: if let Some(error) = &probe_error { Some(error.clone()) } else if path.is_some() && !node_ready {
                     Some("Installed. Persistent agent sessions need Node.js 20 or newer on this server.".into())
-                } else if provider_runtime.as_ref().is_some_and(|runtime| runtime.version.is_none()) {
+                } else if !custom_id(id) && provider_runtime.as_ref().is_some_and(|runtime| runtime.version.is_none()) {
                     Some("Installed. The selected executable did not report a version.".into())
                 } else {
                     None
@@ -1017,6 +1075,23 @@ pub async fn still_agent_check(args: CheckArgs) -> Result<Vec<Availability>, Sti
         })
         .collect())
 }
+async fn test_custom_connection(session_id: &str, custom: &CustomAgent) -> Result<(), String> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(custom).map_err(|error| error.to_string())?);
+    let script = login_command(&format!("exec node --input-type=module -e {} -- --still-acp-probe {}",
+        quote(include_str!("../agent-host/acp-probe.mjs")), quote(&encoded)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut channel = tokio::time::timeout_at(deadline, ssh_worker::open_agent_exec(session_id, &script))
+        .await.map_err(|_| "Server connection timed out.".to_owned())?
+        .map_err(|_| "Could not reach the selected server.".to_owned())?;
+    let result = tokio::time::timeout_at(deadline, collect_exec(&mut channel, 64 * 1024)).await;
+    let _ = channel.close().await;
+    let output = result.map_err(|_| "ACP connection test timed out.".to_owned())??;
+    let result: Value = String::from_utf8_lossy(&output).lines()
+        .find_map(|line| line.strip_prefix("STILL_ACP_PROBE:").and_then(|raw| serde_json::from_str(raw).ok()))
+        .ok_or_else(|| "The ACP test ended without a result. Check the server connection and Node.js installation.".to_owned())?;
+    if result["ready"] == true { Ok(()) } else { Err(result["error"].as_str().unwrap_or("ACP negotiation failed.").to_owned()) }
+}
+
 fn append_history(history: &mut Vec<Event>, event: Event) {
     apply_history_event(history, &event);
     if matches!(event.kind.as_str(), "assistantChunk" | "reasoningChunk") {
@@ -1194,15 +1269,17 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>) -> Result<(String, String), StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
     let definition = definition(agent_id).ok_or_else(|| StillError::friendly("agent_unsupported", "Unknown agent."))?;
     let (command, env) = if !create {
         (Vec::new(), json!({}))
-    } else if agent_id == "gemini" {
-        (std::iter::once(executable.to_owned()).chain(definition.args.iter().map(|arg| (*arg).to_owned())).collect::<Vec<_>>(), json!({}))
+    } else if agent_transport(agent_id) == "acp-v1" {
+        validate_custom(agent_id, custom)?;
+        let args = custom.map(|agent| agent.args.clone()).unwrap_or_else(|| definition.args.iter().map(|arg| (*arg).to_owned()).collect());
+        (std::iter::once(executable.to_owned()).chain(args).collect::<Vec<_>>(), json!({}))
     } else {
         (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
     };
@@ -1297,6 +1374,7 @@ pub async fn still_agent_start(
     state: State<'_, AppState>,
     args: StartArgs,
 ) -> Result<Snapshot, StillError> {
+    validate_custom(&args.agent_id, args.custom_agent.as_ref())?;
     let def = definition(&args.agent_id)
         .ok_or_else(|| StillError::friendly("agent_unsupported", "Unknown agent."))?;
     let owner = {
@@ -1321,15 +1399,16 @@ pub async fn still_agent_start(
         }
         session.config.clone()
     };
+    let host_key = json!([config.host.to_lowercase(), config.port, config.username]).to_string();
+    validate_custom_host(args.custom_agent.as_ref(), &host_key)?;
     let cwd = remote_cwd(
         &args.native_session_id,
         args.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).ok_or_else(|| StillError::friendly("agent_project_required", "Choose the project folder before starting a conversation."))?,
     )
     .await?;
-    let path = executable(&def, args.executable.as_deref())?;
+    let path = if let Some(custom) = &args.custom_agent { custom.executable.clone() } else { executable(&def, args.executable.as_deref())? };
     let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
     let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
-    let host_key = json!([config.host.to_lowercase(), config.port, config.username]).to_string();
     let managed = registry().lock().await.values().cloned().collect::<Vec<_>>();
     for row in managed {
         let thread = row.lock().await;
@@ -1342,6 +1421,9 @@ pub async fn still_agent_start(
         let saved = agent_store::load_snapshot(&app, conversation_id.clone()).await?;
         if saved.conversation_id != conversation_id {
             return Err(StillError::friendly("agent_resume_identity", "The saved conversation identity does not match this resume request."));
+        }
+        if saved.custom_agent != args.custom_agent {
+            return Err(StillError::friendly("agent_resume_identity", "Resume this conversation with its original custom agent command."));
         }
         validate_resume_scope(&saved, &host_key, &args.agent_id, &cwd, args.resume_session_id.as_deref())
             .map_err(|error| StillError::friendly("agent_resume_identity", error))?;
@@ -1358,7 +1440,7 @@ pub async fn still_agent_start(
         seed
     });
     let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref())?;
+    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -1376,7 +1458,8 @@ pub async fn still_agent_start(
         execution_id: execution_id.clone(),
         local_session_id: args.local_session_id,
         agent_id: args.agent_id,
-        agent_name: def.name.into(),
+        agent_name: args.custom_agent.as_ref().map(|agent| agent.name.clone()).unwrap_or_else(|| def.name.into()),
+        custom_agent: args.custom_agent,
         agent_session_id: args.resume_session_id.clone(),
         cwd: cwd.clone(),
         state: "connecting".into(),
@@ -1977,7 +2060,7 @@ async fn handle(
             .to_owned();
         {
             let mut t = row.lock().await;
-            t.snapshot.agent_name = name;
+            if t.snapshot.custom_agent.is_none() { t.snapshot.agent_name = name; }
             // Direct ACP providers advertise their own resume support; the wrapper's
             // hard-coded loadSession is not evidence for every native provider.
             t.load_session = result
@@ -2843,7 +2926,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None)?;
+    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None, saved.custom_agent.as_ref())?;
     let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -3051,6 +3134,55 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn custom_fixture() -> CustomAgent {
+        CustomAgent { id: "custom-fixture".into(), host_key: "server-a".into(), name: "Orbit CLI".into(), executable: "/opt/agent with spaces".into(), args: vec!["--acp".into(), "literal $(touch never)".into(), "".into()], transport: "acp-v1".into() }
+    }
+    #[test]
+    fn custom_definition_validates_identity_server_and_literal_arguments() {
+        let agent = custom_fixture();
+        assert!(validate_custom(&agent.id, Some(&agent)).is_ok());
+        assert!(validate_custom(&agent.id, None).is_err());
+        assert!(validate_custom("codex", Some(&agent)).is_err());
+        assert!(validate_custom_host(Some(&agent), "server-a").is_ok());
+        assert!(validate_custom_host(Some(&agent), "server-b").is_err());
+        assert_eq!(agent_transport(&agent.id), "acp-v1");
+        assert!(definition(&agent.id).is_some());
+        for executable in ["cli --acp", "./cli", "$(evil)", "", "bad\npath"] {
+            let mut invalid = agent.clone(); invalid.executable = executable.into();
+            assert!(validate_custom(&invalid.id, Some(&invalid)).is_err());
+        }
+        let mut invalid = agent.clone(); invalid.args = vec!["bad\0arg".into()];
+        assert!(validate_custom(&invalid.id, Some(&invalid)).is_err());
+        invalid.args = vec![String::new(); 65];
+        assert!(validate_custom(&invalid.id, Some(&invalid)).is_err());
+        invalid.args = vec!["a".repeat(4096); 5];
+        assert!(validate_custom(&invalid.id, Some(&invalid)).is_err());
+        assert!(!custom_id("custom-bad/id"));
+    }
+    #[test]
+    fn custom_launch_payload_preserves_command_without_shell_and_attach_never_relaunches() {
+        let agent = custom_fixture();
+        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, Some(&agent)).unwrap();
+        let payload: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap();
+        assert_eq!(payload["command"], json!([agent.executable, "--acp", "literal $(touch never)", ""]));
+        assert_eq!(payload["agentId"], agent.id);
+        assert_eq!(payload["env"], json!({}));
+        assert!(persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, None).is_err());
+        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, "", false, 9, None, None, None, None).unwrap();
+        let payload: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap();
+        assert_eq!(payload["command"], json!([]));
+        assert_eq!(payload["after"], 9);
+    }
+    #[test]
+    fn custom_snapshot_retains_original_launch_in_history_headers() {
+        let mut snapshot = capability_snapshot(validate_capabilities(&capability_fixture(), "execution-1", "pi", "session-1", "/srv/project").unwrap());
+        let custom = custom_fixture();
+        snapshot.agent_id = custom.id.clone(); snapshot.custom_agent = Some(custom.clone());
+        snapshot.capabilities = None;
+        let restored: Snapshot = serde_json::from_value(serde_json::to_value(snapshot.history_header()).unwrap()).unwrap();
+        assert_eq!(restored.custom_agent, Some(custom));
+    }
+
     #[test]
     fn persistent_agent_bootstrap_streams_large_sources_over_stdin() {
         let runtime = ProviderRuntime {
@@ -3060,7 +3192,7 @@ mod tests {
             version_source: Some("executable".into()),
             version_observed_at: Some(1_793_372_400_000),
         };
-        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None, None).unwrap();
+        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None, None, None).unwrap();
         assert!(command.len() < 8 * 1024, "SSH exec command must stay far below Linux's 128 KiB argument limit");
         assert!(!command.contains(&payload), "base64 configuration belongs on stdin, never in the SSH exec argument");
         assert!(payload.len() > 128 * 1024, "test fixture should exercise the Linux per-argument overflow boundary");
@@ -3073,7 +3205,7 @@ mod tests {
         let worker_env: Value = serde_json::from_str(config["env"]["STILL_PROVIDER_RUNTIME"].as_str().unwrap()).unwrap();
         assert_eq!(worker_env, config["providerRuntime"], "the worker must receive the same launch-time runtime facts");
 
-        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None, None).unwrap();
+        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None, None, None).unwrap();
         assert!(attach_command.len() < 8 * 1024);
         assert!(attach_payload.len() < 1024, "reattach does not need to retransmit bundled source code");
         let attach_config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(attach_payload).unwrap()).unwrap();
@@ -3091,7 +3223,7 @@ mod tests {
         assert_eq!(parsed.get("claude").map(String::as_str), Some("2.0.1 (Claude Code)"));
         assert_eq!(parsed.len(), 2, "empty ids/versions and the Node line are not provider versions");
         let unknown = ProviderRuntime { transport: "pi-rpc".into(), executable: Some("pi".into()), version: None, version_source: None, version_observed_at: None };
-        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None, None).unwrap();
+        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None, None, None).unwrap();
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
         assert!(config["providerRuntime"].get("version").is_none(), "an unknown version stays absent rather than guessed");
         assert_eq!(config["providerRuntime"]["transport"], "pi-rpc");
@@ -3111,7 +3243,7 @@ mod tests {
         let seed_bytes = serde_json::to_vec(&seed).unwrap();
         assert!(seed_bytes.len() > 128 * 1024, "fixture should exceed Linux's per-argument limit if copied into argv");
         assert!(seed_bytes.len() < 1024 * 1024, "valid seed remains under the private file limit");
-        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed), None).unwrap();
+        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed), None, None).unwrap();
         assert!(command.len() < 8 * 1024);
         assert!(!command.contains("Resume the prior checklist") && !command.contains("task-0"));
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
@@ -3192,7 +3324,7 @@ mod tests {
     #[test]
     fn replacement_bootstrap_carries_explicit_recovery_scope_but_never_a_prompt() {
         let previous = json!({"executionId":"old-execution","agentSessionId":"saved-session"});
-        let (command, payload) = persistent_command("new-execution", "conversation", "/srv/project", "pi", "pi", true, 0, None, None, Some(&previous)).unwrap();
+        let (command, payload) = persistent_command("new-execution", "conversation", "/srv/project", "pi", "pi", true, 0, None, None, Some(&previous), None).unwrap();
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
         assert_eq!(config["recoverFrom"], previous);
         assert!(config["recoverySource"].as_str().unwrap().contains("recoverExecutionOwner"));
@@ -3222,7 +3354,7 @@ mod tests {
         Snapshot {
             conversation_id: "conversation-1".into(), host_key: "host".into(),
             execution_id: "execution-1".into(), local_session_id: "local".into(),
-            agent_id: "pi".into(), agent_name: "Pi".into(), agent_session_id: Some("session-1".into()),
+            agent_id: "pi".into(), agent_name: "Pi".into(), custom_agent: None, agent_session_id: Some("session-1".into()),
             cwd: "/srv/project".into(), state: "detached".into(), transcript: Vec::new(),
             pending_permission: None, last_error: None, last_sequence: 0, turn_active: false,
             config_options: Vec::new(), commands: Vec::new(), pending_input: None, resumable: true,

@@ -1,6 +1,8 @@
 import type { Session } from "../types"
 import type { AgentDraftAttachment } from "./attachments"
 import { saveAgentWorkspace, storedWorkspace, storedWorkspaces } from "../session/agentStorage"
+import type { CustomAgent } from "./types"
+import { isCustomAgent } from "./customAgents"
 
 export const hostKey = (session: Pick<Session, "host" | "port" | "username">) => JSON.stringify([session.host.toLowerCase(), session.port, session.username])
 export const agentConnectionId = (session: Session) => `agents:${hostKey(session)}`
@@ -72,16 +74,17 @@ export interface AgentLibraryPreferences {
   draftAttachments: Record<string, AgentDraftAttachment[]>
   agent: string
   executables: Record<string, Record<string, string>>
+  customAgents: Record<string, CustomAgent[]>
   servers: Session[]
 }
 export function readLibraryPreferences(): AgentLibraryPreferences {
-  const defaults: AgentLibraryPreferences = { projects: [], sidebarCollapsed: false, sort: "recent", collapsed: [], drafts: {}, draftAttachments: {}, agent: "opencode", executables: {}, servers: [] }
+  const defaults: AgentLibraryPreferences = { projects: [], sidebarCollapsed: false, sort: "recent", collapsed: [], drafts: {}, draftAttachments: {}, agent: "opencode", executables: {}, customAgents: {}, servers: [] }
   const saved = storedWorkspace("library") as Partial<AgentLibraryPreferences> | undefined
   if (saved) {
     const strings = (value: unknown): Record<string, string> => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([, text]) => typeof text === "string")) : {}
     return { ...defaults, sidebarCollapsed: saved.sidebarCollapsed === true, projects: Array.isArray(saved.projects) ? saved.projects.filter(p => p && typeof p.host === "string" && typeof p.folder === "string").map(p => ({ ...p, name: typeof p.name === "string" ? p.name : undefined })) : [],
       sort: ["recent", "name", "manual"].includes(saved.sort || "") ? saved.sort! : "recent", collapsed: Array.isArray(saved.collapsed) ? saved.collapsed.filter(value => typeof value === "string") : [],
-      agent: typeof saved.agent === "string" ? saved.agent : "opencode", drafts: strings(saved.drafts), draftAttachments: saved.draftAttachments && typeof saved.draftAttachments === "object" ? Object.fromEntries(Object.entries(saved.draftAttachments).map(([key, list]) => [key, Array.isArray(list) ? list.filter(item => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.hostKey === "string" && typeof item.folder === "string") : []])) : {}, executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).map(([key, paths]) => [key, strings(paths)])) : {}, servers: Array.isArray(saved.servers) ? saved.servers.filter(server => server && typeof server.host === "string" && typeof server.username === "string" && typeof server.port === "number").map(agentServerProfile) : [] }
+      agent: typeof saved.agent === "string" ? saved.agent : "opencode", customAgents: saved.customAgents && typeof saved.customAgents === "object" ? Object.fromEntries(Object.entries(saved.customAgents).map(([host, agents]) => [host, Array.isArray(agents) ? agents.filter((agent): agent is CustomAgent => isCustomAgent(agent, host)) : []])) : {}, drafts: strings(saved.drafts), draftAttachments: saved.draftAttachments && typeof saved.draftAttachments === "object" ? Object.fromEntries(Object.entries(saved.draftAttachments).map(([key, list]) => [key, Array.isArray(list) ? list.filter(item => item && typeof item.id === "string" && typeof item.name === "string" && typeof item.hostKey === "string" && typeof item.folder === "string") : []])) : {}, executables: saved.executables && typeof saved.executables === "object" ? Object.fromEntries(Object.entries(saved.executables).map(([key, paths]) => [key, strings(paths)])) : {}, servers: Array.isArray(saved.servers) ? saved.servers.filter(server => server && typeof server.host === "string" && typeof server.username === "string" && typeof server.port === "number").map(agentServerProfile) : [] }
   }
   for (const host of Object.keys(storedWorkspaces())) {
     const prefs = readWorkspace(host)

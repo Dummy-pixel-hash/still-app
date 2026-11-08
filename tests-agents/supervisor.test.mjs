@@ -599,3 +599,15 @@ test("legacy direct ACP model/mode settings advance evidence generation only aft
   await client.wait(frame=>frame.id===903)
   assert.equal(client.frames.filter(frame=>frame.method==="_still/capabilities_changed"&&frame.params.capabilities.configGeneration===2).length,1)
 }))
+
+
+test("custom ACP identity uses direct transport with unverified capabilities and literal arguments", { timeout: 10000 }, () => fixture(async ({ make, config }) => {
+  const client = make({ agentId: "custom-fixture", command: [...config.command, "--", "literal $(not-shell)", "a b"], providerRuntime: { transport: "acp-v1" } })
+  const session = await initialize(client)
+  assert.equal(session.result.receivedMcpServers.some(server => server.name === "still-todos"), true)
+  const capabilities = session.result._meta.capabilities
+  assert.equal(capabilities.providerRuntime.transport, "acp-v1")
+  assert.equal(capabilities.features.providerPlans.status, "unverified")
+  assert.equal(capabilities.features.sharedTodos.status, "unverified")
+  await client.close()
+}))

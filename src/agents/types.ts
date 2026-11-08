@@ -187,7 +187,15 @@ export type AgentToolContent =
   | { type: "content"; content: { type: string; text?: string } }
   | { type: "diff"; path: string; oldText?: string | null; newText: string }
   | { type: "patch"; path: string; patch: string }
-export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string }
+export interface CustomAgent {
+  id: string
+  hostKey: string
+  name: string
+  executable: string
+  args: string[]
+  transport: "acp-v1"
+}
+export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string; customAgent?: CustomAgent }
 export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string; providerRuntime?: AgentProviderRuntime; checkedAt?: number }
 
 export interface AgentThreadSnapshot {
@@ -197,6 +205,7 @@ export interface AgentThreadSnapshot {
   localSessionId: string
   agentId: string
   agentName: string
+  customAgent?: CustomAgent
   agentSessionId?: string
   cwd: string
   state: AgentThreadState
