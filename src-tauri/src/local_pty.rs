@@ -4,10 +4,12 @@
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(not(windows))]
+use std::path::PathBuf;
 use std::{
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 const MIN_COLS: u16 = 20;
@@ -130,10 +132,7 @@ fn default_shell() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        env,
-        time::{Duration, Instant},
-    };
+    use std::{env, sync::mpsc, thread, time::Duration};
 
     #[test]
     fn pty_runs_a_local_command_in_the_requested_directory_and_resizes() {
@@ -144,9 +143,13 @@ mod tests {
         let shell = "/bin/sh";
 
         let mut pty = LocalPty::spawn(&cwd, 80, 24, Some(shell)).unwrap();
+        let expected_output = format!(
+            "STILL_LOCAL_PTY_OK:{}",
+            fs::canonicalize(&cwd).unwrap().display()
+        );
         #[cfg(windows)]
         pty.writer()
-            .write_all(b"echo STILL_LOCAL_PTY_OK\r\nexit\r\n")
+            .write_all(b"echo STILL_LOCAL_PTY_OK:%CD%\r\nexit\r\n")
             .unwrap();
         #[cfg(not(windows))]
         {
@@ -157,20 +160,41 @@ mod tests {
                 .unwrap();
         }
         pty.resize(120, 40).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut output = Vec::new();
-        let mut buffer = [0u8; 4096];
-        while Instant::now() < deadline {
-            match pty.reader().read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => output.extend_from_slice(&buffer[..count]),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+        // PTY reads are blocking by design. Keep the reader off the test thread
+        // so recv_timeout bounds Windows ConPTY even if it never signals EOF.
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let (output_tx, output_rx) = mpsc::channel();
+        let expected_for_reader = expected_output.clone();
+        let reader_thread = thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        output.extend_from_slice(&buffer[..count]);
+                        if String::from_utf8_lossy(&output).contains(&expected_for_reader) {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
             }
-        }
+            let _ = output_tx.send(output);
+        });
+        let output = match output_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = pty.terminate();
+                drop(pty);
+                panic!("local PTY did not emit the expected marker before timeout: {error}");
+            }
+        };
+        reader_thread.join().expect("PTY reader thread panicked");
         let output = String::from_utf8_lossy(&output);
         assert!(
-            output.contains("STILL_LOCAL_PTY_OK"),
+            output.contains(&expected_output),
             "unexpected PTY output: {output}"
         );
         let _ = pty.terminate();
