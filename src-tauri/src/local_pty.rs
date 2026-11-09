@@ -4,12 +4,10 @@
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-#[cfg(not(windows))]
-use std::path::PathBuf;
 use std::{
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 const MIN_COLS: u16 = 20;
@@ -35,6 +33,27 @@ impl LocalPty {
         if !cwd.is_dir() {
             bail!("Local working directory is not a directory.");
         }
+        #[cfg(windows)]
+        let cwd = {
+            use std::path::{Component, Prefix};
+            let mut components = cwd.components();
+            if let Some(Component::Prefix(prefix)) = components.next()
+                && let Prefix::VerbatimDisk(drive) = prefix.kind()
+            {
+                // canonicalize() returns \\?\C:\..., which cmd.exe treats as
+                // unsupported UNC and silently replaces with C:\Windows.
+                let mut directory = PathBuf::from(format!("{}:", char::from(drive)));
+                directory.push(components.as_path());
+                if fs::canonicalize(&directory)? != cwd {
+                    bail!(
+                        "Local working directory requires unsupported Windows verbatim-path semantics."
+                    );
+                }
+                directory
+            } else {
+                cwd
+            }
+        };
 
         let shell = shell
             .filter(|value| !value.trim().is_empty())
