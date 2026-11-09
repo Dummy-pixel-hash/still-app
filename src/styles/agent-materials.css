@@ -267,6 +267,7 @@
 
 /* Reading surface supplies the blur once; hundreds of messages stay lightweight. */
 .agent-workspace .agent-chat:not(.is-launch) > .agent-conversation {
+  --ag-frost-fill: rgba(5, 5, 5, .2);
   background: rgba(5, 5, 5, .2);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -670,7 +671,8 @@
 /* Packaged Linux/Windows WebViews don't consistently blur the canvas layer
    behind glass. Native mode uses one bounded, shared Aurora texture; normal
    browser previews keep engine-provided backdrop-filter. */
-.agent-workspace[data-frost-rendered="true"] [data-agent-frost]:not(.agent-composer),
+.agent-workspace[data-frost-rendered="true"] [data-agent-frost]:not(.agent-composer, .agent-conversation),
+.agent-workspace[data-frost-rendered="true"] .agent-chat:not(.is-launch) > .agent-conversation[data-agent-frost],
 .agent-workspace[data-frost-rendered="true"] .agent-composer[data-agent-frost]::before,
 .agent-workspace[data-frost-rendered="true"] .agent-chat.is-launch.has-recents .agent-recents {
   background-color: transparent;

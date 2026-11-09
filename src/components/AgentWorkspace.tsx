@@ -37,6 +37,7 @@ import AgentReasoningBars from "./AgentReasoningBars"
 import AgentAurora from "./AgentAurora"
 import { AgentTimeline } from "./AgentTimeline"
 import AgentTodos from "./AgentTodos"
+import AgentSubagents from "./AgentSubagents"
 import AgentAttachments from "./AgentAttachments"
 import AgentRequest, { requestOutcomeLabel, type AgentRequestActions } from "./AgentRequest"
 import { requestKey, questionFields } from "../agents/requests"
@@ -48,6 +49,11 @@ import "../styles/agent-materials.css"
 import "../styles/agent-changes.css"
 
 type Props = {
+  presentation?: "desktop" | "mobile"
+  initialConversationId?: string
+  initialView?: "draft" | "settings"
+  initialProject?: AgentProject
+  initialProjectPicker?: boolean
   closing?: boolean
   session: Session | null
   sessions?: Session[]
@@ -65,8 +71,20 @@ type Props = {
 }
 const messageOf = (e: unknown) => e && typeof e === "object" && "message" in e ? String(e.message) : String(e || "Operation failed")
 const idle = (row: AgentThreadRow | null) => !!row && !row.recoveryReason && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
-const statusOf = (row: AgentThreadRow) => row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? row.turnActive ? "Connection issue · still running" : "Turn failed" : row.turnActive ? "Working" : "Ready"
+const statusOf = (row: AgentThreadRow) => row.meta.subagentPrepared ? "Prepared" : row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? row.turnActive ? "Connection issue · still running" : "Turn failed" : row.turnActive ? "Working" : "Ready"
+const subagentInFlight = (row: AgentThreadRow) => row.turnActive || ["connecting", "working", "inputRequired", "detached", "submissionUnknown", "rewinding"].includes(row.state)
 const historyWindows = new Map<string, string>()
+async function subagentOperationId(parentExecutionId: string, requestId: string) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${parentExecutionId}:${requestId}`)))
+  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("")
+}
+function subagentSettings(row: AgentThreadRow) {
+  const config = (kinds: string[], ids: string[]) => row.configOptions.find(option => kinds.includes(option.category || "") || ids.includes(option.id))
+  const choices = (option: AgentThreadRow["configOptions"][number] | undefined) => (option?.options || []).flatMap(item => "value" in item ? [item] : item.options).map(item => ({ id: item.value, name: item.name }))
+  const model = config(["model"], ["model"]), effort = config(["thought_level", "reasoning", "effort", "variant", "variants"], []), mode = config(["mode", "agent", "agent_mode"], [])
+  const item = (option: typeof model) => option ? { id: option.id, name: option.name, current: option.currentValue, choices: choices(option) } : undefined
+  return { model: item(model), effort: item(effort), mode: item(mode) }
+}
 const promptStarters = [
   { icon: "code" as const, label: "Build a feature", prompt: "Help me build a feature in this project. First, look at the structure and ask me what I want to add." },
   { icon: "search" as const, label: "Explore the code", prompt: "Explore this project and explain how the important pieces fit together. Show me where to start." },
@@ -78,15 +96,17 @@ function relativeActivity(at: number) {
 }
 function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
 
-export default function AgentWorkspace({ closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ presentation = "desktop", initialConversationId, initialView, initialProject, initialProjectPicker = false, closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+  const mobile = presentation === "mobile"
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
   const [hydrated, setHydrated] = useState(false)
   const [customSetup, setCustomSetup] = useState<CustomAgent | null>(null)
   const [removingCustom, setRemovingCustom] = useState<CustomAgent | null>(null)
-  const [selected, setSelected] = useState<string | null>(null)
-  const [project, setProject] = useState<AgentProject | null>(null)
-  const [view, setView] = useState<"home" | "draft" | "project" | "settings">("home")
+  const [selected, setSelected] = useState<string | null>(initialConversationId || null)
+  const [parentReturnId, setParentReturnId] = useState<string | null>(null)
+  const [project, setProject] = useState<AgentProject | null>(initialProject || null)
+  const [view, setView] = useState<"home" | "draft" | "project" | "settings">(initialView || "home")
   const [sidebar, setSidebar] = useState(false), [query, setQuery] = useState(""), [archived, setArchived] = useState(false)
   const [narrowNavigation, setNarrowNavigation] = useState(() => matchMedia("(max-width: 800px)").matches)
   const reviewReturnFocus = useRef<HTMLElement | null>(null)
@@ -115,7 +135,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const [todosOpen, setTodosOpen] = useState(false)
   const [agentDetailsOpen, setAgentDetailsOpen] = useState(false)
   const [historyAction, setHistoryAction] = useState<{ message: TranscriptItem; retry: boolean } | null>(null)
-  const [folderOpen, setFolderOpen] = useState(false), [folderHost, setFolderHost] = useState(""), [folderPath, setFolderPath] = useState("")
+  const [folderOpen, setFolderOpen] = useState(initialProjectPicker), [folderHost, setFolderHost] = useState(""), [folderPath, setFolderPath] = useState("")
   const [projectChoices, setProjectChoices] = useState(false)
   const [addingServer, setAddingServer] = useState(false)
   const [catalogBusy, setCatalogBusy] = useState(false), [catalogError, setCatalogError] = useState("")
@@ -124,6 +144,9 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const [requestBusyId, setRequestBusyId] = useState<string | null>(null)
   const [expandedRequest, setExpandedRequest] = useState<string | null>(null)
   const requestOperations = useRef(new Set<string>())
+  const subagentRequestOperations = useRef(new Set<string>())
+  const subagentRequestQueue = useRef(Promise.resolve())
+  const subagentGuidanceAttempts = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
   const [, updateHistoryWindow] = useState(0)
   const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null), timelineSearch = useRef<HTMLInputElement>(null)
@@ -149,9 +172,143 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   }
   const libraryThreads = allThreads.filter(row => !row.meta.prepared || row.state === "saved" || !!row.meta.draft || row.transcript.some(event => event.type === "userMessage"))
   const current = libraryThreads.find(row => row.meta.id === selected) || null
+  const parentThread = current?.meta.parentConversationId ? libraryThreads.find(row => row.meta.id === current.meta.parentConversationId) || null : null
+  const isSubagent = !!current?.meta.parentConversationId
+  const childThreads = current ? libraryThreads.filter(row => row.meta.parentConversationId === current.meta.id && !row.meta.archivedAt).sort((a, b) => b.meta.activityAt - a.meta.activityAt) : []
+  const latestThreads = useRef(allThreads); latestThreads.current = allThreads
   const context = current ? { host: current.meta.hostKey, folder: current.meta.folder } : project
   const contextKey = context ? projectKey(context) : "unassigned"
   const connectedHere = !!context && context.host === host && connected
+  useEffect(() => {
+    const completed = new Set(allThreads.flatMap(row => row.transcript.filter(event => event.type === "subagentReply" && event.subagentRequest?.requestId).map(event => `${row.executionId}:${event.subagentRequest!.requestId}`)))
+    for (const parent of allThreads) for (const event of parent.transcript) {
+      if (event.type !== "subagentRequest" || !event.subagentRequest) continue
+      const { requestId, input } = event.subagentRequest
+      const operationKey = `${parent.executionId}:${requestId}`
+      if (completed.has(operationKey)) continue
+      if (subagentRequestOperations.current.has(operationKey)) continue
+      subagentRequestOperations.current.add(operationKey)
+      const task = subagentRequestQueue.current.then(async () => {
+        const action = typeof input.action === "string" ? input.action : ""
+        const childId = typeof input.childId === "string" ? input.childId : ""
+        const currentRows = () => latestThreads.current
+        const childRows = () => currentRows().filter(row => row.meta.parentConversationId === parent.meta.id)
+        const detail = (row: AgentThreadRow) => ({ childId: row.meta.id, title: threadTitle(row), agentId: row.agentId, agentName: row.agentName, status: statusOf(row), settings: subagentSettings(row), prepared: !!row.meta.subagentPrepared, turnActive: row.turnActive, needsAttention: !!(row.pendingInput || row.pendingPermission), queuedGuidance: row.meta.subagentGuidance?.length || 0, guidancePaused: !!row.meta.subagentGuidancePaused, lastUpdate: row.transcript.filter(item => ["assistantMessage", "toolUpdate", "threadComplete", "threadError"].includes(item.type)).slice(-1)[0]?.text?.slice(0, 1000) || "" })
+        const findChild = () => childRows().find(row => row.meta.id === childId)
+        const createChild = async (agentId: string, title: string, operationId: string) => {
+          const definition = agents.find(agent => agent.id === agentId)
+          const support = discovery.agents.find(info => info.agentId === agentId)
+          if (!definition || support?.available !== true) throw new Error("Choose an installed, available agent returned by still_subagents list.")
+          if (childRows().filter(subagentInFlight).length >= 3) throw new Error("This parent already has three active subagents. Wait for one to finish before preparing another.")
+          if (!connected || !transportId || host !== parent.meta.hostKey) throw new Error("Select and connect to the parent conversation's server before preparing a child.")
+          const operationMap = parent.meta.subagentOperations || {}
+          const conversationId = operationMap[operationId] || `subagent-${crypto.randomUUID()}`
+          if (!operationMap[operationId]) updateThreadMeta(parent.executionId, { subagentOperations: { ...operationMap, [operationId]: conversationId } })
+          let row = currentRows().find(candidate => candidate.meta.id === conversationId)
+          if (!row) {
+            const customAgent = customLaunchOptions(agentId, parent.meta.hostKey, prefsRef.current.customAgents)
+            row = await callbacks.current.onStart(agentId, { cwd: parent.meta.folder, conversationId, parentConversationId: parent.meta.id, executable: prefsRef.current.executables[parent.meta.hostKey]?.[agentId], customAgent })
+            updateThreadMeta(row.executionId, { title, titleSource: "agent", parentConversationId: parent.meta.id, subagentPrepared: true })
+          } else if (row.meta.parentConversationId !== parent.meta.id || row.agentId !== agentId) throw new Error("That prepared conversation does not match this parent and agent.")
+          return currentRows().find(candidate => candidate.meta.id === conversationId) || row
+        }
+        const applySetting = async (row: AgentThreadRow, key: "model" | "effort" | "mode", requested: unknown) => {
+          if (requested === undefined) return row
+          if (typeof requested !== "string" || !requested) throw new Error(`${key} must be a non-empty provider option ID.`)
+          const description = subagentSettings(row)[key]
+          if (!description) throw new Error(`This child provider does not expose a selectable ${key}. Prepared child ID: ${row.meta.id}. No task was submitted.`)
+          if (!description.choices.some(option => option.id === requested)) throw new Error(`Unsupported ${key} ID "${requested}". Available choices: ${description.choices.map(option => `${option.name} (${option.id})`).join(", ") || "none"}. Prepared child ID: ${row.meta.id}. No task was submitted.`)
+          if (description.current === requested) return row
+          return setAgentConfig(row.executionId, description.id, requested)
+        }
+        let result: unknown
+        if (parent.meta.parentConversationId) throw new Error("Subagents cannot create nested subagents.")
+        if (action === "list") {
+          if (host !== parent.meta.hostKey) throw new Error("Select the parent conversation's server to list agents installed for this project.")
+          result = { agents: agents.map(agent => { const support = discovery.agents.find(info => info.agentId === agent.id); return { agentId: agent.id, name: agent.label, available: support?.available === true, reason: support?.available ? undefined : support?.message || "Not verified on this server" } }), children: childRows().map(detail), instruction: "Use prepare(agentId) to get that provider's exact model, effort, and mode IDs before selecting them in spawn. Only provider-advertised settings are valid." }
+        } else if (action === "prepare") {
+          const agentId = typeof input.agentId === "string" ? input.agentId : ""
+          const title = typeof input.title === "string" ? input.title.trim().slice(0, 160) : `Prepared ${agents.find(agent => agent.id === agentId)?.label || "subagent"}`
+          const operationId = await subagentOperationId(parent.executionId, requestId)
+          const child = await createChild(agentId, title, operationId)
+          result = { ...detail(child), settings: subagentSettings(child), note: "Provider session is prepared; no task has been submitted. Use spawn with this childId and any supported setting IDs." }
+        } else if (action === "spawn") {
+          const title = typeof input.title === "string" ? input.title.trim().slice(0, 160) : ""
+          const task = typeof input.task === "string" ? input.task.trim() : ""
+          if (!title || !task || task.length > 12000) throw new Error("Spawn requires a title and task of at most 12,000 characters.")
+          let child = childId ? findChild() : undefined
+          if (childId && (!child || !child.meta.subagentPrepared || child.transcript.some(item => item.type === "userMessage"))) throw new Error("spawn requires an unused prepared child from this parent. Use prepare first to discover settings.")
+          if (child && typeof input.agentId === "string" && child.agentId !== input.agentId) throw new Error("The prepared child belongs to a different agent. Inspect the prepared child and retry without changing its agent.")
+          if (!child) {
+            const agentId = typeof input.agentId === "string" ? input.agentId : ""
+            const operationId = await subagentOperationId(parent.executionId, requestId)
+            child = await createChild(agentId, title, operationId)
+          }
+          if (child.meta.title !== title) updateThreadMeta(child.executionId, { title, titleSource: "agent" })
+          child = await applySetting(child, "model", input.modelId)
+          child = await applySetting(child, "effort", input.effort)
+          child = await applySetting(child, "mode", input.modeId)
+          if (!child.transcript.some(item => item.type === "userMessage")) await sendAgentMessage(child.executionId, task)
+          updateThreadMeta(child.executionId, { subagentPrepared: false })
+          result = { ...detail(child), status: "Started", note: "The child has its own conversation and shares the parent's project folder." }
+        } else if (action === "inspect") {
+          const child = findChild()
+          if (!child) throw new Error("That child conversation does not belong to this parent.")
+          result = detail(child)
+        } else if (action === "guide") {
+          const child = findChild()
+          if (!child) throw new Error("That child conversation does not belong to this parent.")
+          const message = typeof input.message === "string" ? input.message.trim() : ""
+          if (!message || message.length > 4000) throw new Error("Guidance must be 1–4,000 characters.")
+          const operationId = await subagentOperationId(parent.executionId, requestId)
+          const messageId = `parent-guidance-${operationId}`
+          if (child.transcript.some(item => item.type === "userMessage" && item.messageId === messageId)) {
+            result = { childId, status: "Delivered", note: "This guidance was already accepted by the child." }
+          } else {
+            const queued = child.meta.subagentGuidance || []
+            if (!queued.some(item => item.requestId === operationId)) updateThreadMeta(child.executionId, { subagentGuidance: [...queued, { requestId: operationId, messageId, text: message }], subagentGuidancePaused: false })
+            result = { childId, status: "Queued", note: child.turnActive || child.pendingInput || child.pendingPermission ? "Will send at the next safe turn boundary. The child's current turn and user-owned permission requests are not interrupted." : "Saved and sending as the child's next turn." }
+          }
+        } else if (action === "cancel") {
+          const child = findChild()
+          if (!child) throw new Error("That child conversation does not belong to this parent.")
+          updateThreadMeta(child.executionId, { subagentGuidancePaused: true })
+          if (!subagentInFlight(child)) result = { childId, status: "Already idle", pausedGuidance: child.meta.subagentGuidance?.length || 0 }
+          else {
+            try { await cancelAgentTurn(child.executionId) }
+            catch (error) { updateThreadMeta(child.executionId, { subagentGuidancePaused: false }); throw error }
+            result = { childId, status: "Cancellation requested", pausedGuidance: child.meta.subagentGuidance?.length || 0, note: "Wait for the child's stopped/completed status before assuming work ended. Queued guidance is paused; existing file changes remain." }
+          }
+        } else if (action === "wait") {
+          const timeout = Number.isSafeInteger(input.timeoutMs) ? Math.max(1000, Math.min(15000, Number(input.timeoutMs))) : 5000
+          await new Promise(resolve => setTimeout(resolve, timeout))
+          const child = findChild()
+          if (!child) throw new Error("That child conversation does not belong to this parent.")
+          result = detail(child)
+        } else throw new Error("Unsupported subagent action.")
+        await nativeBridge.agentSubagentReply(parent.executionId, requestId, result)
+      })
+      subagentRequestQueue.current = task.catch(() => {})
+      void task.catch(error => { void nativeBridge.agentSubagentReply(parent.executionId, requestId, undefined, messageOf(error)).catch(() => { subagentRequestOperations.current.delete(operationKey) }); setError(messageOf(error)) })
+    }
+  }, [allThreads, agents, discovery.agents, host, connected, transportId])
+  useEffect(() => {
+    for (const row of allThreads) {
+      const queue = row.meta.subagentGuidance || []
+      if (!queue.length) continue
+      const delivered = new Set(row.transcript.filter(event => event.type === "userMessage" && event.messageId).map(event => event.messageId))
+      const remaining = queue.filter(item => !delivered.has(item.messageId))
+      if (remaining.length !== queue.length) { updateThreadMeta(row.executionId, { subagentGuidance: remaining }); continue }
+      if (row.meta.subagentGuidancePaused || row.turnActive || row.pendingInput || row.pendingPermission || row.meta.submissionUnknown || row.recoveryReason || !["working", "complete", "cancelled", "error"].includes(row.state)) continue
+      const item = queue[0], attemptKey = `${row.executionId}:${item.requestId}:${row.lastSequence}`
+      if (subagentGuidanceAttempts.current.has(attemptKey)) continue
+      subagentGuidanceAttempts.current.add(attemptKey)
+      void sendAgentMessage(row.executionId, item.text, false, { messageId: item.messageId, source: "parentAgent" }).then(() => {
+        const current = latestThreads.current.find(candidate => candidate.executionId === row.executionId)
+        if (current?.transcript.some(event => event.type === "userMessage" && event.messageId === item.messageId)) updateThreadMeta(row.executionId, { subagentGuidance: (current.meta.subagentGuidance || []).filter(entry => entry.requestId !== item.requestId) })
+      }).catch(error => { setError(messageOf(error)) })
+    }
+  }, [allThreads])
   useEffect(() => {
     if (!current?.persistent || !onReattach || !transportId || !connectedHere || !["saved", "detached"].includes(current.state)) return
     const key = `${current.executionId}:${transportId}:${current.state}`
@@ -170,7 +327,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     setRestoring(true)
     const start = (agent: string, options: AgentLaunchOptions) => {
       const launch = callbacks.current.onStart
-      return launch ? launch(agent, { ...options, customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }) : Promise.reject(new Error("Connect an agent before resuming this conversation."))
+      return launch ? launch(agent, { ...options, ...(current.meta.parentConversationId ? { parentConversationId: current.meta.parentConversationId } : {}), customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }) : Promise.reject(new Error("Connect an agent before resuming this conversation."))
     }
     const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
     void resumeAgentThread(current.executionId, start, resumeExecutable).then(next => {
@@ -190,7 +347,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const configurationKey = JSON.stringify([contextKey, agentId, executable, customAgent])
   const startScreen = !current && !archived && view !== "settings"
   const preparing = hydrated && startScreen && connectedHere && discoveryCurrent && available?.available === true && !discovery.checking
-  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent }, context?.host || "", onStart)
+  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent, ...(parentReturnId ? { parentConversationId: parentReturnId } : {}) }, context?.host || "", onStart)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
   const repositoryCwd = activeAgent?.cwd || current?.meta.folder || ""
@@ -472,7 +629,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
       setRestoring(true)
       try {
         const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
-        const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, { ...options, customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }), resumeExecutable)
+        const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, { ...options, ...(current.meta.parentConversationId ? { parentConversationId: current.meta.parentConversationId } : {}), customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }), resumeExecutable)
         if (mounted.current && revision === navigation.current) {
           setSelected(next.meta.id)
           setGitRefreshEpoch(epoch => epoch + 1)
@@ -492,7 +649,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
       requestAnimationFrame(() => {
         const target = reviewReturnFocus.current?.isConnected && !reviewReturnFocus.current.closest("[inert]")
           ? reviewReturnFocus.current
-          : surface.current?.querySelector<HTMLElement>(".agent-review-toggle")
+          : surface.current?.querySelector<HTMLElement>(".agent-topbar-changes-icon")
         target?.focus({ preventScroll: true })
       })
     })
@@ -514,9 +671,9 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
       requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }))
     }
   }
-  const home = () => { navigation.current++; setSelected(null); setProject(null); setView("home"); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError("") }
-  const openProject = (p: AgentProject) => { navigation.current++; setSelected(null); setProject(p); setView("project"); setCommandOpen(false); setMenu(null); setSidebar(false); setError(""); selectHost(p.host) }
-  const newThread = (p: AgentProject | null = null) => { navigation.current++; setDraftGeneration(value => value + 1); setSelected(null); setProject(p); setView("draft"); setArchived(false); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError(""); if (p) selectHost(p.host); requestAnimationFrame(() => { if (!surface.current?.querySelector(".agent-command-menu")) textarea.current?.focus() }) }
+  const home = () => { navigation.current++; setSelected(null); setParentReturnId(null); setProject(null); setView("home"); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError("") }
+  const openProject = (p: AgentProject) => { navigation.current++; setSelected(null); setParentReturnId(null); setProject(p); setView("project"); setCommandOpen(false); setMenu(null); setSidebar(false); setError(""); selectHost(p.host) }
+  const newThread = (p: AgentProject | null = null) => { navigation.current++; setDraftGeneration(value => value + 1); setSelected(null); setParentReturnId(null); setProject(p); setView("draft"); setArchived(false); setCommandOpen(false); setMenu(null); setProjectChoices(false); setSidebar(false); setError(""); if (p) selectHost(p.host); requestAnimationFrame(() => { if (!surface.current?.querySelector(".agent-command-menu")) textarea.current?.focus() }) }
   const assignProject = (p: AgentProject) => {
     if (startScreen && !current && !project && prefsRef.current.drafts.unassigned) {
       const key = projectKey(p)
@@ -525,7 +682,15 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     }
     newThread(p)
   }
-  const selectThread = (row: AgentThreadRow) => { navigation.current++; setSelected(row.meta.id); setProject({ host: row.meta.hostKey, folder: row.meta.folder }); setView("draft"); setSidebar(false); selectHost(row.meta.hostKey) }
+  const selectThread = (row: AgentThreadRow) => { navigation.current++; setSelected(row.meta.id); setParentReturnId(row.meta.parentConversationId || null); setProject({ host: row.meta.hostKey, folder: row.meta.folder }); setView("draft"); setSidebar(false); selectHost(row.meta.hostKey) }
+  const openParentThread = () => { if (parentThread) selectThread(parentThread) }
+  const newSubagent = () => {
+    if (!current || isSubagent) return
+    if (childThreads.filter(subagentInFlight).length >= 3) { setError("This parent already has three active subagents. Wait for one to finish before creating another."); return }
+    const parentId = current.meta.id
+    newThread({ host: current.meta.hostKey, folder: current.meta.folder })
+    setParentReturnId(parentId)
+  }
   const closeFolder = () => { folderOperation.current++; setFolderOpen(false) }
   const chooseFolder = () => { folderOperation.current++; setFolderOpen(true); const key = context?.host || host; setFolderHost(key); if (key && key !== host) selectHost(key); setFolderPath(""); setError(""); setAddingServer(false) }
   const openFolder = async () => {
@@ -541,8 +706,13 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   }
   const start = () => {
     if (!context || !connectedHere || !discoveryCurrent || available?.available !== true || !prepared || !preparation.ready) throw new Error("Wait for the selected agent to finish connecting.")
+    if (parentReturnId) {
+      const parent = allThreads.find(row => row.meta.id === parentReturnId)
+      if (!parent || parent.meta.parentConversationId || parent.meta.hostKey !== context.host || parent.meta.folder !== context.folder) throw new Error("This subagent's parent is unavailable or belongs to a different project. Return to the parent and try again.")
+      if (allThreads.filter(row => row.meta.parentConversationId === parentReturnId && subagentInFlight(row)).length >= 3) throw new Error("This parent already has three active subagents. Wait for one to finish before starting another.")
+    }
     preparation.claim()
-    updateThreadMeta(prepared.executionId, { prepared: false, draft })
+    updateThreadMeta(prepared.executionId, { prepared: false, draft, ...(parentReturnId ? { parentConversationId: parentReturnId } : {}) })
     setSelected(prepared.meta.id); setProject({ host: context.host, folder: prepared.cwd }); setView("draft")
     setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" } }))
     return prepared
@@ -712,6 +882,41 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
     setTimelineOpen(false)
     requestAnimationFrame(() => scroll.jumpTo(id))
   }
+  const renderSidebarPanel = (panelId: string, attachRefs: boolean) => <div className="agent-sidebar-panel agent-sidebar-panel--readable" id={panelId} inert={!sidebarExpanded} aria-hidden={!sidebarExpanded}>
+    <button className="agent-sidebar-new" aria-label="New conversation" disabled={!hydrated} onClick={() => newThread()}><AgentIcon name="compose" size={17} /><span>New conversation</span></button>
+    <label className="agent-sidebar-search"><AgentIcon name="search" size={15} /><input ref={attachRefs ? search : undefined} aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={event => setQuery(event.target.value)} /></label>
+    <button className={`agent-sidebar-archive ${archived ? "is-selected" : ""}`} onClick={() => { setArchived(!archived); home() }}><AgentIcon name="archive" size={16} /><span>{archived ? "All conversations" : "Archived"}</span>{allThreads.some(row => row.meta.archivedAt) && <small>{allThreads.filter(row => row.meta.archivedAt).length}</small>}</button>
+    <div className="agent-project-heading">
+      <span>{archived ? "Archived" : "Projects"}</span>
+      <button className="agent-sidebar-view agent-thread-more" aria-label="View options" title="View options" aria-haspopup="dialog" aria-expanded={menu === "sidebar:view"} onClick={() => setMenu(menu === "sidebar:view" ? null : "sidebar:view")}><AgentIcon name="settings" size={14} /></button>
+      <button className="agent-icon-button" aria-label="Add project folder" title="Add project" onClick={chooseFolder}><AgentIcon name="plus" size={15} /></button>
+    </div>
+    <nav ref={attachRefs ? listMotion : undefined} className="agent-thread-list ag-list-guide" aria-label="Conversations by folder">
+      {sortedProjects.map(p => {
+        const key = projectKey(p), collapsed = prefs.collapsed.includes(key) && !query
+        const rows = threads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || (prefs.sort === "name" ? threadTitle(a).localeCompare(threadTitle(b)) : prefs.sort === "manual" ? b.meta.order - a.meta.order : b.meta.activityAt - a.meta.activityAt))
+        return <div className="agent-folder" key={key}>
+          <div className={`agent-folder-heading ${contextKey === key ? "is-current" : ""}`} data-agent-row={`project:${key}`}>
+            <button className="agent-icon-button agent-folder-toggle" aria-label={`Toggle ${p.name || folderName(p.folder)} conversations`} aria-expanded={!collapsed} title={p.folder} onClick={() => setPrefs(old => ({ ...old, collapsed: collapsed ? old.collapsed.filter(id => id !== key) : [...old.collapsed, key] }))}><AgentIcon name="chevron" size={12} style={{ transform: collapsed ? "" : "rotate(90deg)" }} /></button>
+            {rename?.id === key ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Project name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-project-open" aria-label={`${p.name || folderName(p.folder)} · ${hostLabel(p.host)}`} title={`${hostLabel(p.host)} · ${p.folder}`} onClick={() => openProject(p)}><AgentIcon name="folder" size={15} /><span>{p.name || folderName(p.folder)}</span></button>}
+            <button className="agent-icon-button agent-project-new" aria-label={`New conversation in ${p.folder}`} title="New conversation here" onClick={() => newThread(p)}><AgentIcon name={prefs.drafts[key] ? "edit" : "plus"} size={14} /></button>
+            <button className="agent-icon-button agent-thread-more" aria-label={`Project actions for ${p.folder}`} aria-haspopup="menu" aria-expanded={menu === key} onClick={() => setMenu(menu === key ? null : key)}><AgentIcon name="more" size={14} /></button>
+            {menu === key && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { newThread(p); setMenu(null) }}>New conversation</button><button role="menuitem" onClick={() => { setRename({ id: key, title: p.name || folderName(p.folder), project: p }); setMenu(null) }}>Rename project</button><button role="menuitem" onClick={() => moveProject(p, -1)}>Move project up</button><button role="menuitem" onClick={() => moveProject(p, 1)}>Move project down</button><button role="menuitem" disabled={allThreads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)} onClick={() => { setPrefs(old => ({ ...old, projects: old.projects.filter(item => projectKey(item) !== key) })); setMenu(null); if (contextKey === key) home() }}>Remove empty folder</button></AgentMenu>}
+          </div>
+          {!collapsed && <div className="agent-folder-threads">{rows.map(row => <div key={row.meta.id} data-agent-row={row.meta.id} className={`agent-thread ${selected === row.meta.id ? "is-selected" : ""}`} onContextMenu={e => { e.preventDefault(); setMenu(row.executionId) }}>
+            {rename?.id === row.executionId ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Conversation name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-thread-open" aria-current={selected === row.meta.id ? "page" : undefined} aria-label={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)}`} title={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)} · ${hostLabel(row.meta.hostKey)} · ${row.meta.folder}`} onClick={() => selectThread(row)}><span className="agent-thread-provider" title={row.agentName}><AgentProviderMark id={row.agentId} size={14} /></span><span className="agent-thread-title">{threadTitle(row)}</span><span className={`agent-thread-indicator ${row.pendingPermission || row.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(row.state) ? "error" : row.turnActive ? "working" : row.meta.pinned ? "pinned" : "idle"}`} aria-hidden="true">{row.meta.pinned ? <AgentIcon name="pin" size={11} /> : <span />}</span>{row.pendingPermission || row.pendingInput ? <span className="agent-attention-label">Needs you</span> : ["error", "submissionUnknown"].includes(row.state) ? <span className="agent-attention-label is-error">{statusOf(row)}</span> : <time className="agent-thread-time" dateTime={new Date(row.meta.activityAt).toISOString()}>{relativeActivity(row.meta.activityAt)}</time>}</button>}
+            <button className="agent-icon-button agent-thread-more" aria-label={`Actions for ${threadTitle(row)}`} aria-haspopup="menu" aria-expanded={menu === row.executionId} onClick={() => setMenu(menu === row.executionId ? null : row.executionId)}><AgentIcon name="more" size={14} /></button>
+            {menu === row.executionId && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { setRename({ id: row.executionId, title: threadTitle(row) }); setMenu(null) }}><AgentIcon name="edit" />Rename</button><button role="menuitem" onClick={() => { updateThreadMeta(row.executionId, { pinned: !row.meta.pinned }); setMenu(null) }}><AgentIcon name="pin" />{row.meta.pinned ? "Unpin" : "Pin"}</button><button role="menuitem" onClick={() => moveThread(row, -1)}>Move up</button><button role="menuitem" onClick={() => moveThread(row, 1)}>Move down</button><hr /><button role="menuitem" disabled={row.turnActive} onClick={() => archiveThread(row)}><AgentIcon name="archive" />{row.meta.archivedAt ? "Restore" : "Archive"}</button><button role="menuitem" className="is-destructive" onClick={() => { setDeleting(row); setMenu(null) }}><AgentIcon name="trash" />Delete</button></AgentMenu>}
+          </div>)}{prefs.drafts[key] && <button className="agent-empty-folder" onClick={() => newThread(p)}><AgentIcon name="edit" size={12} />Continue draft</button>}</div>}
+        </div>
+      })}
+      {!sortedProjects.length && <div className="agent-sidebar-empty"><p>{query ? "No matching conversations." : archived ? "No archived conversations." : "Add a project to keep related conversations together."}</p>{!query && !archived && <button onClick={chooseFolder}><AgentIcon name="plus" size={14} />Add a project</button>}</div>}
+    </nav>
+    <footer className="agent-sidebar-footer agent-sidebar-footer--compact agent-sidebar-footer--settings-only">
+      <button className="agent-sidebar-settings" aria-label="Agent settings" title="Agent settings" onClick={() => { setView("settings"); setSelected(null); setSidebar(false); setMenu(null) }}><AgentIcon name="settings" size={16} /><span>Settings</span></button>
+      {storage.error && <div className="agent-storage-status has-error" title={`${savedStatus} · ${storage.path}`} role="status"><span className="agent-status-dot attention" /><span>{savedStatus}</span></div>}
+    </footer>
+  </div>
   const providerOption = { id: "provider", name: "Coding agent", category: "provider", type: "select", currentValue: agentId, options: agents.map(agent => {
     const found = discovery.agents.find(info => info.agentId === agent.id)
     return { value: agent.id, name: agent.label, description: found?.available ? "Installed on this server" : found?.installed ? found.message || "Integration unavailable" : found ? "Not installed on this server" : discovery.checking ? "Checking installation…" : "Not checked" }
@@ -721,7 +926,10 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
   const composerNotice = discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : null
   const nativeShell = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
-  return <section ref={surface} className={`agent-workspace${closing ? " is-closing" : ""}${review && current ? " is-reviewing" : ""}`} data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
+  const topbarIdle = !!current && !current.turnActive && !current.pendingPermission && !current.pendingInput && ["saved", "complete", "working"].includes(current.state)
+  const topbarStatus = current && <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status" title={statusOf(current)}><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "error" : current.turnActive ? "working" : ""}`} /><span className={topbarIdle ? "agent-sr-only" : "agent-topbar-status-label"}>{statusOf(current)}</span></span>
+
+  return <section ref={surface} className={`agent-workspace${mobile ? " agent-workspace--mobile" : ""}${closing ? " is-closing" : ""}${review && current ? " is-reviewing" : ""}`} data-native-shell={nativeShell ? "true" : undefined} tabIndex={-1} role="dialog" aria-modal="true" aria-label={session ? `Agents on ${session.name}` : "Agents workspace"}
     onFocusCapture={e => { if (!(e.target as HTMLElement).closest('.agent-modal,.agent-thread-menu,.agent-picker-popup,.agent-model-menu,.agent-command-menu,.agent-context-choices,.agent-capabilities-popover')) returnFocus.current = e.target as HTMLElement }}
     onPointerDown={e => { if (!(e.target as HTMLElement).closest(".agent-thread-menu,.agent-thread-more")) setMenu(null) }}
     onKeyDown={e => {
@@ -741,12 +949,12 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
         else if (!e.shiftKey && document.activeElement === elements.at(-1)) { e.preventDefault(); elements[0]?.focus() }
       }
     }}>
-    <AgentAurora />
+    {!mobile && <AgentAurora />}
     {sidebarOverlay && <button className="agent-sidebar-scrim" tabIndex={-1} aria-label="Hide projects" onClick={toggleProjects} />}
-    <aside ref={navigationPanel} inert={dialogOpen} className={`agent-sidebar ${sidebarExpanded ? "" : "is-collapsed"} ${sidebar ? "is-open" : ""}`} role={sidebarOverlay ? "dialog" : "complementary"} aria-modal={sidebarOverlay || undefined} aria-label="Projects and conversations">
+    {!mobile && <aside ref={navigationPanel} inert={dialogOpen} className={`agent-sidebar ${sidebarExpanded ? "" : "is-collapsed"} ${sidebar ? "is-open" : ""}`} role={sidebarOverlay ? "dialog" : "complementary"} aria-modal={sidebarOverlay || undefined} aria-label="Projects and conversations">
       <header className="agent-sidebar-top">
         <button className="agent-brand" onClick={() => { setArchived(false); home() }} aria-label="Still conversations"><StillAgentMark size={34} /><strong>Still</strong></button>
-        <button ref={sidebarToggle} className="agent-sidebar-toggle" aria-label={sidebarExpanded ? "Collapse project sidebar" : "Expand project sidebar"} title={`${sidebarExpanded ? "Collapse" : "Expand"} project sidebar · Ctrl/⌘+\\`} aria-expanded={sidebarExpanded} aria-controls="agent-project-navigation" onClick={toggleProjects}><AgentIcon name="panel" size={17} /></button>
+      <button ref={sidebarToggle} className="agent-sidebar-toggle" aria-label={sidebarExpanded ? "Collapse project sidebar" : "Expand project sidebar"} title={`${sidebarExpanded ? "Collapse" : "Expand"} project sidebar · Ctrl/⌘+\\`} aria-expanded={sidebarExpanded} aria-controls="agent-project-navigation" onClick={toggleProjects}><AgentIcon name="panel" size={17} /></button>
       </header>
       <div className="agent-sidebar-rail" aria-hidden={sidebarExpanded} inert={sidebarExpanded}>
         <button className="agent-rail-new" aria-label="New conversation" title="New conversation" disabled={!hydrated} onClick={() => newThread()}><AgentIcon name="compose" size={18} /></button>
@@ -758,54 +966,21 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
           <span className={`agent-rail-storage agent-status-dot ${storage.error ? "attention" : "connected"}`} title={savedStatus} role="status" aria-label={savedStatus} />
         </div>
       </div>
-      <div className="agent-sidebar-panel agent-sidebar-panel--readable" id="agent-project-navigation" inert={!sidebarExpanded} aria-hidden={!sidebarExpanded}>
-        <button className="agent-sidebar-new" aria-label="New conversation" disabled={!hydrated} onClick={() => newThread()}><AgentIcon name="compose" size={17} /><span>New conversation</span></button>
-        <label className="agent-sidebar-search"><AgentIcon name="search" size={15} /><input ref={search} aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={event => setQuery(event.target.value)} /></label>
-        <button className={`agent-sidebar-archive ${archived ? "is-selected" : ""}`} onClick={() => { setArchived(!archived); home() }}><AgentIcon name="archive" size={16} /><span>{archived ? "All conversations" : "Archived"}</span>{allThreads.some(row => row.meta.archivedAt) && <small>{allThreads.filter(row => row.meta.archivedAt).length}</small>}</button>
-        <div className="agent-project-heading">
-          <span>{archived ? "Archived" : "Projects"}</span>
-          <button className="agent-sidebar-view agent-thread-more" aria-label="View options" title="View options" aria-haspopup="dialog" aria-expanded={menu === "sidebar:view"} onClick={() => setMenu(menu === "sidebar:view" ? null : "sidebar:view")}><AgentIcon name="settings" size={14} /></button>
-          <button className="agent-icon-button" aria-label="Add project folder" title="Add project" onClick={chooseFolder}><AgentIcon name="plus" size={15} /></button>
-        </div>
-        <nav ref={listMotion} className="agent-thread-list ag-list-guide" aria-label="Conversations by folder">
-          {sortedProjects.map(p => {
-            const key = projectKey(p), collapsed = prefs.collapsed.includes(key) && !query
-            const rows = threads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || (prefs.sort === "name" ? threadTitle(a).localeCompare(threadTitle(b)) : prefs.sort === "manual" ? b.meta.order - a.meta.order : b.meta.activityAt - a.meta.activityAt))
-            return <div className="agent-folder" key={key}>
-              <div className={`agent-folder-heading ${contextKey === key ? "is-current" : ""}`} data-agent-row={`project:${key}`}>
-                <button className="agent-icon-button agent-folder-toggle" aria-label={`Toggle ${p.name || folderName(p.folder)} conversations`} aria-expanded={!collapsed} title={p.folder} onClick={() => setPrefs(old => ({ ...old, collapsed: collapsed ? old.collapsed.filter(id => id !== key) : [...old.collapsed, key] }))}><AgentIcon name="chevron" size={12} style={{ transform: collapsed ? "" : "rotate(90deg)" }} /></button>
-                {rename?.id === key ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Project name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-project-open" aria-label={`${p.name || folderName(p.folder)} · ${hostLabel(p.host)}`} title={`${hostLabel(p.host)} · ${p.folder}`} onClick={() => openProject(p)}><AgentIcon name="folder" size={15} /><span>{p.name || folderName(p.folder)}</span></button>}
-                <button className="agent-icon-button agent-project-new" aria-label={`New conversation in ${p.folder}`} title="New conversation here" onClick={() => newThread(p)}><AgentIcon name={prefs.drafts[key] ? "edit" : "plus"} size={14} /></button>
-                <button className="agent-icon-button agent-thread-more" aria-label={`Project actions for ${p.folder}`} aria-haspopup="menu" aria-expanded={menu === key} onClick={() => setMenu(menu === key ? null : key)}><AgentIcon name="more" size={14} /></button>
-                {menu === key && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { newThread(p); setMenu(null) }}>New conversation</button><button role="menuitem" onClick={() => { setRename({ id: key, title: p.name || folderName(p.folder), project: p }); setMenu(null) }}>Rename project</button><button role="menuitem" onClick={() => moveProject(p, -1)}>Move project up</button><button role="menuitem" onClick={() => moveProject(p, 1)}>Move project down</button><button role="menuitem" disabled={allThreads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)} onClick={() => { setPrefs(old => ({ ...old, projects: old.projects.filter(item => projectKey(item) !== key) })); setMenu(null); if (contextKey === key) home() }}>Remove empty folder</button></AgentMenu>}
-              </div>
-              {!collapsed && <div className="agent-folder-threads">{rows.map(row => <div key={row.meta.id} data-agent-row={row.meta.id} className={`agent-thread ${selected === row.meta.id ? "is-selected" : ""}`} onContextMenu={e => { e.preventDefault(); setMenu(row.executionId) }}>
-                {rename?.id === row.executionId ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Conversation name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-thread-open" aria-current={selected === row.meta.id ? "page" : undefined} aria-label={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)}`} title={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)} · ${hostLabel(row.meta.hostKey)} · ${row.meta.folder}`} onClick={() => selectThread(row)}><span className="agent-thread-provider" title={row.agentName}><AgentProviderMark id={row.agentId} size={14} /></span><span className="agent-thread-title">{threadTitle(row)}</span><span className={`agent-thread-indicator ${row.pendingPermission || row.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(row.state) ? "error" : row.turnActive ? "working" : row.meta.pinned ? "pinned" : "idle"}`} aria-hidden="true">{row.meta.pinned ? <AgentIcon name="pin" size={11} /> : <span />}</span>{row.pendingPermission || row.pendingInput ? <span className="agent-attention-label">Needs you</span> : ["error", "submissionUnknown"].includes(row.state) ? <span className="agent-attention-label is-error">{statusOf(row)}</span> : <time className="agent-thread-time" dateTime={new Date(row.meta.activityAt).toISOString()}>{relativeActivity(row.meta.activityAt)}</time>}</button>}
-                <button className="agent-icon-button agent-thread-more" aria-label={`Actions for ${threadTitle(row)}`} aria-haspopup="menu" aria-expanded={menu === row.executionId} onClick={() => setMenu(menu === row.executionId ? null : row.executionId)}><AgentIcon name="more" size={14} /></button>
-                {menu === row.executionId && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { setRename({ id: row.executionId, title: threadTitle(row) }); setMenu(null) }}><AgentIcon name="edit" />Rename</button><button role="menuitem" onClick={() => { updateThreadMeta(row.executionId, { pinned: !row.meta.pinned }); setMenu(null) }}><AgentIcon name="pin" />{row.meta.pinned ? "Unpin" : "Pin"}</button><button role="menuitem" onClick={() => moveThread(row, -1)}>Move up</button><button role="menuitem" onClick={() => moveThread(row, 1)}>Move down</button><hr /><button role="menuitem" disabled={row.turnActive} onClick={() => archiveThread(row)}><AgentIcon name="archive" />{row.meta.archivedAt ? "Restore" : "Archive"}</button><button role="menuitem" className="is-destructive" onClick={() => { setDeleting(row); setMenu(null) }}><AgentIcon name="trash" />Delete</button></AgentMenu>}
-              </div>)}{prefs.drafts[key] && <button className="agent-empty-folder" onClick={() => newThread(p)}><AgentIcon name="edit" size={12} />Continue draft</button>}</div>}
-            </div>
-          })}
-          {!sortedProjects.length && <div className="agent-sidebar-empty"><p>{query ? "No matching conversations." : archived ? "No archived conversations." : "Add a project to keep related conversations together."}</p>{!query && !archived && <button onClick={chooseFolder}><AgentIcon name="plus" size={14} />Add a project</button>}</div>}
-        </nav>
-        <footer className="agent-sidebar-footer agent-sidebar-footer--compact agent-sidebar-footer--settings-only">
-          <button className="agent-sidebar-settings" aria-label="Agent settings" title="Agent settings" onClick={() => { setView("settings"); setSelected(null); setSidebar(false); setMenu(null) }}><AgentIcon name="settings" size={16} /><span>Settings</span></button>
-          {storage.error && <div className="agent-storage-status has-error" title={`${savedStatus} · ${storage.path}`} role="status"><span className="agent-status-dot attention" /><span>{savedStatus}</span></div>}
-        </footer>
-      </div>
+      {renderSidebarPanel("agent-project-navigation", true)}
       {menu === "sidebar:view" && <AgentMenu root={surface.current} role="dialog" label="View options" className="agent-view-menu"><label>Sort conversations<select aria-label="Sort projects and conversations" value={prefs.sort} onChange={event => { setPrefs(old => ({ ...old, sort: event.target.value as typeof old.sort })); setMenu(null) }}><option value="recent">Recent</option><option value="name">A–Z</option><option value="manual">Manual</option></select></label></AgentMenu>}
       {menu === "sidebar:more" && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { setArchived(!archived); home() }}><AgentIcon name="archive" />{archived ? "All conversations" : "Archived"}</button><button role="menuitem" onClick={() => { setView("settings"); setSelected(null); setSidebar(false); setMenu(null) }}><AgentIcon name="settings" />Agent settings</button><button role="menuitem" onClick={onClose}><AgentIcon name="panel" />Back to workspace</button></AgentMenu>}
-    </aside>
+    </aside>}
     <main className={`agent-main ${review && current ? "has-review" : ""}`} inert={sidebarOverlay || dialogOpen}>
       <div className="agent-sr-only" role="status" aria-atomic="true">{current?.pendingPermission ? `Approval needed: ${current.pendingPermission.title}` : current?.pendingInput ? `Agent question: ${current.pendingInput.title}` : ""}</div>
 
-      <header className={`agent-topbar agent-topbar--stacked${review && current ? " is-reviewing" : ""}`} data-tauri-drag-region>
+      {mobile ? <header className="mobile-detail-bar mobile-agent-header"><button className="mobile-icon-button" aria-label={review ? "Back to conversation" : "Back to threads"} onClick={review ? closeReview : onClose}><AgentIcon name="back" size={22} /></button><div><h1>{review ? "Changes" : current ? threadTitle(current) : view === "settings" ? "Agent settings" : "New task"}</h1>{current ? <p>{topbarStatus}</p> : <p>{context ? projectName : view === "settings" ? "Your remote providers" : "Choose a remote project"}</p>}</div>{current && !review && <button className="mobile-icon-button" aria-label="Review changes" onClick={event => openReview("conversation", event.currentTarget)}><AgentIcon name="changes" size={21} /></button>}{current && !review && <button className="mobile-icon-button" aria-label="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" size={21} /></button>}</header> : <header className={`agent-topbar agent-topbar--stacked agent-topbar--compact${review && current ? " is-reviewing" : ""}`} data-tauri-drag-region>
         <div className="agent-topbar-leading agent-topbar-leading--focused">
           {review && current ? <>
             <button type="button" className="agent-review-back" aria-label="Back to chat" onClick={closeReview}><AgentIcon name="back" size={15} /><span>Chat</span></button>
             <span className="agent-review-topbar-divider" aria-hidden="true" />
             <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>
           </> : <>
+            {parentThread && <button type="button" className="agent-subagent-parent" onClick={openParentThread} title={`Back to ${threadTitle(parentThread)}`}><AgentIcon name="back" size={14} /><span>Parent chat</span></button>}
             {current ? <AgentProviderMark id={current.agentId} size={18} /> : <AgentIcon name="chat" size={17} />}
             {current && <strong className="agent-topbar-title" title={threadTitle(current)}>{threadTitle(current)}</strong>}
             {view === "settings" && <strong className="agent-topbar-title is-settings">Settings</strong>}
@@ -813,16 +988,17 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
         </div>
         <div className="agent-topbar-actions">
           {current && <>
-            <span className={`agent-status ${current.pendingPermission || current.pendingInput ? "is-attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "is-error" : current.turnActive ? "is-working" : ""}`} role="status"><span className={`agent-status-dot ${current.pendingPermission || current.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(current.state) && !current.turnActive ? "error" : current.turnActive ? "working" : ""}`} />{statusOf(current)}</span>
+            {topbarStatus}
             {!review && <>
+              {!isSubagent && <button type="button" className="agent-subagents-topbar" onClick={newSubagent}><AgentIcon name="plus" size={14} /><span>New subagent</span></button>}
               <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
-              <button className="agent-review-toggle" aria-label="Review changes" aria-expanded={false} onClick={event => openReview("repository", event.currentTarget)}><AgentIcon name="changes" size={16} /><span>Changes</span></button>
+              <button className="agent-icon-button agent-topbar-changes-icon" aria-label="Review changes" title="Review changes" aria-expanded={false} onClick={event => openReview("repository", event.currentTarget)}><AgentIcon name="changes" size={16} /></button>
             </>}
           </>}
           {!review && onOpenTerminal && (!context || context.host === host) && <button className="agent-icon-button" aria-label="Open terminal" title="Open terminal" onClick={onOpenTerminal}><AgentIcon name="terminal" /></button>}
           <button className="agent-icon-button" aria-label="Close agent workspace" title="Close agent workspace" onClick={onClose}><AgentIcon name="close" /></button>
         </div>
-      </header>
+      </header>}
 
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       <div className="agent-workbody">
@@ -848,10 +1024,12 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
         {discovery.error && <p className="agent-error" role="alert">{discovery.error}</p>}
         <div className="agent-local-settings"><h2>History on this device</h2><p>Conversations and drafts stay available when your server is offline.</p><code>{storage.path || "Opening local storage…"}</code></div>
       </section> : <>
-        <div ref={scroll.viewport} className="agent-conversation" tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
+        {current && !isSubagent && <AgentSubagents children={childThreads} onOpen={selectThread} onCreate={newSubagent} />}
+        {isSubagent && <div className="agent-subagent-context"><AgentIcon name="folder" size={13} /><span>Subagent of <strong>{parentThread ? threadTitle(parentThread) : "unavailable parent"}</strong></span><span>·</span><span>Shared project folder</span></div>}
+        <div ref={scroll.viewport} className={`agent-conversation${current ? " agent-conversation--hierarchy" : ""}`} tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
           <div ref={scroll.content} className="agent-message-list">
             {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}</>
-              : startScreen ? <div className="agent-welcome"><h1>What will you <em>build?</em></h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
+              : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
           </div>
         </div>
@@ -898,7 +1076,7 @@ export default function AgentWorkspace({ closing = false, session, sessions = []
             <AgentAttachments attachments={attachments} progress={attachmentProgress} onRemove={removeAttachment} />
             {attachments.length > 0 && <p className="agent-attachment-note">Files upload to this server and are shared by path. Image understanding depends on the selected agent.</p>}
             {draggingFiles && <div className="agent-drop-hint" aria-hidden="true"><AgentIcon name="attach" size={17} />Drop files to attach</div>}
-            <textarea ref={textarea} aria-label="Message agent" aria-description="Enter to send. Shift+Enter for a new line. Type / for commands." rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); void addAttachments(files); return } void readClipboardImageFile().then(file => { if (file) void addAttachments([file]) }) }} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
+            <textarea ref={textarea} aria-label="Message agent" aria-description={mobile ? "Enter for a new line. Use Send to submit. Type / for commands." : "Enter to send. Shift+Enter for a new line. Type / for commands."} enterKeyHint={mobile ? "enter" : undefined} rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); void addAttachments(files); return } void readClipboardImageFile().then(file => { if (file) void addAttachments([file]) }) }} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (!mobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current && <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} />}

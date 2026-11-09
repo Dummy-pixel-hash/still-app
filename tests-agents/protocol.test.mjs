@@ -54,7 +54,7 @@ test("MCP todo tool exposes the shared revision contract and returns structured 
       while ((end = buffer.indexOf("\n")) >= 0) {
         const request = JSON.parse(buffer.slice(0,end)); buffer = buffer.slice(end + 1)
         const response = request.params?.token === token
-          ? { jsonrpc:"2.0", id:request.id, result:{ todos:state } }
+          ? request.method === "_still/subagents" ? { jsonrpc:"2.0", id:request.id, result:{ action:request.params.input.action, children:[] } } : { jsonrpc:"2.0", id:request.id, result:{ todos:state } }
           : { jsonrpc:"2.0", id:request.id, error:{ code:-32000, message:"Unauthorized" } }
         socket.write(JSON.stringify(response)+"\n")
       }
@@ -91,9 +91,14 @@ test("MCP todo tool exposes the shared revision contract and returns structured 
     const titleTool=tools.result.tools.find(tool=>tool.name==="still_set_chat_title")
     assert.equal(titleTool.inputSchema.required[0],"title")
     assert.equal(titleTool.inputSchema.properties.title.maxLength,80)
+    const subagents=tools.result.tools.find(tool=>tool.name==="still_subagents")
+    assert.deepEqual(subagents.inputSchema.properties.action.enum,["list","prepare","spawn","inspect","guide","wait","cancel"])
+    assert.deepEqual(["modelId","effort","modeId"].map(key=>subagents.inputSchema.properties[key].type),["string","string","string"])
     const result=await send({jsonrpc:"2.0",id:3,method:"tools/call",params:{name:"still_todos",arguments:{action:"list"}}})
     assert.deepEqual(result.result.structuredContent,state)
     assert.equal(JSON.parse(result.result.content[0].text).items[0].title,"Verify the worker")
+    const delegated=await send({jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"still_subagents",arguments:{action:"list"}}})
+    assert.deepEqual(delegated.result.structuredContent,{action:"list",children:[]})
   } finally {
     child.stdin.end(); await new Promise(resolve=>{if(child.exitCode!==null)return resolve();child.once("exit",resolve);setTimeout(()=>{child.kill("SIGTERM")},500).unref()})
     server.close(); await unlink(socketPath).catch(()=>{}); await rm(dir,{recursive:true,force:true})

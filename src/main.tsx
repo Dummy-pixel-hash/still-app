@@ -4,6 +4,7 @@ import ReactDOM from "react-dom/client"
 import { failingBridge, registerNativeBridge } from "./bridge/nativeBridge"
 import { mockBridge } from "./bridge/mockBridge"
 import { tauriBridge } from "./bridge/tauriBridge"
+import { isTerminalPreview } from "./preview/mode"
 
 function isTauriRuntime(): boolean {
   return (
@@ -34,15 +35,28 @@ if (isTauriRuntime()) {
   registerNativeBridge(mockBridge)
 }
 
-// The companion gets its own root: it never mounts a workspace/session owner.
-const orbEntry = new URLSearchParams(window.location.search).get("orb") === "1"
-document.documentElement.classList.toggle("still-orb-window", orbEntry)
-const Root = orbEntry
-  ? lazy(() => import("./screens/OrbScreen"))
-  : lazy(() => import("./App"))
+function renderApp() {
+  // The companion gets its own root: it never mounts a workspace/session owner.
+  const orbEntry = new URLSearchParams(window.location.search).get("orb") === "1"
+  document.documentElement.classList.toggle("still-orb-window", orbEntry)
+  const Root = orbEntry
+    ? lazy(() => import("./screens/OrbScreen"))
+    : lazy(() => import("./App"))
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <Suspense fallback={null}><Root /></Suspense>
-  </React.StrictMode>,
-)
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <Suspense fallback={null}><Root /></Suspense>
+    </React.StrictMode>,
+  )
+}
+
+// Seed only the opt-in browser demo, before Workspace first reads its store.
+// The dynamic import is removed entirely from packaged production builds.
+if (import.meta.env.DEV && isTerminalPreview() && new URLSearchParams(window.location.search).get("orb") !== "1") {
+  void import("./preview/terminals")
+    .then(module => module.startTerminalPreview())
+    .catch(error => console.error("[still] Terminal preview could not be initialized:", error))
+    .finally(renderApp)
+} else {
+  renderApp()
+}

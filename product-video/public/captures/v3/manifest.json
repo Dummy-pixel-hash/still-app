@@ -1,0 +1,202 @@
+{
+  "viewport": {
+    "width": 1440,
+    "height": 810
+  },
+  "page": {
+    "width": 1440,
+    "height": 780
+  },
+  "clips": {
+    "compose": {
+      "file": "footage/compose.mp4",
+      "duration": 8.633333,
+      "events": [
+        {
+          "label": "start",
+          "at": 0.33169007301330566
+        },
+        {
+          "label": "open-model",
+          "at": 0.6316900253295898
+        },
+        {
+          "label": "model-open",
+          "at": 1.2936899662017822
+        },
+        {
+          "label": "select-model",
+          "at": 1.9446899890899658
+        },
+        {
+          "label": "model-selected",
+          "at": 2.6516900062561035
+        },
+        {
+          "label": "type",
+          "at": 3.5906901359558105
+        },
+        {
+          "label": "typed",
+          "at": 6.0486900806427
+        }
+      ],
+      "boxes": {
+        "composer": {
+          "x": 384,
+          "y": 583,
+          "width": 960,
+          "height": 149
+        },
+        "model": {
+          "x": 403,
+          "y": 681,
+          "width": 141.15625,
+          "height": 38
+        }
+      }
+    },
+    "search": {
+      "file": "footage/search.mp4",
+      "duration": 6.033333,
+      "events": [
+        {
+          "label": "start",
+          "at": 0.31100010871887207
+        },
+        {
+          "label": "type",
+          "at": 1.253999948501587
+        },
+        {
+          "label": "filtered",
+          "at": 2.2850000858306885
+        },
+        {
+          "label": "open-thread",
+          "at": 2.7850000858306885
+        },
+        {
+          "label": "thread-opened",
+          "at": 3.558000087738037
+        }
+      ],
+      "boxes": {
+        "sidebar": {
+          "x": 8,
+          "y": 8,
+          "width": 280,
+          "height": 764
+        },
+        "reply": {
+          "x": 288,
+          "y": 54,
+          "width": 1152,
+          "height": 726
+        }
+      }
+    },
+    "todos": {
+      "file": "footage/todos.mp4",
+      "duration": 6.533333,
+      "events": [
+        {
+          "label": "start",
+          "at": 0.32621192932128906
+        },
+        {
+          "label": "expand",
+          "at": 0.7762119770050049
+        },
+        {
+          "label": "expanded",
+          "at": 1.5422120094299316
+        },
+        {
+          "label": "progress",
+          "at": 3.75521183013916
+        }
+      ],
+      "boxes": {
+        "todos": {
+          "x": 479.6666666666667,
+          "y": 483.34375,
+          "width": 768.6666666666666,
+          "height": 216.98958333333334
+        }
+      }
+    },
+    "approval": {
+      "file": "footage/approval.mp4",
+      "duration": 7.2,
+      "events": [
+        {
+          "label": "start",
+          "at": 0.3917829990386963
+        },
+        {
+          "label": "approve",
+          "at": 2.912783145904541
+        },
+        {
+          "label": "approved",
+          "at": 3.909783124923706
+        }
+      ],
+      "boxes": {
+        "request": {
+          "x": 340,
+          "y": 236.09375,
+          "width": 760,
+          "height": 307.8125
+        },
+        "allow": {
+          "x": 987.6666666666666,
+          "y": 497.40625,
+          "width": 96.66666666666667,
+          "height": 36.833333333333336
+        }
+      }
+    },
+    "changes": {
+      "file": "footage/changes.mp4",
+      "duration": 6.966667,
+      "events": [
+        {
+          "label": "start",
+          "at": 0.3123478889465332
+        },
+        {
+          "label": "review",
+          "at": 0.7123479843139648
+        },
+        {
+          "label": "review-open",
+          "at": 1.5503478050231934
+        },
+        {
+          "label": "choose-css",
+          "at": 3.6643478870391846
+        },
+        {
+          "label": "css-open",
+          "at": 4.291347980499268
+        }
+      ],
+      "boxes": {
+        "diff": {
+          "x": 28,
+          "y": 70,
+          "width": 1384,
+          "height": 682
+        },
+        "files": {
+          "x": 28.666666666666668,
+          "y": 255.875,
+          "width": 231.33333333333334,
+          "height": 495.4583333333333
+        }
+      }
+    }
+  }
+}

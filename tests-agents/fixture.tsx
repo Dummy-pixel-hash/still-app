@@ -30,7 +30,7 @@ const modelOptions = [
 const projectCommands = [{ name: "review", description: "Review the current changes" }, { name: "compact", description: "Compact this conversation" }, ...Array.from({ length: 25 }, (_, i) => ({ name: `team/command-${i}`, description: `Project command ${i}` })), { name: "skill:security-review", description: "Audit security boundaries", route: "skill" as const, source: "Skill" }]
 let counter = 0
 const h = {
-  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], uploads: [] as unknown[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[],
+  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], uploads: [] as unknown[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[], subagentReplies: [] as unknown[],
   rejectUpload: false,
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
@@ -180,7 +180,7 @@ registerNativeBridge({
   },
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
-    const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
+     const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), parentConversationId: options?.parentConversationId, state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
       configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, todos:{protocolVersion:3,revision:0,items:[],toolAvailable:true,available:true}, persistent:h.persistent, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
     row.conversationId = options?.conversationId || row.executionId
     row.hostKey = hostKey(session)
@@ -203,13 +203,13 @@ registerNativeBridge({
   agentReconcile: async id => { h.reconciles.push(id); if (h.reconcileFail) throw new Error("Remote status check failed"); const row = snapshots.get(id); if (!row) throw new Error("Agent execution unavailable"); h.reconcile() },
   agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (h.workerUnavailable) h.emit(id, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available. Resume the saved provider session; no prompt has been resent." }); else { if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }) } return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
-  agentSend: async (id, message) => {
+   agentSend: async (id, message, options) => {
     if (h.rejectSend && !h.completeBeforeReject) throw new Error("SSH disconnected. Submission is uncertain.")
     const row = snapshots.get(id)!
     h.sends.push(message)
     h.sentConfigs.push({ agent: row.agentId, model: row.configOptions.find(option => option.category === "model")?.currentValue })
-    const messageId = `${id}:message:${row.lastSequence + 1}`
-    h.emit(id, { type: "userMessage", text: message, messageId })
+     const messageId = options?.messageId || `${id}:message:${row.lastSequence + 1}`
+     h.emit(id, { type: "userMessage", text: message, messageId, source: options?.source })
     h.emit(id, { type: "assistantChunk", text: "First " }); h.emit(id, { type: "assistantChunk", text: "second " }); h.emit(id, { type: "assistantChunk", text: "third." })
     if (row.historyCapabilities?.revert) h.emit(id, { type: "messageCheckpoint", messageId, checkpoint: { provider: row.agentId, id: messageId } })
     if (h.completeBeforeReject) { h.emit(id, { type: "threadComplete", state: "complete" }); throw new Error("The reply arrived before its transport acknowledgement was lost.") }
@@ -260,6 +260,7 @@ registerNativeBridge({
     if (h.unknownResponse) throw new Error("Response acknowledgement was lost")
   },
   agentCancel: async id => { h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); await new Promise<void>(resolve => setTimeout(resolve, 0)); h.finish() },
+  agentSubagentReply: async (executionId, requestId, result, error) => { h.subagentReplies.push({ executionId, requestId, result, error }); if (!error) h.emit(executionId, { type: "subagentReply", subagentRequest: { requestId, input: {} } }) },
   agentClose: async id => { h.closes.push(id); snapshots.delete(id); sinks.delete(id) },
   agentRespondInput: async (id, requestId, answers) => {
     const row = snapshots.get(id)!, request = row.pendingInput
@@ -353,6 +354,25 @@ function AgentThreadProbe() {
   React.useEffect(() => { (window as any).agentThreadRows = rows }, [rows])
   return null
 }
+function PreviewLayoutControl() {
+  const [layout, setLayout] = React.useState(() => {
+    const requested = new URLSearchParams(location.search).get("layout")
+    return requested === "chapters" || requested === "timeline" || requested === "split"
+      ? requested
+      : localStorage.getItem("still.agent-activity-layout") || "timeline"
+  })
+  React.useEffect(() => {
+    document.documentElement.dataset.agentActivityLayout = layout
+    localStorage.setItem("still.agent-activity-layout", layout)
+  }, [layout])
+  return <label className="agent-demo-layout-control">Chain layout
+    <select aria-label="Choose activity layout" value={layout} onChange={event => setLayout(event.target.value)}>
+      <option value="chapters">Chapters</option>
+      <option value="timeline">Timeline</option>
+      <option value="split">Split view</option>
+    </select>
+  </label>
+}
 function FixtureWorkspace() {
   const [transportId, setTransportId] = React.useState("ssh-fixture")
   const [connected, setConnected] = React.useState(true)
@@ -360,7 +380,7 @@ function FixtureWorkspace() {
   h.setConnected = setConnected
   return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} connected={connected} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
 }
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a><PreviewLayoutControl /></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
 if (preview && scenario) {
   const observer = new MutationObserver(() => {
     const row = document.querySelector<HTMLButtonElement>('.agent-thread-open')

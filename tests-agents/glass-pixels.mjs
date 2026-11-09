@@ -67,7 +67,7 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
     const canvas = document.querySelector(".agent-aurora canvas")
     return Number(canvas?.dataset.frostFrame || 0) > previous
   }, previousFrame)
-  const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > *, .agent-composer > * { opacity: 0 !important; pointer-events: none !important; }" })
+  const hide = await page.addStyleTag({ content: ".agent-sidebar > *, .agent-recents > *, .agent-conversation > *, .agent-composer > * { opacity: 0 !important; pointer-events: none !important; }" })
   let disable
   try {
     const source = await page.locator(".agent-aurora").boundingBox()
@@ -87,7 +87,7 @@ export async function probeAuroraGlass(page, capture, targetPanes = [["sidebar",
       await capture(`${name}-blurred`, image)
       panes.push({ name, clip, contrast: await pixelContrast(page, image) })
     }
-    disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-sidebar, .agent-recents, .agent-composer::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
+    disable = await page.addStyleTag({ content: ".agent-workspace { --ag-frost-image: none !important; } .agent-sidebar, .agent-recents, .agent-conversation, .agent-composer::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
     const results = []
     for (const pane of panes) {
       const image = await page.screenshot({ clip: pane.clip, animations: "disabled", scale: "css" })

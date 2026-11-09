@@ -20,7 +20,7 @@ const unconfirmedRequests = new Set<string>()
 const todoRefreshRevisions = new Map<string, number>()
 const INDEX_KEY = "still.agents.index.v2"
 function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedAt?: number }): ConversationMeta {
-  const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "" }
+  const defaults = { id: row.conversationId || row.executionId, hostKey: row.hostKey || "", folder: normalizeFolder(row.cwd), title: "", pinned: false, createdAt: row.touchedAt || Date.now(), activityAt: row.touchedAt || Date.now(), order: row.touchedAt || Date.now(), draft: "", ...(row.parentConversationId ? { parentConversationId: row.parentConversationId } : {}) }
   if (!row.meta || typeof row.meta !== "object") return defaults
   const title = typeof row.meta.title === "string" ? row.meta.title : ""
   const firstPromptTitle = row.transcript?.find(event => event.type === "userMessage")?.text?.split("\n")[0].slice(0, 160)
@@ -277,13 +277,13 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
   subscribing.set(id, task)
   return task
 }
-export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false) {
+export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false, options?: { messageId?: string; source?: "user" | "parentAgent" }) {
   const row = rows.get(id)
   if (!row || row.recoveryReason || resumeOperations.has(id) || !["working", "complete", "cancelled", "error"].includes(row.state) || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
   // Sequence numbers and the user message come from the native runner, not an optimistic counter.
   const sequenceBeforeSend = row.lastSequence
   row.turnActive = true; row.lastError = undefined; emit()
-  try { await nativeBridge.agentSend(id, message) }
+  try { await nativeBridge.agentSend(id, message, options) }
   catch (error) {
     const current = rows.get(id)!
     const submitted = current.transcript.find(event => event.type === "userMessage" && event.sequence > sequenceBeforeSend && event.text === message)
@@ -468,7 +468,13 @@ export async function setAgentConfig(id: string, configId: string, value: string
   if (!row || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) || !["working", "complete", "cancelled", "error"].includes(row.state)) throw new Error("Wait until the agent is idle before changing its settings.")
   if (configOperations.has(id)) throw new Error("Wait for the previous setting update.")
   configOperations.add(id)
-  try { await nativeBridge.agentSetConfig(id, configId, value); await refreshAgentThread(id) }
+  try {
+    await nativeBridge.agentSetConfig(id, configId, value)
+    await refreshAgentThread(id)
+    const updated = rows.get(id)
+    if (!updated) throw new Error("The conversation disappeared while updating its settings.")
+    return updated
+  }
   finally { configOperations.delete(id) }
 }
 const configOperations = new Set<string>()

@@ -1,0 +1,31 @@
+{
+  "name": "still-product-video",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.tsx",
+    "render": "remotion render src/index.tsx StillFilm out/still-product-film.mp4 --crf=17",
+    "render:no-music": "remotion render src/index.tsx StillFilmNoMusic out/still-product-film-no-music.mp4 --crf=17",
+    "render:30fps": "remotion render src/index.tsx StillFilm30fps out/still-product-film-30fps.mp4 --crf=17",
+    "render:opening": "remotion render src/index.tsx OpeningCut out/still-opening.mp4 --crf=17",
+    "capture": "node scripts/capture-native.mjs",
+    "capture:legacy": "node scripts/capture.mjs",
+    "soundtrack": "python3 scripts/soundtrack.py",
+    "qa": "node scripts/qa.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:motion": "node --test scripts/motion.test.mjs",
+    "test:interactions": "node --test scripts/interactions.test.mjs",
+    "still": "remotion still src/index.tsx StillFilm --frame=1320 --scale=0.5"
+  },
+  "dependencies": {
+    "@remotion/transitions": "^4.0.0",
+    "remotion": "^4.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

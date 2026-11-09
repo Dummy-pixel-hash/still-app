@@ -43,6 +43,26 @@ export const chatTitleTool = {
   },
 }
 
+export const subagentTool = {
+  name: "still_subagents",
+  description: "Manage child conversations belonging to this Still parent chat. List eligible agents, prepare a child to discover its exact model/reasoning/mode choices without sending a task, then spawn it with validated settings; or spawn directly when you already know valid setting IDs. You can inspect, guide, wait, and request cancellation. Children cannot create children. Child permission requests still require the user. Cancellation does not undo file edits.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["action"],
+    properties: {
+      action: { type: "string", enum: ["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"] },
+      childId: { type: "string", minLength: 1, maxLength: 160 },
+      agentId: { type: "string", minLength: 1, maxLength: 100 },
+      title: { type: "string", minLength: 1, maxLength: 160 },
+      task: { type: "string", minLength: 1, maxLength: 12000 },
+      modelId: { type: "string", minLength: 1, maxLength: 300, description: "Exact provider model ID returned by prepare." },
+      effort: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider effort/reasoning option ID returned by prepare." },
+      modeId: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider agent-mode option ID returned by prepare (for example plan/build only when actually advertised)." },
+      message: { type: "string", minLength: 1, maxLength: 4000 },
+      timeoutMs: { type: "integer", minimum: 1000, maximum: 15000 },
+    },
+  },
+}
+
 export function todoStorePath(home, conversationId) {
   if (typeof home !== "string" || !home || typeof conversationId !== "string" || !conversationId || conversationId.length > 512) throw new Error("Invalid todo storage identity.")
   return join(home, ".local", "state", "still", "agent-todos", createHash("sha256").update(conversationId).digest("hex"), "todos.json")
@@ -313,6 +333,32 @@ export function requestChatTitle(connection, input, requestId = randomUUID(), si
   })
 }
 
+export function requestSubagents(connection, input, requestId = randomUUID(), signal) {
+  if (!object(input) || !["list", "spawn", "inspect", "guide", "wait", "cancel"].includes(input.action)) return Promise.reject(new Error("Choose a supported subagent action."))
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Subagent request cancelled.")); return }
+    const socket = createConnection(connection.socket)
+    let settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy()
+      if (error) reject(error); else resolve(value)
+    }
+    const abort = () => finish(new Error("Subagent request cancelled; inspect the parent chat before retrying."))
+    const timer = setTimeout(() => finish(new Error("Subagent request timed out; inspect the parent chat before retrying.")), 120000)
+    signal?.addEventListener("abort", abort, { once: true })
+    socket.once("connect", () => socket.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "_still/subagents", params: { token: connection.token, input, requestId } }) + "\n"))
+    socket.on("error", error => finish(error))
+    socket.on("close", () => finish(new Error("Subagent service disconnected; inspect the parent chat before retrying.")))
+    lines(socket, message => {
+      if (message.id !== requestId) return
+      if (message.error) finish(new Error(message.error.message || "Subagent operation failed."))
+      else if (message.result !== undefined) finish(null, message.result)
+      else finish(new Error("The worker omitted its subagent result."))
+    }, error => finish(error))
+  })
+}
+
 export function markTodoToolReady(connection) {
   return requestTodos(connection, { action: "list" }, randomUUID(), undefined, "_still/todo_tool_ready")
 }
@@ -328,7 +374,7 @@ async function mcp() {
     try {
       if (method === "initialize") result = { protocolVersion: ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].includes(params?.protocolVersion) ? params.protocolVersion : "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "still-todos", version: "1.0.0" } }
       else if (method === "ping") result = {}
-      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: [todoTool, chatTitleTool] } }
+      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: [todoTool, chatTitleTool, subagentTool] } }
       else if (method === "tools/call") {
         try {
           const requestId = `${client}:${createHash("sha256").update(JSON.stringify(id)).digest("hex")}`
@@ -338,6 +384,9 @@ async function mcp() {
           } else if (params?.name === chatTitleTool.name) {
             const title = await requestChatTitle(connection, params.arguments, requestId)
             result = { content: [{ type: "text", text: JSON.stringify(title) }], structuredContent: title }
+          } else if (params?.name === subagentTool.name) {
+            const state = await requestSubagents(connection, params.arguments, requestId)
+            result = { content: [{ type: "text", text: JSON.stringify(state) }], structuredContent: state }
           } else throw new Error("Unknown Still tool.")
         } catch (error) { result = { isError: true, content: [{ type: "text", text: error.message }] } }
       } else { send({ jsonrpc: "2.0", id, error: { code: -32601, message: "Unknown MCP method." } }); return }

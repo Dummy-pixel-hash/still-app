@@ -20,6 +20,7 @@ export interface TranscriptItem {
   agentInput?: AgentInputRequest
   requestOutcome?: AgentRequestOutcome
   attemptId?: string
+  source?: "user" | "parentAgent"
 }
 
 function mergeToolContent(previous: AgentToolContent[] | undefined, next: AgentToolContent[]) {
@@ -51,7 +52,7 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
     if (event.type === "userMessage") {
       stream = undefined
       tools.clear()
-      items.push({ id: `user-${key}`, kind: "user", text: event.text || "", messageId: event.messageId, checkpoint: event.checkpoint })
+      items.push({ id: `user-${key}`, kind: "user", text: event.text || "", messageId: event.messageId, checkpoint: event.checkpoint, source: event.source })
     } else if (event.type === "assistantChunk" || event.type === "reasoningChunk") {
       const kind = event.type === "assistantChunk" ? "assistant" : "reasoning"
       if (!stream || stream.kind !== kind || event.messageId && event.messageId !== messageId) {

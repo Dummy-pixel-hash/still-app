@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { DEFAULT_ORB_PREFERENCES, normalizeOrbPreferences } from "../orb/state"
+import { isTerminalPreview, TERMINAL_PREVIEW_STORE_KEY } from "../preview/mode"
 import {
   blankDraft,
   newSessionId,
@@ -18,7 +19,8 @@ import {
   type SessionDraft,
 } from "../types"
 
-const STORE_KEY = "still.m2.store.v1"
+// Demo edits stay separate from the user's saved projects and terminals.
+const STORE_KEY = isTerminalPreview() ? TERMINAL_PREVIEW_STORE_KEY : "still.m2.store.v1"
 
 interface StoreShape {
   projects: Project[]
@@ -90,7 +92,12 @@ function load(): StoreShape {
         ? parsed.sessions.map((s) => {
             const { kind: _legacyKind, ...rest } = s as unknown as Record<string, unknown>
             void _legacyKind
-            return rest as unknown as StoreShape["sessions"][number]
+            // Existing sessions were all SSH sessions, including localhost
+            // entries. Never infer local execution from a hostname.
+            return {
+              ...rest,
+              transport: rest.transport === "local" ? "local" : "ssh",
+            } as unknown as StoreShape["sessions"][number]
           })
         : [],
       order: parsed.order ?? {},

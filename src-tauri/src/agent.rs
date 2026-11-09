@@ -16,7 +16,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -97,6 +97,8 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -148,6 +150,8 @@ pub struct Event {
     pub capabilities: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_reason: Option<RecoveryReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_request: Option<Value>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -158,6 +162,7 @@ impl Event {
             kind: kind.into(),
             state: None,
             text: None,
+            source: None,
             tool_call_id: None,
             title: None,
             detail: None,
@@ -184,6 +189,7 @@ impl Event {
             todo_sync: None,
             capabilities: None,
             recovery_reason: None,
+            subagent_request: None,
         }
     }
 }
@@ -200,6 +206,8 @@ pub struct Snapshot {
     pub agent_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agent: Option<CustomAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_conversation_id: Option<String>,
     pub agent_session_id: Option<String>,
     pub cwd: String,
     pub state: String,
@@ -239,6 +247,7 @@ impl Snapshot {
             conversation_id: self.conversation_id.clone(), host_key: self.host_key.clone(),
             execution_id: self.execution_id.clone(), local_session_id: self.local_session_id.clone(),
             agent_id: self.agent_id.clone(), agent_name: self.agent_name.clone(), custom_agent: self.custom_agent.clone(), agent_session_id: self.agent_session_id.clone(),
+            parent_conversation_id: self.parent_conversation_id.clone(),
             cwd: self.cwd.clone(), state: self.state.clone(), last_error: self.last_error.clone(),
             last_sequence: self.last_sequence, turn_active: self.turn_active, resumable: self.resumable,
             transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
@@ -296,6 +305,7 @@ struct Thread {
     capability_notice: Option<String>,
     awaiting_catch_up: bool,
     capability_remote_cursor: u64,
+    subagent_requests: HashMap<String, Instant>,
 }
 struct PendingHistory {
     request_id: u64,
@@ -331,6 +341,7 @@ pub struct StartArgs {
     resume_session_id: Option<String>,
     conversation_id: Option<String>,
     custom_agent: Option<CustomAgent>,
+    parent_conversation_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -349,6 +360,8 @@ pub struct AttachArgs {
 pub struct SendArgs {
     execution_id: String,
     message: String,
+    message_id: Option<String>,
+    source: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -363,6 +376,14 @@ pub struct PermissionArgs {
     execution_id: String,
     request_id: Value,
     option_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentReplyArgs {
+    execution_id: String,
+    request_id: String,
+    result: Option<Value>,
+    error: Option<String>,
 }
 struct Definition {
     name: &'static str,
@@ -1269,7 +1290,7 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
     result.map_err(|_| StillError::friendly("agent_catalog", "Project command discovery timed out. Retry from the command picker."))?.map_err(|e| StillError::friendly("agent_catalog", e))
 }
 
-fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>) -> Result<(String, String), StillError> {
+fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>, parent_conversation_id: Option<&str>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -1284,6 +1305,7 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
         (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
     };
     let mut payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env});
+    if let Some(parent) = parent_conversation_id { payload["parentConversationId"] = json!(parent); }
     if create {
         payload["source"] = json!(include_str!("../agent-host/supervisor.mjs"));
         payload["todosSource"] = json!(include_str!("../agent-host/todos.mjs"));
@@ -1401,11 +1423,21 @@ pub async fn still_agent_start(
     };
     let host_key = json!([config.host.to_lowercase(), config.port, config.username]).to_string();
     validate_custom_host(args.custom_agent.as_ref(), &host_key)?;
+    let mut parent_conversation_id = args.parent_conversation_id.clone();
     let cwd = remote_cwd(
         &args.native_session_id,
         args.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).ok_or_else(|| StillError::friendly("agent_project_required", "Choose the project folder before starting a conversation."))?,
     )
     .await?;
+    if let Some(parent_id) = args.parent_conversation_id.as_deref() {
+        if parent_id.is_empty() || parent_id.len() > 100 || parent_id == args.conversation_id.as_deref().unwrap_or("") {
+            return Err(StillError::friendly("agent_subagent_parent", "Invalid subagent parent conversation."));
+        }
+        let parent = agent_store::load_snapshot(&app, parent_id.to_owned()).await?;
+        if parent.host_key != host_key || parent.cwd != cwd || parent.parent_conversation_id.is_some() {
+            return Err(StillError::friendly("agent_subagent_parent", "Subagents must use their root parent's host and project folder, and cannot nest."));
+        }
+    }
     let path = if let Some(custom) = &args.custom_agent { custom.executable.clone() } else { executable(&def, args.executable.as_deref())? };
     let execution_id = format!("agent-{}-{}-{}", agent_store::timestamp(), std::process::id(), IDS.fetch_add(1, Ordering::Relaxed));
     let conversation_id = args.conversation_id.clone().unwrap_or_else(|| execution_id.clone());
@@ -1425,6 +1457,16 @@ pub async fn still_agent_start(
         if saved.custom_agent != args.custom_agent {
             return Err(StillError::friendly("agent_resume_identity", "Resume this conversation with its original custom agent command."));
         }
+        if parent_conversation_id.as_ref().is_some_and(|parent| Some(parent) != saved.parent_conversation_id.as_ref()) {
+            return Err(StillError::friendly("agent_resume_identity", "This saved subagent belongs to a different parent conversation."));
+        }
+        parent_conversation_id = saved.parent_conversation_id.clone();
+        if let Some(parent_id) = parent_conversation_id.as_deref() {
+            let parent = agent_store::load_snapshot(&app, parent_id.to_owned()).await?;
+            if parent.host_key != host_key || parent.cwd != cwd || parent.parent_conversation_id.is_some() {
+                return Err(StillError::friendly("agent_subagent_parent", "The saved subagent parent is unavailable, belongs to another project, or is itself a subagent."));
+            }
+        }
         validate_resume_scope(&saved, &host_key, &args.agent_id, &cwd, args.resume_session_id.as_deref())
             .map_err(|error| StillError::friendly("agent_resume_identity", error))?;
         let recover_from = saved.persistent.then(|| json!({"executionId":saved.execution_id,"agentSessionId":saved.agent_session_id}));
@@ -1440,7 +1482,7 @@ pub async fn still_agent_start(
         seed
     });
     let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref())?;
+    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref(), parent_conversation_id.as_deref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -1460,6 +1502,7 @@ pub async fn still_agent_start(
         agent_id: args.agent_id,
         agent_name: args.custom_agent.as_ref().map(|agent| agent.name.clone()).unwrap_or_else(|| def.name.into()),
         custom_agent: args.custom_agent,
+        parent_conversation_id,
         agent_session_id: args.resume_session_id.clone(),
         cwd: cwd.clone(),
         state: "connecting".into(),
@@ -1518,6 +1561,7 @@ pub async fn still_agent_start(
         capability_notice: None,
         awaiting_catch_up: false,
         capability_remote_cursor: 0,
+        subagent_requests: HashMap::new(),
     }));
     registry().lock().await.insert(execution_id, row.clone());
     tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd, bootstrap_data));
@@ -1770,6 +1814,31 @@ async fn handle(
         thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(cursor);
     }
     if let Some(method) = value.get("method").and_then(Value::as_str) {
+        if method == "_still/subagents_request" {
+            let request_id = value.pointer("/params/requestId").and_then(Value::as_str).ok_or("Subagent request omitted its identity")?.to_owned();
+            let input = value.pointer("/params/input").cloned().ok_or("Subagent request omitted its action")?;
+            let mut thread = row.lock().await;
+            let now = Instant::now();
+            thread.subagent_requests.retain(|_, at| now.duration_since(*at) < Duration::from_secs(120));
+            if !thread.snapshot.persistent || thread.snapshot.state == "submissionUnknown" || thread.subagent_requests.len() >= 16 {
+                return Err("This parent cannot accept another subagent request right now.".into());
+            }
+            thread.subagent_requests.insert(request_id.clone(), now);
+            let mut event = Event::new("subagentRequest");
+            event.subagent_request = Some(json!({"requestId":request_id,"input":input}));
+            emit(&mut thread, event).await;
+            return Ok(());
+        }
+        if method == "_still/subagents_reply_ack" {
+            let request_id = value.pointer("/params/requestId").and_then(Value::as_str).ok_or("Subagent acknowledgement omitted its request identity")?.to_owned();
+            let mut thread = row.lock().await;
+            if thread.subagent_requests.remove(&request_id).is_some() {
+                let mut event = Event::new("subagentReply");
+                event.subagent_request = Some(json!({"requestId":request_id,"input":{}}));
+                emit(&mut thread, event).await;
+            }
+            return Ok(());
+        }
         if method == "_still/unavailable" {
             let execution = row.lock().await.snapshot.execution_id.clone();
             if value.pointer("/params/executionId").and_then(Value::as_str) != Some(execution.as_str())
@@ -2731,6 +2800,18 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     }
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
+    let source = args.source.as_deref().unwrap_or("user");
+    if !["user", "parentAgent"].contains(&source) {
+        return Err(StillError::friendly("agent_prompt_source", "Invalid message source."));
+    }
+    let message_id = args.message_id.unwrap_or_else(|| format!("{}-{}", thread.snapshot.execution_id, next_request_id()));
+    if message_id.is_empty() || message_id.len() > 300 || message_id.chars().any(char::is_control) {
+        return Err(StillError::friendly("agent_prompt_identity", "Invalid prompt identity."));
+    }
+    if let Some(existing) = thread.messages.iter().find(|event| event.message_id.as_deref() == Some(message_id.as_str())) {
+        if existing.text.as_deref() == Some(args.message.as_str()) && existing.source.as_deref().unwrap_or("user") == source { return Ok(()); }
+        return Err(StillError::friendly("agent_prompt_identity", "This prompt identity was already used for different content."));
+    }
     if !matches!(
         thread.snapshot.state.as_str(),
         "working" | "complete" | "cancelled" | "error"
@@ -2756,8 +2837,8 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     thread.snapshot.last_error = None;
     let mut event = Event::new("userMessage");
     event.text = Some(args.message.clone());
-    let message_id = format!("{}-{id}", thread.snapshot.execution_id);
     event.message_id = Some(message_id.clone());
+    event.source = Some(source.to_owned());
     emit(&mut thread, event).await;
     if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id}}})).is_err() {
         thread.prompt=None;thread.snapshot.turn_active=false;thread.snapshot.state="submissionUnknown".into();
@@ -2926,7 +3007,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None, saved.custom_agent.as_ref())?;
+    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None, saved.custom_agent.as_ref(), saved.parent_conversation_id.as_deref())?;
     let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -2967,7 +3048,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
             unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None, reconcile_request: None,
             load_session: false, capability_notice: None,
-            awaiting_catch_up: true, capability_remote_cursor,
+            awaiting_catch_up: true, capability_remote_cursor, subagent_requests: HashMap::new(),
         }));
         if stale_changed {
             let mut thread = row.lock().await;
@@ -3037,6 +3118,30 @@ pub async fn still_agent_cancel(args: IdArgs) -> Result<(), StillError> {
             "The remote agent disconnected; cancellation was not sent.",
         )
     })
+}
+#[tauri::command]
+pub async fn still_agent_subagent_reply(args: SubagentReplyArgs) -> Result<(), StillError> {
+    if args.request_id.is_empty() || args.request_id.len() > 160 || args.request_id.chars().any(char::is_control) {
+        return Err(StillError::friendly("agent_subagent_request", "Invalid subagent request identity."));
+    }
+    if args.result.is_some() == args.error.is_some() {
+        return Err(StillError::friendly("agent_subagent_reply", "Provide either a result or an error."));
+    }
+    let row = find_thread(&args.execution_id).await?;
+    let thread = row.lock().await;
+    if !thread.subagent_requests.contains_key(&args.request_id) {
+        return Err(StillError::friendly("agent_subagent_stale", "This subagent request is no longer pending."));
+    }
+    let response = if let Some(result) = args.result {
+        json!({"jsonrpc":"2.0","id":args.request_id,"result":result})
+    } else {
+        json!({"jsonrpc":"2.0","id":args.request_id,"error":{"code":-32000,"message":args.error.unwrap_or_else(|| "Subagent operation failed.".into())}})
+    };
+    if serde_json::to_vec(&response).map_or(true, |value| value.len() > 256 * 1024) {
+        return Err(StillError::friendly("agent_subagent_reply", "Subagent result exceeds the response size limit."));
+    }
+    thread.outbound.send(response).map_err(|_| StillError::friendly("agent_process_lost", "The parent agent disconnected before the subagent result could be returned."))?;
+    Ok(())
 }
 #[tauri::command]
 pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
@@ -3162,13 +3267,13 @@ mod tests {
     #[test]
     fn custom_launch_payload_preserves_command_without_shell_and_attach_never_relaunches() {
         let agent = custom_fixture();
-        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, Some(&agent)).unwrap();
+        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, Some(&agent), None).unwrap();
         let payload: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap();
         assert_eq!(payload["command"], json!([agent.executable, "--acp", "literal $(touch never)", ""]));
         assert_eq!(payload["agentId"], agent.id);
         assert_eq!(payload["env"], json!({}));
-        assert!(persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, None).is_err());
-        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, "", false, 9, None, None, None, None).unwrap();
+        assert!(persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, &agent.executable, true, 0, None, None, None, None, None).is_err());
+        let (_, raw) = persistent_command("custom-execution", "conversation", "/srv/project", &agent.id, "", false, 9, None, None, None, None, None).unwrap();
         let payload: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap();
         assert_eq!(payload["command"], json!([]));
         assert_eq!(payload["after"], 9);
@@ -3192,7 +3297,7 @@ mod tests {
             version_source: Some("executable".into()),
             version_observed_at: Some(1_793_372_400_000),
         };
-        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None, None, None).unwrap();
+        let (command, payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "opencode", true, 0, Some(&runtime), None, None, None, Some("parent-1")).unwrap();
         assert!(command.len() < 8 * 1024, "SSH exec command must stay far below Linux's 128 KiB argument limit");
         assert!(!command.contains(&payload), "base64 configuration belongs on stdin, never in the SSH exec argument");
         assert!(payload.len() > 128 * 1024, "test fixture should exercise the Linux per-argument overflow boundary");
@@ -3202,10 +3307,11 @@ mod tests {
         assert_eq!(config["todosSource"], include_str!("../agent-host/todos.mjs"));
         assert_eq!(config["command"][3], include_str!("../agent-host/bridge.mjs"));
         assert_eq!(config["providerRuntime"]["transport"], "codex-app-server");
+        assert_eq!(config["parentConversationId"], "parent-1");
         let worker_env: Value = serde_json::from_str(config["env"]["STILL_PROVIDER_RUNTIME"].as_str().unwrap()).unwrap();
         assert_eq!(worker_env, config["providerRuntime"], "the worker must receive the same launch-time runtime facts");
 
-        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None, None, None).unwrap();
+        let (attach_command, attach_payload) = persistent_command("agent-test-1", "conversation-1", "/srv/project", "opencode", "", false, 17, None, None, None, None, Some("parent-1")).unwrap();
         assert!(attach_command.len() < 8 * 1024);
         assert!(attach_payload.len() < 1024, "reattach does not need to retransmit bundled source code");
         let attach_config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(attach_payload).unwrap()).unwrap();
@@ -3223,7 +3329,7 @@ mod tests {
         assert_eq!(parsed.get("claude").map(String::as_str), Some("2.0.1 (Claude Code)"));
         assert_eq!(parsed.len(), 2, "empty ids/versions and the Node line are not provider versions");
         let unknown = ProviderRuntime { transport: "pi-rpc".into(), executable: Some("pi".into()), version: None, version_source: None, version_observed_at: None };
-        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None, None, None).unwrap();
+        let (_, payload) = persistent_command("agent-test-2", "conversation-2", "/srv/project", "pi", "pi", true, 0, Some(&unknown), None, None, None, None).unwrap();
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
         assert!(config["providerRuntime"].get("version").is_none(), "an unknown version stays absent rather than guessed");
         assert_eq!(config["providerRuntime"]["transport"], "pi-rpc");
@@ -3243,7 +3349,7 @@ mod tests {
         let seed_bytes = serde_json::to_vec(&seed).unwrap();
         assert!(seed_bytes.len() > 128 * 1024, "fixture should exceed Linux's per-argument limit if copied into argv");
         assert!(seed_bytes.len() < 1024 * 1024, "valid seed remains under the private file limit");
-        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed), None, None).unwrap();
+        let (command, payload) = persistent_command("agent-seed-1", "conversation-seed", "/srv/project", "pi", "pi", true, 0, None, Some(&seed), None, None, None).unwrap();
         assert!(command.len() < 8 * 1024);
         assert!(!command.contains("Resume the prior checklist") && !command.contains("task-0"));
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
@@ -3324,7 +3430,7 @@ mod tests {
     #[test]
     fn replacement_bootstrap_carries_explicit_recovery_scope_but_never_a_prompt() {
         let previous = json!({"executionId":"old-execution","agentSessionId":"saved-session"});
-        let (command, payload) = persistent_command("new-execution", "conversation", "/srv/project", "pi", "pi", true, 0, None, None, Some(&previous), None).unwrap();
+        let (command, payload) = persistent_command("new-execution", "conversation", "/srv/project", "pi", "pi", true, 0, None, None, Some(&previous), None, None).unwrap();
         let config: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
         assert_eq!(config["recoverFrom"], previous);
         assert!(config["recoverySource"].as_str().unwrap().contains("recoverExecutionOwner"));
@@ -3354,7 +3460,7 @@ mod tests {
         Snapshot {
             conversation_id: "conversation-1".into(), host_key: "host".into(),
             execution_id: "execution-1".into(), local_session_id: "local".into(),
-            agent_id: "pi".into(), agent_name: "Pi".into(), custom_agent: None, agent_session_id: Some("session-1".into()),
+            agent_id: "pi".into(), agent_name: "Pi".into(), custom_agent: None, parent_conversation_id: None, agent_session_id: Some("session-1".into()),
             cwd: "/srv/project".into(), state: "detached".into(), transcript: Vec::new(),
             pending_permission: None, last_error: None, last_sequence: 0, turn_active: false,
             config_options: Vec::new(), commands: Vec::new(), pending_input: None, resumable: true,

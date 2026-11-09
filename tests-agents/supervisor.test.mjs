@@ -23,7 +23,8 @@ input.on('line',line=>{
    if(m.params.prompt[0].text==='question')write({jsonrpc:'2.0',id:'question-1',method:'elicitation/create',params:{sessionId:'server-session',mode:'form',message:'Choose a branch',requestedSchema:{properties:{answer:{type:'string'}}}}});
    else if(m.params.prompt[0].text==='approval')write({jsonrpc:'2.0',id:'approval-1',method:'session/request_permission',params:{sessionId:'server-session',toolCall:{title:'Run checks'},options:[{optionId:'yes',name:'Allow once',kind:'allow_once'},{optionId:'no',name:'Reject',kind:'reject_once'}]}});
       else if(m.params.prompt[0].text.includes('tool-title'))void(async()=>{const changed=await todoRequest('title','_still/chat_title',{input:{title:'Improve Agents chat titles'}});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.title==='Improve Agents chat titles'?'end_turn':'error'}})})();
-      else if(m.params.prompt[0].text.includes('tool-todo'))void(async()=>{await todoRequest('ready','_still/todo_tool_ready',{});const list=await todoRequest('list','_still/todos',{input:{action:'list'},requestId:'agent:list:1'});const added=await todoRequest('add','_still/todos',{input:{action:'add',expectedRevision:list.result.todos.revision,title:'Model-authored task'},requestId:'agent:add:1'});const item=added.result.todos.items[0];const changed=await todoRequest('update','_still/todos',{input:{action:'update',expectedRevision:added.result.todos.revision,id:item.id,status:'completed'},requestId:'agent:update:1'});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.todos.items[0].status==='completed'?'end_turn':'error'}})})();
+       else if(m.params.prompt[0].text.includes('tool-todo'))void(async()=>{await todoRequest('ready','_still/todo_tool_ready',{});const list=await todoRequest('list','_still/todos',{input:{action:'list'},requestId:'agent:list:1'});const added=await todoRequest('add','_still/todos',{input:{action:'add',expectedRevision:list.result.todos.revision,title:'Model-authored task'},requestId:'agent:add:1'});const item=added.result.todos.items[0];const changed=await todoRequest('update','_still/todos',{input:{action:'update',expectedRevision:added.result.todos.revision,id:item.id,status:'completed'},requestId:'agent:update:1'});write({jsonrpc:'2.0',id:m.id,result:{stopReason:changed.result.todos.items[0].status==='completed'?'end_turn':'error'}})})();
+       else if(m.params.prompt[0].text.includes('tool-subagent'))void(async()=>{const managed=await todoRequest('parent:list','_still/subagents',{input:{action:'list'},requestId:'agent:subagents:list'});if(managed.result?.children?.length===0)write({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}})})();
      else setTimeout(()=>{write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Finished while disconnected'}}}});write({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}})},120);
  } else if(!m.method&&['question-1','approval-1'].includes(m.id))write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Answer received'}}}});
 });
@@ -195,6 +196,23 @@ test("a pending question returns after reattach even when its original cursor wa
   const ack=await second.wait(frame=>frame.method==="_still/request_outcome")
   assert.equal(ack.params.outcome,"answered")
   assert.equal(JSON.stringify(ack).includes('"main"'),false)
+}))
+
+test("parent subagent tool requests replay after reconnect and return the same child result",{timeout:15000},()=>fixture(async({make})=>{
+  const first=make();await initialize(first)
+  first.send({jsonrpc:"2.0",id:110,method:"session/prompt",params:{prompt:[{type:"text",text:"tool-subagent"}],_meta:{messageId:"subagent-parent-prompt"}}})
+  const request=await first.wait(frame=>frame.method==="_still/subagents_request")
+  assert.deepEqual(request.params.input,{action:"list"})
+  await first.close()
+  const second=make({create:false,after:request._still.index});await initialize(second)
+  const replay=await second.wait(frame=>frame.method==="_still/subagents_request")
+  assert.equal(replay.params.requestId,request.params.requestId)
+  assert.equal(replay._still.pending,true)
+  second.send({jsonrpc:"2.0",id:request.params.requestId,result:{children:[]}})
+  const done=await second.wait(frame=>frame.id===110&&frame.result)
+  assert.equal(done.result.stopReason,"end_turn")
+  const acknowledged=await second.wait(frame=>frame.method==="_still/subagents_reply_ack")
+  assert.equal(acknowledged.params.requestId,request.params.requestId)
 }))
 
 test("permission is never auto-approved while detached and its response is acknowledged once",{timeout:15000},()=>fixture(async({make})=>{

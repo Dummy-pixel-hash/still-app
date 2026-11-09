@@ -1,4 +1,4 @@
-import { todoTool, chatTitleTool, todoConnection, requestTodos, requestChatTitle, markTodoToolReady } from "./todos.mjs"
+import { todoTool, chatTitleTool, subagentTool, todoConnection, requestTodos, requestChatTitle, requestSubagents, markTodoToolReady } from "./todos.mjs"
 
 export default function stillTodos(pi) {
   const connection = todoConnection()
@@ -10,6 +10,16 @@ export default function stillTodos(pi) {
     async execute(callId, input, signal) {
       const list = await requestTodos(connection, input, `pi:${callId}`, signal)
       return { content: [{ type: "text", text: JSON.stringify(list) }], details: list }
+    },
+  })
+  pi.registerTool({
+    name: subagentTool.name,
+    label: "Manage subagents",
+    description: subagentTool.description,
+    parameters: subagentTool.inputSchema,
+    async execute(callId, input, signal) {
+      const state = await requestSubagents(connection, input, `pi:${callId}`, signal)
+      return { content: [{ type: "text", text: JSON.stringify(state) }], details: state }
     },
   })
   pi.registerTool({

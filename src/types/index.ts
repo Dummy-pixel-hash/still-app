@@ -22,6 +22,9 @@ export interface PingResponse {
 
 export type AuthMethod = "password" | "key" | "ask"
 
+/** Where a session executes. Missing values in older saved sessions mean SSH. */
+export type SessionTransport = "ssh" | "local"
+
 export type ConnState =
   | "disconnected"
   | "connecting"
@@ -30,6 +33,8 @@ export type ConnState =
 
 export interface Session {
   id: string
+  /** Omitted only for pre-transport records; those always remain SSH. */
+  transport?: SessionTransport
   name: string
   host: string
   port: number

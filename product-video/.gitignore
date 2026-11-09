@@ -1,0 +1,6 @@
+node_modules/
+out/
+product-video/
+*.log
+public/still-product-film.mp4
+public/todo-interaction.mp4

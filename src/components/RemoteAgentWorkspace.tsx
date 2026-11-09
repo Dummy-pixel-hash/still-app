@@ -5,8 +5,14 @@ import { nativeBridge } from "../bridge/nativeBridge"
 import { reattachAgentThread, startRemoteAgent, type AgentThreadRow } from "../session/agentThreads"
 import AgentWorkspace from "./AgentWorkspace"
 import { AgentConnectionNotice, useAgentConnection } from "./AgentConnection"
+import type { AgentProject } from "../agents/workspace"
 
-export default function RemoteAgentWorkspace({ closing, session, sessions, onNeedAuth, keyTextFor, onClose, onOpenTerminal }: {
+export default function RemoteAgentWorkspace({ closing, session, sessions, onNeedAuth, keyTextFor, onClose, onOpenTerminal, presentation, initialConversationId, initialView, initialProject, initialProjectPicker }: {
+  presentation?: "desktop" | "mobile"
+  initialConversationId?: string
+  initialView?: "draft" | "settings"
+  initialProject?: AgentProject
+  initialProjectPicker?: boolean
   closing: boolean
   session: Session | null
   sessions: Session[]
@@ -18,7 +24,7 @@ export default function RemoteAgentWorkspace({ closing, session, sessions, onNee
   const [target, setTarget] = useState<Session | null>(session)
   const connection = useAgentConnection(target, onNeedAuth, keyTextFor)
   const reattach = useCallback((row: AgentThreadRow) => reattachAgentThread(row.executionId,connection.nativeId || ""),[connection.nativeId])
-  return <AgentWorkspace closing={closing} session={target} sessions={sessions} onSelectHost={setTarget}
+  return <AgentWorkspace presentation={presentation} initialConversationId={initialConversationId} initialView={initialView} initialProject={initialProject} initialProjectPicker={initialProjectPicker} closing={closing} session={target} sessions={sessions} onSelectHost={setTarget}
     onReattach={reattach} transportId={connection.nativeId || undefined}
     connected={connection.state === "connected"} connectionNotice={target && <AgentConnectionNotice connection={connection} />}
     onClose={onClose} onOpenTerminal={target ? () => onOpenTerminal(target) : undefined}

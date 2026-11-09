@@ -33,6 +33,11 @@ test("browser preview keeps CSS backdrop blur instead of the native canvas fallb
   await expect(workspace).not.toHaveAttribute("data-frost-rendered", "true")
   await expect(page.locator(".agent-sidebar")).toHaveCSS("backdrop-filter", /blur/)
   await expect.poll(() => page.locator(".agent-composer").evaluate(el => getComputedStyle(el, "::before").backdropFilter)).toContain("blur")
+  await page.locator(".agent-recent").first().click()
+  const conversation = page.locator(".agent-chat:not(.is-launch) > .agent-conversation")
+  await expect(conversation).toHaveCSS("backdrop-filter", "blur(12px)")
+  await expect(conversation).toHaveCSS("background-image", "none")
+  await expect(conversation).not.toHaveAttribute("data-agent-frost")
 })
 
 test("native workspace panes blur with their shared frost texture without CSS backdrop filters", async ({ page }, info) => {
@@ -43,16 +48,26 @@ test("native workspace panes blur with their shared frost texture without CSS ba
   await page.goto("/tests-agents/fixture.html?demo")
   await page.addStyleTag({ content: ".agent-workspace *, .agent-workspace *::before { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }" })
   await expect.poll(() => page.locator(".agent-workspace").getAttribute("data-frost-rendered")).toBe("true")
-  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }))
+  // The welcome surface stays clear; only an active transcript gets native frost.
+  await expect(page.locator(".agent-chat.is-launch > .agent-conversation")).toHaveCSS("background-image", "none")
+  await page.locator(".agent-recent").first().click()
+  const conversation = page.locator(".agent-chat:not(.is-launch) > .agent-conversation")
+  await expect(conversation).toHaveAttribute("data-agent-frost", "")
+  await expect(conversation).toHaveCSS("backdrop-filter", "none")
+  await expect(conversation).toHaveCSS("--ag-frost-fill", "rgba(5, 5, 5, .2)")
+  const results = await probeAuroraGlass(page, (name: string, image: Buffer) => info.attach(`native-${name}.png`, { body: image, contentType: "image/png" }), [["sidebar", ".agent-sidebar"], ["conversation", ".agent-conversation"]])
   for (const pane of results) {
     expect(pane.unblurred, `${pane.name}: native scene texture is visible`).toBeGreaterThan(3)
     expect(pane.ratio, `${pane.name}: shared frost texture blurs in native mode`).toBeLessThan(.3)
   }
   await expect(page.locator(".agent-sidebar")).toHaveAttribute("data-agent-frost", "")
+  await expect(page.locator(".agent-conversation")).toHaveAttribute("data-agent-frost", "")
   await expect(page.locator(".agent-workspace")).toHaveAttribute("data-frost-rendered", "true")
   const readPixels = () => page.locator(".agent-aurora canvas").evaluate(canvas => Number(canvas.dataset.frostPixels))
   await expect.poll(readPixels).toBeGreaterThan(0)
   expect(await readPixels(), "native blur surface is bounded to 48k pixels; DPR does not multiply work").toBeLessThanOrEqual(48_000)
+  await page.getByRole("button", { name: "Still conversations", exact: true }).click()
+  await expect(page.locator(".agent-chat.is-launch > .agent-conversation")).toHaveCSS("background-image", "none")
 })
 
 test("the floating input and model menu keep their own CSS blur while the wrapper stays clear", async ({ page }, info) => {

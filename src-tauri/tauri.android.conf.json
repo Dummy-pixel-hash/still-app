@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeBuildCommand": "node scripts/android/build-frontend.mjs"
+  }
+}

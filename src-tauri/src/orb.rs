@@ -506,6 +506,7 @@ fn save_position(app: &AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 async fn show_main(app: &AppHandle, session_id: Option<String>) -> Result<(), String> {
     let main = app
         .get_webview_window(MAIN)
@@ -568,6 +569,8 @@ async fn execute(app: &AppHandle, command: OrbCommand) -> Result<(), String> {
     }
     match command {
         OrbCommand::Open { session_id } => {
+            #[cfg(desktop)]
+            {
             let mut snap = snapshot(app);
             let now = now_ms();
             if !snap.fresh(now) {
@@ -578,8 +581,19 @@ async fn execute(app: &AppHandle, command: OrbCommand) -> Result<(), String> {
             // A menu can outlive a removed row. Restore Still, never activate an unvalidated id.
             let id = id.filter(|id| snap.rows.iter().any(|row| row.session_id == *id));
             show_main(app, id).await
+            }
+            #[cfg(mobile)]
+            {
+                let _ = session_id;
+                Err("The floating companion is desktop-only".into())
+            }
         }
-        OrbCommand::Workspace => show_main(app, None).await,
+        OrbCommand::Workspace => {
+            #[cfg(desktop)]
+            { show_main(app, None).await }
+            #[cfg(mobile)]
+            { Err("The floating companion is desktop-only".into()) }
+        }
         OrbCommand::Hide => {
             if let Some(orb) = app.get_webview_window(ORB) {
                 orb.hide().map_err(|e| e.to_string())?;
@@ -602,19 +616,29 @@ async fn execute(app: &AppHandle, command: OrbCommand) -> Result<(), String> {
             Ok(())
         }
         OrbCommand::Focus => {
+            #[cfg(desktop)]
+            {
             let orb = app
                 .get_webview_window(ORB)
                 .ok_or_else(|| "Orb is not open".to_string())?;
             orb.set_focusable(true).map_err(|e| e.to_string())?;
             orb.set_focus().map_err(|e| e.to_string())
+            }
+            #[cfg(mobile)]
+            { Err("The floating companion is desktop-only".into()) }
         }
         OrbCommand::Drag => {
+            #[cfg(desktop)]
+            {
             let orb = app
                 .get_webview_window(ORB)
                 .ok_or_else(|| "Orb is not open".to_string())?;
             orb.set_focusable(true).map_err(|e| e.to_string())?;
             orb.set_focus().map_err(|e| e.to_string())?;
             orb.start_dragging().map_err(|e| e.to_string())
+            }
+            #[cfg(mobile)]
+            { Err("The floating companion is desktop-only".into()) }
         }
         OrbCommand::Nudge { dx, dy } => {
             if !dx.is_finite() || !dy.is_finite() || dx.abs() > 32.0 || dy.abs() > 32.0 {

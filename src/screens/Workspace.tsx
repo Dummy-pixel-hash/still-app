@@ -48,6 +48,7 @@ import {
   useConnections,
 } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
+import { isTerminalPreview } from "../preview/mode"
 import type { ConnState, Project, Session, SessionDraft } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
@@ -1159,7 +1160,7 @@ export default function Workspace() {
             <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
               <div className="min-w-0">
                 <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-faint">
-                  Persistent remote terminal
+                  {isTerminalPreview() ? "Terminal preview · local simulation" : "Persistent remote terminal"}
                 </p>
                 <h1 className="mt-1 font-serif text-4xl leading-tight sm:text-5xl">
                   Still <span className="italic text-dim">workspace</span>

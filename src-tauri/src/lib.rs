@@ -7,6 +7,8 @@ mod agent;
 mod agent_git;
 mod agent_store;
 mod commands;
+mod credential_store;
+pub mod local_pty;
 mod orb;
 pub mod core;
 pub mod diag;
@@ -94,6 +96,9 @@ pub fn run() {
         .manage(orb::OrbState::default())
         .on_window_event(orb::on_window_event)
         .setup(|_app| {
+            #[cfg(target_os = "android")]
+            crate::credential_store::initialize()
+                .map_err(|error| std::io::Error::other(format!("Android secure credential storage could not initialize: {error}")))?;
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
@@ -118,6 +123,7 @@ pub fn run() {
             agent::still_agent_set_config,
             agent::still_agent_respond,
             agent::still_agent_cancel,
+            agent::still_agent_subagent_reply,
             agent::still_agent_close,
             agent::still_agent_input,
             agent::still_agent_snapshot,

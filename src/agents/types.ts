@@ -35,6 +35,8 @@ export type AgentEventType =
   | "requestOutcome"
   | "todos"
   | "capabilities"
+  | "subagentRequest"
+  | "subagentReply"
 
 export interface AgentHistoryCapabilities { revert: boolean; retry: boolean }
 export type AgentTodoStatus = "pending" | "completed"
@@ -133,6 +135,7 @@ export interface AgentThreadEvent {
   type: AgentEventType
   state?: AgentThreadState
   text?: string
+  source?: "user" | "parentAgent"
   toolCallId?: string
   title?: string
   detail?: string
@@ -156,6 +159,7 @@ export interface AgentThreadEvent {
   todos?: AgentTodoSnapshot
   todoSync?: AgentTodoSync
   capabilities?: AgentCapabilityReport
+  subagentRequest?: { requestId: string; input: Record<string, unknown> }
   remoteCursor?: number
   turnActive?: boolean
   recoveryReason?: "workerUnavailable"
@@ -195,11 +199,12 @@ export interface CustomAgent {
   args: string[]
   transport: "acp-v1"
 }
-export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string; customAgent?: CustomAgent }
+export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string; customAgent?: CustomAgent; parentConversationId?: string }
 export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string; providerRuntime?: AgentProviderRuntime; checkedAt?: number }
 
 export interface AgentThreadSnapshot {
   conversationId?: string
+  parentConversationId?: string
   hostKey?: string
   executionId: string
   localSessionId: string

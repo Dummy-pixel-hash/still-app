@@ -1,10 +1,11 @@
 import type { Session } from "../types"
 import type { AgentDraftAttachment } from "./attachments"
 import { saveAgentWorkspace, storedWorkspace, storedWorkspaces } from "../session/agentStorage"
+import { sessionHostKey } from "../session/identity"
 import type { CustomAgent } from "./types"
 import { isCustomAgent } from "./customAgents"
 
-export const hostKey = (session: Pick<Session, "host" | "port" | "username">) => JSON.stringify([session.host.toLowerCase(), session.port, session.username])
+export const hostKey = (session: Pick<Session, "host" | "port" | "username"> & Partial<Pick<Session, "transport">>) => sessionHostKey(session)
 export const agentConnectionId = (session: Session) => `agents:${hostKey(session)}`
 export function folderName(cwd: string) { return cwd.split("/").filter(Boolean).pop() || cwd }
 export function normalizeFolder(cwd: string) { return cwd === "/" ? cwd : cwd.trim().replace(/\/+$/, "") || "~" }
@@ -23,6 +24,11 @@ export interface ConversationMeta {
   draftAttachments?: AgentDraftAttachment[]
   submissionUnknown?: boolean
   prepared?: boolean
+  parentConversationId?: string
+  subagentOperations?: Record<string, string>
+  subagentGuidance?: Array<{ requestId: string; messageId: string; text: string }>
+  subagentGuidancePaused?: boolean
+  subagentPrepared?: boolean
 }
 export interface AgentWorkspacePreferences {
   selectedId?: string

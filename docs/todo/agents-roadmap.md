@@ -1,6 +1,6 @@
 # Agents feature implementation plan
 
-Updated: **2026-10-30**. Feature status and delivery order live in the
+Updated: **2026-11-09**. Feature status and delivery order live in the
 [master tracker](README.md). Every unchecked item below is future work.
 
 ## Shared implementation rules
@@ -334,28 +334,57 @@ over building a separate plugin framework.
 operations cannot dispatch; version changes refresh support; evidence names which
 provider versions were verified and leaves the others explicitly unverified.
 
-## AG-12 Subagent visibility
+## AG-12 Subagent integration
 
 **Current:** tools/plans are displayed, but child-agent activity has no dedicated
 identity or navigable presentation. Some adapters already observe task lifecycle
 internally; retain useful native data rather than infer it from prose.
 
+**Approved scope (2026-11-09):** expand the earlier observation-only scope into
+Still-managed cross-agent delegation. Any eligible installed/configured agent can
+spawn another on the same account/host and project folder. Delegation is one level
+only and always uses the shared folder. The user can open the actual child chat and
+message it directly, not merely inspect output or relay instructions through the
+parent. Full specification: [Subagent integration and direct chat](agent-subagents.md).
+
+**Implementation update:** the direct child-chat flow and `still_subagents` tool path
+are wired: parent requests route over the existing remote supervisor; the app handles
+spawn/list/inspect/guide/wait/cancel, with persistent parent identity, queued guidance,
+and cancellation status. Cross-provider live calls, crash recovery, and packaged
+platform behavior remain to verify; AG-12 is not complete.
+
 ### Tasks
 
-- [ ] **AG-12a — Activity model.** Preserve parent/child IDs, provider status, purpose,
-  and terminal outcomes from supported protocols; distinguish a child tool/task from
-  a resumable child conversation.
-- [ ] **AG-12b — Inspection.** Show child progress and output within its parent and
-  open a child conversation when the provider actually exposes one. Link back to the
-  parent and keep the original conversation selection stable.
-- [ ] **AG-12c — Status/control.** Surface unresolved child attention through the
-  shared inbox/orb without double-counting parent summaries. Offer child cancellation
-  only if supported, and resolve the actual ownership/approval route.
+- [ ] **AG-12a — Activity model.** Preserve durable parent/child conversation IDs,
+  execution/provider identities, task titles, source, status, and actual outcomes.
+  Distinguish native tasks from Still-managed, addressable child conversations.
+- [ ] **AG-12b — Direct child chat.** Open the same child conversation with its real
+  transcript and working composer. Preserve user/parent message provenance, serialize
+  their submissions, and provide parent navigation without losing drafts or position.
+- [ ] **AG-12c — Panel and supervision.** Show a compact upper-right child list with
+  titles, agent identities, truthful status, inspection, guidance, and scoped stopping.
+  Route permissions to the user and reuse inbox/orb attention semantics when available
+  without making direct chat depend on the deferred orb UI.
+- [ ] **AG-12d — Cross-agent delegation.** Expose a scoped shared tool for listing,
+  spawning, inspecting, guiding, waiting, and stopping. Use eligible configured agents,
+  enforce one-level delegation and concurrency limits, and share the project folder.
+- [ ] **AG-12e — Durable ownership and recovery.** Reuse persistent supervisors and
+  journals; make spawns/messages idempotent, reconcile uncertain delivery, and preserve
+  child control when switching between parent coordination and direct user chat.
+- [ ] **AG-12f — Verification.** Cover real cross-provider delegation and direct child
+  messaging, serialized guidance, permissions, stops, recovery, scope rejection,
+  event ordering, keyboard access, and compact layouts. Record runtime evidence.
 
-**Done when:** a real supported subagent can be followed from parent to result;
-out-of-order child events do not corrupt another child's display; pending child
-work is not mistaken for a successfully finished task. This feature is observation
-and provider-supported control, not a new cross-provider orchestration engine.
+**Implementation:** extend existing worker/tool injection, native conversation storage,
+bridge operations, and conversation UI. Reuse AG-06 queue/steering semantics and AG-11
+capability reporting; do not introduce a separate orchestration service or dependency.
+
+**Done when:** a real supported cross-provider child can be spawned, followed from
+parent to result, opened and messaged directly by the user, and controlled without
+duplicate sessions or concurrent turns. Relationships and pending operations survive
+recovery; one child's events cannot corrupt another's display. Parent completion is
+not all-child completion, and stopping a child never claims to undo shared-folder
+edits. The detailed specification's acceptance checklist must also pass.
 
 ## AG-13 Integrated development tools
 
@@ -437,24 +466,55 @@ imported historic results do not generate fresh completion notifications.
 **Current:** there is no production mobile controller or shared conversation service.
 A responsive synthetic browser fixture does not provide remote mobile control.
 
+**Planning update (2026-11-09):** the complete specification is
+[Android phone application](android-mobile.md). The user selected an **Android-first,
+agents-first APK**, continuation of the same **remote-server** desktop conversations
+and tmux sessions from day one, and background notifications for attention/results.
+The phone must not depend on the desktop remaining online. Local-desktop work, iOS,
+and store publication are outside the first release. The reviewed standalone mockup
+sets visual direction only; Android work has begun with a cross-compile/build spike,
+but the feature remains TODO and has no runtime/device validation yet.
+
+The [full Android implementation todo list](android-mobile-tasks.md) owns the
+detailed MOB task checkboxes, dependency/verification notes and release sign-off.
+The AG-16 tasks below summarize feature scope, not a parallel detailed progress list.
+
 ### Tasks
 
 - [ ] **AG-16a — Decide controller architecture.** Document where the authoritative
-  conversation library and authenticated control endpoint run, pairing/revocation,
-  transport, and whether the desktop must stay online. The minimal initial scope is
-  a mobile companion to a running Still controller; independent control while that
-  controller is off requires a separately approved server-hosted ownership/sync design.
+  remote conversation catalog/history run, authenticated transport, device-native
+  cache/credentials, pairing/revocation, history migration and worker compatibility.
+  The target is a desktop-independent remote client; the recommended Tauri/SSH,
+  shared remote-store and notification-relay designs remain gated technical decisions
+  in [MOB-D1–D6](android-mobile.md#4-architecture-recommendation-and-decision-gates).
 - [ ] **AG-16b — Read and act.** Provide project/conversation access, progress,
   approval/question responses, and diff review with reconnect/catch-up behavior.
-  Reuse stable conversation/event IDs and shared feature capabilities.
+  Implement the accepted low-cognitive-load Threads/navigation/composer direction;
+  reuse stable conversation/event IDs and actual provider capabilities. See MOB-05–08.
 - [ ] **AG-16c — Ownership and recovery.** Serialize writes and prevent a second
-  client from unknowingly replacing the first controller. Handle revoked pairing,
-  controller offline, stale approvals, and duplicate submissions explicitly.
+  client from unknowingly replacing the first controller. Separate readers from a
+  fenced mutating owner; preserve drafts and execution identity across transfer,
+  process recreation and network changes. Handle revoked pairing, stale approvals,
+  uncertain acknowledgements and duplicate submissions explicitly. See MOB-02–04/09.
+- [ ] **AG-16d — Native Android and terminals.** Prove a real APK, platform adapters,
+  secure credentials, insets/IME/Back, picker/clipboard flows, accessibility and the
+  touch terminal against an existing remote tmux session. See MOB-01/05/08/13.
+- [ ] **AG-16e — Background notifications.** Deliver remote attention/confirmed
+  outcome alerts to a locked/background phone without a connected desktop. Include
+  durable outbox, approved push deployment, permission/privacy, exact routing,
+  stale-request reconciliation, and OS delivery limitations. See MOB-10–12.
+- [ ] **AG-16f — Release evidence.** Complete the Android acceptance matrix, desktop
+  regressions, physical-device checks, reproducible signing and safe APK upgrades.
+  See MOB-14/15; browser/mockup tests alone cannot close this task.
 
-**Done when:** a paired phone can inspect and respond to a real running conversation,
-permissions match the controller, reconnect does not duplicate actions, and the UI
-clearly reflects the approved controller-availability model. Select the deployment
-model in AG-16a before implementation; no new public endpoint is implied by this plan.
+**Done when:** a fresh authenticated phone discovers and continues the same real
+remote conversation while the desktop is off; two-device reading/explicit control
+transfer does not duplicate or steal actions; a real background alert opens the
+current request/result; the phone UI and remote terminal survive Android lifecycle,
+input and connectivity changes; and the signed APK passes
+[AND-A01–A18](android-mobile.md#10-acceptance-matrix). Resolve AG-16a's deployment
+and security gates before dependent implementation; no new public worker endpoint,
+cloud deployment, or delivery-order change is implied by saving this plan.
 
 ## AG-17 Scheduled agent tasks
 

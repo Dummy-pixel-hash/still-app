@@ -20,6 +20,7 @@ use crate::core::{
     LiveSession, SessionEvent, SessionStatus, SshConnectArgs, StillError,
 };
 use crate::diag;
+use crate::credential_store::{Entry, Error as CredentialError};
 use crate::hostkeys;
 use crate::ssh_worker;
 use serde::{Deserialize, Serialize};
@@ -88,7 +89,7 @@ fn entry_name(key: &str, kind: &str) -> String {
 }
 
 fn read_remembered(key: &str, kind: &str) -> Option<String> {
-    keyring::Entry::new("dev.still.app", &entry_name(key, kind))
+    Entry::new("dev.still.app", &entry_name(key, kind))
         .ok()
         .and_then(|e| e.get_password().ok())
 }
@@ -191,7 +192,7 @@ async fn still_connect_inner(
             "password" => {
                 if let Some(pw) = password.clone() {
                     if let Ok(e) =
-                        keyring::Entry::new("dev.still.app", &entry_name(&key, "password"))
+                        Entry::new("dev.still.app", &entry_name(&key, "password"))
                     {
                         let _ = e.set_password(&pw);
                     }
@@ -200,7 +201,7 @@ async fn still_connect_inner(
             "privateKey" => {
                 if let Some(k) = private_key.clone() {
                     if let Ok(e) =
-                        keyring::Entry::new("dev.still.app", &entry_name(&key, "key"))
+                        Entry::new("dev.still.app", &entry_name(&key, "key"))
                     {
                         let _ = e.set_password(&k);
                     }
@@ -719,7 +720,7 @@ pub async fn still_save_key(args: KeyArgs, secret: String) -> Result<(), StillEr
     if secret.trim().is_empty() {
         return Err(StillError::friendly("auth_missing", "Key text is empty."));
     }
-    let entry = keyring::Entry::new("dev.still.app", &library_key_name(&args.key_id))
+    let entry = Entry::new("dev.still.app", &library_key_name(&args.key_id))
         .map_err(|e| StillError::friendly("keyring", format!("Secure storage unavailable: {e}")))?;
     entry
         .set_password(&secret)
@@ -730,11 +731,11 @@ pub async fn still_save_key(args: KeyArgs, secret: String) -> Result<(), StillEr
 /// Whether key text exists in the OS keyring for a library entry id.
 #[tauri::command]
 pub async fn still_has_key(args: KeyArgs) -> Result<bool, StillError> {
-    let entry = keyring::Entry::new("dev.still.app", &library_key_name(&args.key_id))
+    let entry = Entry::new("dev.still.app", &library_key_name(&args.key_id))
         .map_err(|e| StillError::friendly("keyring", format!("Secure storage unavailable: {e}")))?;
     match entry.get_password() {
         Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(CredentialError::NoEntry) => Ok(false),
         Err(e) => Err(StillError::friendly("keyring", format!("Secure storage error: {e}"))),
     }
 }
@@ -743,7 +744,7 @@ pub async fn still_has_key(args: KeyArgs) -> Result<bool, StillError> {
 #[tauri::command]
 pub async fn still_forget_key(args: KeyArgs) -> Result<(), StillError> {
     if let Ok(entry) =
-        keyring::Entry::new("dev.still.app", &library_key_name(&args.key_id))
+        Entry::new("dev.still.app", &library_key_name(&args.key_id))
     {
         let _ = entry.delete_credential();
     }
@@ -754,7 +755,7 @@ pub async fn still_forget_key(args: KeyArgs) -> Result<(), StillError> {
 pub async fn still_forget_secret(args: ForgetArgs) -> Result<(), StillError> {
     let key = key_of(&args.host, args.port, &args.username);
     for kind in ["password", "key"] {
-        if let Ok(e) = keyring::Entry::new("dev.still.app", &entry_name(&key, kind)) {
+        if let Ok(e) = Entry::new("dev.still.app", &entry_name(&key, kind)) {
             let _ = e.delete_credential();
         }
     }

@@ -21,7 +21,7 @@ export interface SessionPreset {
 export const BUILTIN_PRESETS: SessionPreset[] = [
   {
     id: "builtin-local",
-    name: "Local",
+    name: "Localhost (SSH)",
     host: "localhost",
     port: "22",
     username: "",

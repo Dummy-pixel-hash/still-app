@@ -318,7 +318,8 @@ export class CodexDriver extends Driver {
     this.peer.send({ jsonrpc: "2.0", method: "initialized" })
     const account = await this.peer.request("account/read", {})
     if (account.requiresOpenaiAuth && !account.account) throw new Error("Codex is installed but needs sign-in. Run codex login on this server.")
-    const dynamicTools = todoHost ? { dynamicTools: [todoHost.todoTool, todoHost.chatTitleTool].map(tool => ({ type: "function", ...tool })) } : {}
+    const tools = todoHost ? [todoHost.todoTool, todoHost.chatTitleTool, todoHost.subagentTool] : []
+    const dynamicTools = tools.length ? { dynamicTools: tools.map(tool => ({ type: "function", ...tool })) } : {}
     const result = await this.peer.request(resume ? "thread/resume" : "thread/start", { cwd: process.cwd(), ...(resume ? { threadId: resume } : {}), ...dynamicTools })
     this.id = result.thread?.id
     if (!this.id) throw new Error("Codex did not return a thread identity")
@@ -394,15 +395,18 @@ export class CodexDriver extends Driver {
     if (event.id !== undefined && method) {
       try {
         let result
-        if (method === "item/tool/call" && todoHost && [todoHost.todoTool.name, todoHost.chatTitleTool.name].includes(p.tool) && !p.namespace) {
+        if (method === "item/tool/call" && todoHost && [todoHost.todoTool.name, todoHost.chatTitleTool.name, todoHost.subagentTool.name].includes(p.tool) && !p.namespace) {
           try {
             if (p.tool === todoHost.todoTool.name) {
               await todoHost.markTodoToolReady(todoHost.todoConnection())
               const list = await todoHost.requestTodos(todoHost.todoConnection(), p.arguments, `codex:${p.callId}`)
               result = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(list) }] }
-            } else {
+            } else if (p.tool === todoHost.chatTitleTool.name) {
               const title = await todoHost.requestChatTitle(todoHost.todoConnection(), p.arguments, `codex:${p.callId}`)
               result = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(title) }] }
+            } else {
+              const state = await todoHost.requestSubagents(todoHost.todoConnection(), p.arguments, `codex:${p.callId}`)
+              result = { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(state) }] }
             }
           } catch (error) { result = { success: false, contentItems: [{ type: "inputText", text: errorText(error) }] } }
         } else if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {

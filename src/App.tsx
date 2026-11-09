@@ -1,6 +1,9 @@
-import Workspace from "./screens/Workspace"
-import { useEffect } from "react"
+import { lazy, Suspense, useEffect } from "react"
 import { diagRecord } from "./session/diag"
+import { isMobileClient } from "./mobile/platform"
+
+const MobileApp = lazy(() => import("./mobile/MobileApp"))
+const Workspace = lazy(() => import("./screens/Workspace"))
 
 export default function App() {
   // DIAG-ONLY: WebView-side startup marker + one harmless IPC health
@@ -37,5 +40,6 @@ export default function App() {
       }
     })()
   }, [])
-  return <Workspace />
+  const Surface = isMobileClient() ? MobileApp : Workspace
+  return <Suspense fallback={<div style={{ height: "100%", background: "#080809" }} />}><Surface /></Suspense>
 }

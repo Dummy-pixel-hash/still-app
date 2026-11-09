@@ -1,7 +1,22 @@
 # Agents roadmap and todo
 
-Updated: **2026-10-30**. Status: **AG-11a audit complete; capability and Todo
+Updated: **2026-11-09**. Status: **AG-11a audit complete; capability and Todo
 follow-ups scheduled; next-milestone execution pack imported**.
+
+**AG-12 update (2026-11-09):** the parent-agent tool path and direct child-chat flow are
+under implementation in [Subagent integration and direct chat](agent-subagents.md).
+Fixture coverage is being added; real provider, reconnect, and crash-recovery validation
+remain before the feature can be marked complete.
+
+**AG-16 Android planning update (2026-11-09):** the thread-first phone direction,
+desktop-to-phone remote continuity, background-alert requirement, architecture gates,
+implementation tasks, and acceptance matrix are saved in
+[Android phone application](android-mobile.md). This replaces the earlier assumption
+that mobile must depend on a running desktop. Production implementation is started
+at the MOB-01 Android compile-spike only; phone runtime and the rest remain TODO.
+Relay deployment and delivery-order changes are not implicitly approved.
+The [full Android implementation todo list](android-mobile-tasks.md) expands every
+mobile milestone into checkable work and release-evidence items.
 
 The remote agent startup regression is resolved. Commit `4c30626` streams the
 bootstrap configuration over SSH stdin, and the user confirmed the fix works
@@ -29,6 +44,10 @@ existing remote-agent execution and local conversation library.
   publisher; it does not become an independent agent client.
 - The existing project/conversation layout, remote execution, offline history,
   provider-aware controls, and smoked-glass appearance are the foundation.
+- **Subagents:** any eligible installed/configured agent can delegate to another on
+  the same host/project, one level deep, in the shared folder. A compact parent-chat
+  panel shows child titles and status, and the user can open and message each
+  Still-managed child directly. See the [AG-12 specification](agent-subagents.md).
 
 The detailed interpretation of “from the agent window” is in the
 [agent-driven orb plan](agent-orb.md): a shared agent-state source, rather than a
@@ -42,6 +61,9 @@ publisher whose lifetime depends on the selected conversation being visible.
 | [Feature implementation plan](agents-roadmap.md) | Scope, tasks, dependencies, code entry points, and acceptance criteria for every feature |
 | [Provider capability audit](provider-capabilities.md) | AG-11a results: installed versions, real startup probes, status/todo contracts, and integration gaps |
 | [Agent-driven orb](agent-orb.md) | First milestone: signal semantics, background lifecycle, native IPC, conversation routing, and verification |
+| [Subagent integration and direct chat](agent-subagents.md) | Approved AG-12 plan: cross-agent delegation, compact parent panel, direct child conversations, shared-folder safety, and verification |
+| [Android phone application](android-mobile.md) | AG-16 Android-first APK plan: reviewed mobile UX, shared remote history/control, background push, native integration, tasks and release evidence |
+| [Full Android implementation todo list](android-mobile-tasks.md) | Checkable MOB-01–15 work breakdown, decision gates, dependencies, release acceptance and evidence records |
 | [Current agent behavior](../agents-ui-and-persistence.md) | Existing controls, remote persistence, and current limitations |
 | [Current orb behavior](../../ORB.md) | Existing companion behavior and platform verification |
 | [Earlier T3 review](../agents-t3-review.md) | Historical design and implementation record |
@@ -83,11 +105,11 @@ Priority describes product sequencing, not defect severity. All new work starts 
 | [AG-09](agents-roadmap.md#ag-09-file-checkpoints-and-rollback) | File checkpoints and guarded restoration | Medium | 4 | AG-02a; AG-03 | TODO |
 | [AG-10](agents-roadmap.md#ag-10-session-import-and-conversation-forks) | Existing provider-session discovery and forks | Medium | 4 | AG-11a; AG-03 for isolated file forks | TODO |
 | [AG-11](agents-roadmap.md#ag-11-provider-capability-clarity) | Runtime capability inventory and explanatory UI | High foundation | 0, then ongoing | AG-11a audit complete; live publication, UI, and evidence follow-ups remain | IN PROGRESS |
-| [AG-12](agents-roadmap.md#ag-12-subagent-visibility) | Child-agent activity, navigation, and outcomes | Later | 5 | AG-01 status identity; AG-11a | TODO |
+| [AG-12](agents-roadmap.md#ag-12-subagent-integration) | Cross-agent delegation, direct child chats, and supervision | Later | 5 | Shared conversation status; AG-11 capabilities; AG-06 queue/steer contract | TODO |
 | [AG-13](agents-roadmap.md#ag-13-integrated-development-tools) | Terminal drawer, file viewer, preview, test results | Later | 5 | AG-02a; AG-04 remote-file access; AG-03 where used | TODO |
 | [AG-14](agents-roadmap.md#ag-14-plan-to-implementation-handoff) | Explicit plan → implementation action | Later | 5 | AG-07; AG-11a | TODO |
 | [AG-15](agents-roadmap.md#ag-15-portable-history-and-backup) | Restorable export/import and backup | Later | 5 | Existing native history; schemas from features included in export | TODO |
-| [AG-16](agents-roadmap.md#ag-16-mobile-access) | Mobile companion access | Later | 6 | AG-01/05; controller/authentication design decision | TODO |
+| [AG-16](agents-roadmap.md#ag-16-mobile-access) | Android phone app, remote continuity and alerts | Later | 6 | Shared AG-01/05 state contracts, not orb UI; architecture gates in the Android plan | TODO |
 | [AG-17](agents-roadmap.md#ag-17-scheduled-agent-tasks) | Explicitly scheduled remote tasks | Later | 6 | AG-01/03/05/06/07; server scheduler design decision | TODO |
 | [AG-18](agents-roadmap.md#ag-18-conversation-todos-and-task-progress) | Agent-managed Todos with read-only progress in Still | High | 1 | AG-11a task capability inventory; existing native history | IN PROGRESS |
 
@@ -123,8 +145,11 @@ not a completion record on its own.
 6. **Workspace depth:** AG-12 subagents, AG-13 development tools, AG-14 plan handoff,
    and AG-15 portable history. These can be scheduled independently once their
    listed dependencies are available.
-7. **Product expansion:** decide AG-16's controller model and AG-17's scheduler
-   lifecycle before implementation. These remain later work, with no release date.
+7. **Product expansion:** follow the [Android plan](android-mobile.md) for AG-16's
+   desktop-independent remote-client goal, controller/history contract and push
+   deployment gates. Decide AG-17's scheduler lifecycle separately. These remain
+   later implementation work, with no release date; the planning update alone does
+   not override the active order above.
 
 The phase numbers in the tracker are stable group names: 0 foundation, 1 supervision,
 2 Git/worktrees, 3 interaction, 4 recovery/visibility, 5 workspace depth, 6 expansion.

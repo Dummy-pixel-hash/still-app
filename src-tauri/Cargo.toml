@@ -8,7 +8,6 @@ edition = "2024"
 anyhow = "1.0.104"
 base64 = "0.22"
 tauri-plugin-clipboard-manager = "2"
-keyring = "4.2.0"
 open = { version = "5", features = ["shellexecute-on-windows"] }
 russh = "0.63.3"
 russh-sftp = "3"
@@ -17,6 +16,16 @@ serde_json = "1.0.151"
 tauri = { version = "2", features = [] }
 tokio = { version = "1.53.1", features = ["full"] }
 url = "2"
+portable-pty = "0.9.0"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Use only keyring's Android-native provider. The crate's broad `cli` feature also
+# resolves desktop-only stores and is unnecessary for the production app.
+android-native-keyring-store = "1.0.0"
+keyring-core = "1.0.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.60", features = [

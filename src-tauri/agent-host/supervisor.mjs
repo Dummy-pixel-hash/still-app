@@ -90,6 +90,7 @@ async function worker() {
   })
   const clients = new Set()
   let owner = null, child = null, childEnded = false, closed = false, sequence = 0, eventIndex = 0
+  const subagentRequests = new Map()
   let initializeResult = null, sessionResult = null, busy = false, activePrompt = null, closing = false, maxRequestId = 3
   const titlePromptPath = join(directory, "chat-title-prompted")
   let initializeOperation = null, sessionOperation = null
@@ -136,7 +137,7 @@ async function worker() {
     history.push(frame)
     writeSync(journal, JSON.stringify(frame) + "\n")
     // A response boundary or approval must survive loss of the client machine.
-    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission" || message.method === "_still/todos_changed" || message.method === "_still/chat_title_changed" || message.method === "_still/capabilities_changed") fsyncSync(journal)
+    if (message.result || message.error || message.method === "elicitation/create" || message.method === "session/request_permission" || message.method === "_still/todos_changed" || message.method === "_still/chat_title_changed" || message.method === "_still/capabilities_changed" || message.method === "_still/subagents_request") fsyncSync(journal)
     remember()
     const handshake = !message.method && (message.id === initializeOperation || message.id === sessionOperation)
     if (owner?.writable && (owner.replayed || handshake)) {
@@ -325,7 +326,7 @@ async function worker() {
       const method = event.method
       const pendingRequest = (method === "session/request_permission" || method === "elicitation/create") && pending.has(JSON.stringify(event.id))
       const response = !method && event.id !== initializeOperation && event.id !== sessionOperation
-      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || method === "_still/todos_changed" || method === "_still/chat_title_changed" || method === "_still/capabilities_changed" || pendingRequest || response)
+      const shouldReplay = event._still.index > socket.cursor && (method === "session/update" || method === "_still/request_outcome" || method === "_still/history_reverted" || method === "_still/todos_changed" || method === "_still/chat_title_changed" || method === "_still/capabilities_changed" || method === "_still/subagents_request" || method === "_still/subagents_reply_ack" || pendingRequest || response)
       if (shouldReplay) writeLine(socket,event)
     }
     // Forms are state, not disposable events: disk history intentionally strips their schema.
@@ -333,13 +334,46 @@ async function worker() {
       const event = [...history].reverse().find(event => event.method === request.method && event.id === request.id)
       if (event && event._still.index <= socket.cursor) writeLine(socket,{...event,_still:{...event._still,pending:true}})
     }
+    for (const [id, subagent] of subagentRequests) {
+      const event = [...history].reverse().find(event => event.method === "_still/subagents_request" && String(event.id) === id)
+      if (event && event._still.index <= socket.cursor) writeLine(socket, { ...event, _still: { ...event._still, pending: true } })
+    }
     writeLine(socket,{jsonrpc:"2.0",method:"_still/caught_up",params:{index:eventIndex,...sessionMetadata()}})
     socket.replayed = true
   }
   const reject = (socket, request, message) => {
     if (request.id !== undefined) writeLine(socket, { jsonrpc: "2.0", id: request.id, error: { code: -32000, message } })
   }
+  const subagentInputError = input => {
+    if (!input || typeof input !== "object" || Array.isArray(input) || !["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"].includes(input.action)) return "Choose a supported subagent action."
+    if (input.action === "prepare" && (typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId) || input.title !== undefined && (typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160))) return "Prepare requires an eligible agent ID and an optional title of 1–160 characters."
+    if (input.action === "spawn" && (input.childId === undefined && (typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId)) || typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160 || typeof input.task !== "string" || !input.task.trim() || [...input.task].length > 12000)) return "Spawn requires a prepared child ID or eligible agent ID, a title of 1–160 characters, and a task of 1–12,000 characters."
+    if (input.action === "spawn" && input.childId !== undefined && (typeof input.childId !== "string" || !/^[a-zA-Z0-9_-]{1,160}$/.test(input.childId))) return "Spawn child ID is invalid."
+    if (input.modelId !== undefined && (typeof input.modelId !== "string" || !input.modelId.trim() || [...input.modelId].length > 300)) return "Model ID must be 1–300 characters."
+    if (input.effort !== undefined && (typeof input.effort !== "string" || !input.effort.trim() || [...input.effort].length > 100)) return "Effort must be 1–100 characters."
+    if (input.modeId !== undefined && (typeof input.modeId !== "string" || !input.modeId.trim() || [...input.modeId].length > 100)) return "Mode ID must be 1–100 characters."
+    if (["inspect", "guide", "wait", "cancel"].includes(input.action) && (typeof input.childId !== "string" || !/^[a-zA-Z0-9_-]{1,160}$/.test(input.childId))) return `${input.action} requires a valid child ID.`
+    if (input.action === "guide" && (typeof input.message !== "string" || !input.message.trim() || [...input.message].length > 4000)) return "Guide requires a message of 1–4,000 characters."
+    if (input.action === "wait" && input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1000 || input.timeoutMs > 15000)) return "Wait timeout must be from 1,000 to 15,000 milliseconds."
+    return null
+  }
+  const requestSubagents = (socket, request) => {
+    const token = request.params?.token
+    const authenticated = typeof token === "string" && /^[a-f0-9]{64}$/.test(token) && timingSafeEqual(Buffer.from(token), Buffer.from(todoToken))
+    if (!authenticated) { reject(socket, request, "Only the registered Still subagent tool may access child conversations."); return }
+    if (!owner?.writable || !owner.replayed || closed || childEnded) { reject(socket, request, "The parent conversation is not attached. Reconnect before managing subagents."); return }
+    if (config.parentConversationId) { reject(socket, request, "Subagents cannot create or manage nested subagents."); return }
+    const input = request.params?.input
+    const invalid = subagentInputError(input)
+    if (invalid) { reject(socket, request, invalid); return }
+    const requestKey = String(request.id)
+    if (!/^[a-zA-Z0-9:_-]{1,160}$/.test(requestKey) || subagentRequests.has(requestKey)) { reject(socket, request, "Invalid or duplicate subagent request ID."); return }
+    subagentRequests.set(requestKey, { socket, requestId: request.id })
+    publish({ jsonrpc: "2.0", id: request.id, method: "_still/subagents_request", params: { requestId: request.id, input } })
+    socket.once("close", () => { if (subagentRequests.get(requestKey)?.socket === socket) subagentRequests.delete(requestKey) })
+  }
   const handle = (socket, request) => {
+    if (request.method === "_still/subagents") { requestSubagents(socket, request); return }
     if (request.method === "_still/chat_title") {
       const token = request.params?.token
       const fromTool = typeof token === "string" && /^[a-f0-9]{64}$/.test(token) && timingSafeEqual(Buffer.from(token), Buffer.from(todoToken))
@@ -438,6 +472,14 @@ async function worker() {
       }
     }
     if (!request.method && request.id !== undefined) {
+      const subagent = subagentRequests.get(String(request.id))
+      if (subagent && owner === socket) {
+        subagentRequests.delete(String(request.id))
+        if (request.error) writeLine(subagent.socket, { jsonrpc: "2.0", id: subagent.requestId, error: request.error })
+        else writeLine(subagent.socket, { jsonrpc: "2.0", id: subagent.requestId, result: request.result })
+        publish({ jsonrpc: "2.0", method: "_still/subagents_reply_ack", params: { requestId: subagent.requestId } })
+        return
+      }
       if (!pending.has(JSON.stringify(request.id))) { reject(socket, request, "This agent request has already been answered or cancelled"); return }
       const question = pending.get(JSON.stringify(request.id))
       sendToChild(request)
