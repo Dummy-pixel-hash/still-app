@@ -45,20 +45,20 @@ export const chatTitleTool = {
 
 export const subagentTool = {
   name: "still_subagents",
-  description: "Manage child conversations belonging to this Still parent chat. List eligible agents, prepare a child to discover its exact model/reasoning/mode choices without sending a task, then spawn it with validated settings; or spawn directly when you already know valid setting IDs. You can inspect, guide, wait, and request cancellation. Children cannot create children. Child permission requests still require the user. Cancellation does not undo file edits.",
+  description: "Manage only this root conversation's child agents in the same project folder. Recommended flow: list -> prepare(agentId) -> inspect the returned settings choices -> spawn(childId,title,task). prepare starts a provider session but sends no model task. Its settings include exact IDs and current defaults. On spawn, model is applied first and dependent effort options are refreshed before effort/mode validation; unsupported choices fail without sending the task. Omit settings to keep the provider defaults. You may instead spawn directly with agentId when you already know valid IDs. Use inspect for effective settings/status, guide for more instructions (Queued is not Delivered), wait for bounded status updates, and cancel to request a stop. Children cannot spawn children. Permissions remain user-owned. Cancellation does not undo file edits.",
   inputSchema: {
     type: "object", additionalProperties: false, required: ["action"],
     properties: {
-      action: { type: "string", enum: ["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"] },
-      childId: { type: "string", minLength: 1, maxLength: 160 },
-      agentId: { type: "string", minLength: 1, maxLength: 100 },
-      title: { type: "string", minLength: 1, maxLength: 160 },
-      task: { type: "string", minLength: 1, maxLength: 12000 },
+      action: { type: "string", enum: ["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"], description: "Use list to discover eligible agent IDs; prepare to create an unused child and read its settings choices; spawn to apply optional settings and submit its first task." },
+      childId: { type: "string", minLength: 1, maxLength: 160, description: "Stable child conversation ID returned by prepare or spawn. Use this ID, never its title or provider session ID." },
+      agentId: { type: "string", minLength: 1, maxLength: 100, description: "Exact eligible agent ID returned by list. Required by prepare and direct spawn." },
+      title: { type: "string", minLength: 1, maxLength: 160, description: "Short child-task title. Optional during prepare, required during spawn." },
+      task: { type: "string", minLength: 1, maxLength: 12000, description: "The task and only relevant context to send to the child. Sent once, after requested settings are validated." },
       modelId: { type: "string", minLength: 1, maxLength: 300, description: "Exact provider model ID returned by prepare." },
       effort: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider effort/reasoning option ID returned by prepare." },
       modeId: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider agent-mode option ID returned by prepare (for example plan/build only when actually advertised)." },
-      message: { type: "string", minLength: 1, maxLength: 4000 },
-      timeoutMs: { type: "integer", minimum: 1000, maximum: 15000 },
+      message: { type: "string", minLength: 1, maxLength: 4000, description: "Additional child guidance. If queued, report Queued; do not claim the child received it until inspect confirms the delivery." },
+      timeoutMs: { type: "integer", minimum: 1000, maximum: 15000, description: "Bounded wait duration in milliseconds; timeout does not imply child failure." },
     },
   },
 }

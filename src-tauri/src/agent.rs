@@ -338,7 +338,9 @@ pub struct StartArgs {
     agent_id: String,
     cwd: Option<String>,
     executable: Option<String>,
+    /// Provider-owned session identity. Its presence explicitly selects resume.
     resume_session_id: Option<String>,
+    /// Stable local identity; alone, this is valid for creating a new conversation.
     conversation_id: Option<String>,
     custom_agent: Option<CustomAgent>,
     parent_conversation_id: Option<String>,
@@ -1383,6 +1385,14 @@ fn validate_resume_scope(saved: &Snapshot, host: &str, agent: &str, cwd: &str, s
     Ok(())
 }
 
+fn resume_requested(conversation_id: Option<&str>, provider_session_id: Option<&str>) -> Result<bool, String> {
+    match provider_session_id {
+        Some(session_id) if !session_id.is_empty() && conversation_id.is_some_and(|id| !id.is_empty()) => Ok(true),
+        Some(_) => Err("Resuming requires both the saved local conversation ID and its confirmed provider session ID.".into()),
+        None => Ok(false),
+    }
+}
+
 fn validate_replacement_execution(existing: &Snapshot, conversation_id: &str) -> Result<(), String> {
     if existing.conversation_id == conversation_id {
         return Err("This conversation already has a managed execution. Reattach to it, or explicitly stop and close it before resuming.".into());
@@ -1396,6 +1406,8 @@ pub async fn still_agent_start(
     state: State<'_, AppState>,
     args: StartArgs,
 ) -> Result<Snapshot, StillError> {
+    let resume = resume_requested(args.conversation_id.as_deref(), args.resume_session_id.as_deref())
+        .map_err(|error| StillError::friendly("agent_resume_identity", error))?;
     validate_custom(&args.agent_id, args.custom_agent.as_ref())?;
     let def = definition(&args.agent_id)
         .ok_or_else(|| StillError::friendly("agent_unsupported", "Unknown agent."))?;
@@ -1449,7 +1461,7 @@ pub async fn still_agent_start(
     }
     let history_lease = agent_store::lease(&app, conversation_id.clone()).await?;
     let default_todos = || json!({"protocolVersion":3,"revision":0,"items":[],"toolAvailable":false,"available":true});
-    let (saved_todos, recover_from) = if args.conversation_id.is_some() {
+    let (saved_todos, recover_from) = if resume {
         let saved = agent_store::load_snapshot(&app, conversation_id.clone()).await?;
         if saved.conversation_id != conversation_id {
             return Err(StillError::friendly("agent_resume_identity", "The saved conversation identity does not match this resume request."));
@@ -1523,13 +1535,13 @@ pub async fn still_agent_start(
         recovery_reason: None,
         capabilities: None,
     };
-    if let Err(error) = agent_store::register(&app, &snapshot, args.conversation_id.is_some()).await {
+    if let Err(error) = agent_store::register(&app, &snapshot, resume).await {
         let _ = send(&channel,&json!({"jsonrpc":"2.0","id":"startup-cleanup","method":"_still/shutdown"})).await;
         let _ = channel.eof().await;
         let _ = channel.close().await;
         return Err(error);
     }
-    let messages = if args.conversation_id.is_some() {
+    let messages = if resume {
         match agent_store::history_messages(&app, snapshot.conversation_id.clone()).await {
             Ok(messages) => messages,
             Err(error) => { let _ = send(&channel,&json!({"jsonrpc":"2.0","id":"startup-cleanup","method":"_still/shutdown"})).await; let _ = channel.eof().await; let _ = channel.close().await; return Err(error); }
@@ -3239,6 +3251,15 @@ pub async fn still_agent_respond(args: PermissionArgs) -> Result<(), StillError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caller_assigned_conversation_id_is_a_create_unless_resume_is_explicit() {
+        assert_eq!(resume_requested(None, None), Ok(false));
+        assert_eq!(resume_requested(Some("new-subagent-id"), None), Ok(false));
+        assert_eq!(resume_requested(Some("saved-conversation"), Some("provider-session")), Ok(true));
+        assert!(resume_requested(None, Some("provider-session")).is_err());
+        assert!(resume_requested(Some("saved-conversation"), Some("")).is_err());
+    }
+
     fn custom_fixture() -> CustomAgent {
         CustomAgent { id: "custom-fixture".into(), host_key: "server-a".into(), name: "Orbit CLI".into(), executable: "/opt/agent with spaces".into(), args: vec!["--acp".into(), "literal $(touch never)".into(), "".into()], transport: "acp-v1".into() }
     }

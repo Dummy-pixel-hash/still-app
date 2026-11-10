@@ -1,6 +1,6 @@
 # AG-12 — Subagent integration and direct chat
 
-Updated: **2026-11-09**. Status: **IN PROGRESS — parent tool flow wired; live-provider verification pending**.
+Updated: **2026-11-10**. Status: **IN PROGRESS — create/resume fix and parent-model guide implemented locally; Windows verification pending**.
 Feature status and delivery order live in the [Agents tracker](README.md).
 The implementation checklist is in [AG-12](agents-roadmap.md#ag-12-subagent-integration).
 
@@ -18,6 +18,13 @@ serialized with `Parent agent` provenance. Cancellation pauses queued parent gui
 and reports a request rather than claiming confirmed completion. Children cannot spawn
 children; a shared-folder limit of three concurrent children is enforced in the app.
 
+The shared tool description/schema now carries the model-facing delegation guide. A
+parent can prepare a child, inspect its exact model/effort/mode choices, then spawn it
+using validated IDs. New child IDs now select local-history creation unless the request
+also supplies an explicit provider session ID for resume; a native unit test covers
+that distinction. These corrections are present locally but still need a fresh Windows
+ARM64 workflow and real-provider exercise.
+
 **Model and mode controls (2026-11-09):** parents can call `prepare` to start a child
 without sending its task and receive that provider's exact model, effort/reasoning, and
 mode option IDs. `spawn` validates requested IDs against the prepared child's current
@@ -31,6 +38,59 @@ This is an implementation in progress, not a live compatibility claim: provider
 tool-call delivery, SSH reconnect behavior, packaged Windows behavior, and actual
 cross-provider sign-in have only fixture/build coverage so far. Pending tool requests
 and app-owned operation metadata also need broader restart/crash recovery validation.
+
+## Resolved locally; Windows/provider verification pending: child ID was treated as resume
+
+**Reported 2026-11-10:** preparing/spawning a subagent on Windows displays:
+
+> Conversation changes could not be saved on this device: The system cannot find the
+> file specified. (os error 2)
+
+The user confirmed this occurs during subagent preparation/spawning, not an ordinary
+main-chat message. This is a local conversation-history failure, not evidence that a
+remote task stopped. Do not recommend deleting history or resending the original task.
+
+### Code-path finding
+
+- `src/components/AgentWorkspace.tsx` assigns a new child a stable
+  `subagent-...` conversation ID and passes it to the native start request.
+- `src-tauri/src/agent.rs` treated any supplied `conversation_id` as a resume:
+  it loads an existing snapshot before creating the new child history.
+- The new child's history does not yet exist. `agent_store::load_snapshot` can therefore
+  return the missing-file error wrapped as a generic conversation-storage failure.
+- The same create/resume assumption also controls registration and history restoration.
+  Fixing only the initial load would leave the startup contract inconsistent.
+
+This was caused by treating any caller-assigned local conversation ID as a resume
+request. A stable new child ID had no local history file, so the resume path attempted
+to load a nonexistent snapshot and surfaced Windows `os error 2`.
+
+### Required correction
+
+1. Distinguish **create with a caller-assigned ID** from **resume an existing provider
+   session**. A stable conversation ID alone is not a request to resume.
+2. For a new child, register its local history exactly once before subsequent metadata
+   writes. Preserve its parent, host, folder, and agent identity.
+3. For a resume, require the explicit saved provider-session identity and validate its
+   existing history/scope. Do not silently convert missing resume history into a fresh
+   worker or replacement conversation.
+4. Apply the same intent consistently to snapshot loading, registration, prior-message
+   restoration, Todo seeding, and provider recovery. Preserve tombstones and leases.
+5. On retries, reconcile the stable operation/conversation identity rather than spawning
+   another child or replaying its task. Keep uncertain delivery distinct from failure.
+6. Give storage errors operation-specific context and the relevant local path, so a
+   missing snapshot can be distinguished from failed creation, access, or persistence.
+
+**Implemented locally (2026-11-10):** native start now distinguishes an explicit resume
+(both saved local conversation ID and confirmed provider session ID) from a new
+conversation with a caller-assigned ID. Only explicit resumes load saved snapshots,
+recover prior Todos/messages, and register as resumes. New prepared children register
+their history as a create. Native tests cover the intent matrix. Browser tests alone
+would not have caught this mismatch.
+
+Still verify a real prepare/spawn on the affected Windows build; the latest recorded
+ARM64 workflow predates this correction. Keep create failure/tombstone/lease recovery
+and crash-retry behavior in the remaining acceptance tests.
 
 ## Agreed product decisions
 
@@ -117,17 +177,18 @@ spawned, with its real transcript and a working message composer.**
 
 ## Parent-agent tool contract
 
-Expose one shared tool, tentatively **`still_subagents`**, through the provider-tool
+Expose one shared tool, **`still_subagents`**, through the provider-tool
 integration paths already used for Todos and conversation titles.
 
 | Action | Intended behavior |
 | --- | --- |
 | `list` | Return eligible agent choices and the caller's existing children |
+| `prepare` | Connect a child without sending its task; return its exact provider configuration options |
 | `spawn` | Start a selected agent with a title and bounded task/context; return a stable child ID |
 | `inspect` | Read authoritative status, bounded progress/output, pending attention, or the final result |
-| `send` | Submit guidance through the same child queue used by direct user messages |
+| `guide` | Submit guidance through the same child queue used by direct user messages |
 | `wait` | Wait for a result or attention state with a bounded timeout; do not require rapid polling |
-| `stop` | Request cancellation of the child's active work and report acknowledgement separately |
+| `cancel` | Request cancellation of the child's active work and report acknowledgement separately |
 
 Spawning is non-blocking so the parent can continue its own work or wait. A result
 is associated with the child and its actual turn/execution, not just a mutable title.
@@ -143,6 +204,68 @@ but retain their origin. A native background task is not automatically an inspec
 resumable child chat. Do not show a functioning **Open chat** action for a provider
 task that has no addressable conversation. This limitation does not replace the full
 direct-chat requirement for Still-managed children.
+
+### Model-facing delegation guide
+
+**Requested 2026-11-10; shared runtime guide implemented.** The parent AI needs a concise
+guide covering actions, fields, provider options, safe sequence, and recovery. Disk
+documentation alone is not the model interface.
+
+The canonical guide now lives in the shared `still_subagents` tool and field/action
+descriptions used by MCP, Codex dynamic tools, and Pi. Keep it synchronized with the
+schema and avoid provider-specific contradictory instructions.
+
+#### Fields the guide must explain
+
+| Field | Meaning and constraints |
+| --- | --- |
+| `action` | One of the actual action names above; do not invent `send`, `stop`, or other aliases |
+| `agentId` | An eligible agent ID returned by `list`; required when preparing a new child or spawning without a prepared child |
+| `childId` | The stable child conversation ID returned by `prepare`/`spawn`, not its title, execution ID, or provider session ID |
+| `title` | A short task-specific title; required for `spawn`, optional for a new `prepare` |
+| `task` | The bounded task and relevant context to submit at `spawn`; preparation alone must not submit it |
+| `modelId` | An exact model ID from that child's provider-returned choices, not a guessed display name |
+| `effort` | An exact reasoning/effort option for the selected model; available values may change after model selection |
+| `modeId` | An exact supported agent-mode ID; Plan/Build must not be inferred from permission profiles or emulated by wording the prompt |
+| `message` | Additional child guidance; distinguish queue acknowledgement from actual delivery |
+| `timeoutMs` | A bounded wait of 1,000–15,000 milliseconds; a timeout does not mean the task failed |
+
+Include actual schema limits in the runtime descriptions: title 1–160 characters,
+task 1–12,000, guidance 1–4,000, model ID 1–300, and effort/mode IDs 1–100.
+
+#### Recommended parent workflow
+
+1. Call `list` and choose an eligible agent for this parent's host/project.
+2. Call `prepare` with that agent ID. Retain the returned `childId`; inspect the
+   model/effort/mode choices and the current/default selections. Preparation may create
+   a provider session, but must not submit a model task.
+3. Select a model, refresh its dependent options, and only then select effort/mode.
+   Copy provider IDs exactly; omit a setting to retain its effective default. Missing
+   controls mean unavailable/unverified, not permission to invent an option.
+4. Call `spawn` for that prepared `childId` with a title, task, and validated settings.
+   Submit no task until all requested settings have been acknowledged and verified.
+5. Use `inspect` to see effective settings, progress/results, pending human requests,
+   and queued guidance. Use bounded `wait` instead of rapid repeated polling.
+6. Use `guide` for additional instructions. Report **Queued** separately from
+   **Delivered**; do not assume that an active child has already read a queued message.
+7. Use `cancel` when necessary. Cancellation requested is not confirmed termination;
+   inspect the outcome. Queued guidance pauses and existing file edits remain.
+
+#### Remaining preparation refinement — not yet supported
+
+Extend `prepare` to accept an **existing unused `childId` plus requested settings**, as
+an alternative to preparing a new agent. This lets the parent choose a model and
+receive refreshed effort/mode choices before submitting work, without creating another
+child. Scope it to this parent's idle, unused prepared children. Reject unknown,
+unrelated, or already-started children rather than launching replacements.
+
+After each acknowledged setting change, reread effective configuration and dependent
+choices. Verify the final requested combination before task submission. Do not assume
+that changing modes leaves every other setting unchanged.
+
+Option failures should identify the affected prepared child, invalid field, valid
+choices, and whether any task was submitted. On uncertain startup or delivery, instruct
+the parent to inspect/reconcile before retrying; never repeat the original task blindly.
 
 ## Runtime ownership and persistence
 
@@ -223,6 +346,18 @@ Primary integration points, relative to the application root:
 
 ## Acceptance checklist
 
+- [ ] A new caller-assigned child ID creates local history instead of attempting to
+  resume a missing snapshot; verify actual prepare/spawn on the affected Windows build.
+- [ ] Resume requires matching saved history/provider identity; missing, conflicting,
+  or deleted history cannot silently create a new session or duplicate a prompt.
+- [ ] Native tests cover new child creation, valid resume, missing-history rejection,
+  identity conflicts, duplicate operations, and preserved parent/scope metadata.
+- [ ] All provider tool routes expose the same model-facing action/field guide, exact
+  option IDs, defaults, limits, and queue/cancellation/uncertain-delivery semantics.
+- [ ] Re-preparing an unused child refreshes model-dependent choices without creating
+  another conversation or submitting a task; unrelated/started children are rejected.
+- [ ] Invalid/unsupported settings submit no task, return actionable choices and the
+  prepared child identity, and never trigger silent model/mode substitution.
 - [ ] A real supported parent delegates to a different installed provider in the
   same project folder; its titled child appears in the correct parent's panel.
 - [ ] The user opens that exact child chat, sends a message, receives a response,
