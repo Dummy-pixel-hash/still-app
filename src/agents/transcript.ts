@@ -1,6 +1,7 @@
 import type { AgentInputRequest, AgentPermissionRequest, AgentRequestKind, AgentRequestOutcome, AgentRequestSummary, AgentThreadEvent, AgentToolContent } from "./types"
 
 export interface TranscriptItem {
+  previewTruncated?: boolean
   id: string
   kind: "user" | "assistant" | "reasoning" | "tool" | "notice" | "request"
   text: string
@@ -52,7 +53,7 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
     if (event.type === "userMessage") {
       stream = undefined
       tools.clear()
-      items.push({ id: `user-${key}`, kind: "user", text: event.text || "", messageId: event.messageId, checkpoint: event.checkpoint, source: event.source })
+      items.push({ id: `user-${key}`, kind: "user", text: event.text || "", messageId: event.messageId, checkpoint: event.checkpoint, source: event.source, previewTruncated: event.previewTruncated })
     } else if (event.type === "assistantChunk" || event.type === "reasoningChunk") {
       const kind = event.type === "assistantChunk" ? "assistant" : "reasoning"
       if (!stream || stream.kind !== kind || event.messageId && event.messageId !== messageId) {
@@ -74,6 +75,7 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
         items.push(tool)
       }
       if (event.title) tool.title = event.title
+      if (event.previewTruncated) tool.previewTruncated = true
       if (event.status) tool.status = event.status
       if (event.detail) tool.text = event.detail
       if (event.content) tool.content = mergeToolContent(tool.content, event.content)

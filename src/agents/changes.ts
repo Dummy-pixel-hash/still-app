@@ -106,6 +106,7 @@ function buildToolEdits(item: TranscriptItem): ReportedChange[] {
 }
 
 function suppliedToolEdits(item: TranscriptItem): ReportedChange[] {
+  if (item.previewTruncated) return []
   const key = item.input || (item.output && typeof item.output === "object" ? item.output : undefined)
   if (!key) return []
   const path = item.locations?.[0]?.path
@@ -119,7 +120,7 @@ function suppliedToolEdits(item: TranscriptItem): ReportedChange[] {
 export function conversationChanges(items: TranscriptItem[]): AgentChange[] {
   const changes: AgentChange[] = []
   for (const item of items) {
-    if (item.kind !== "tool") continue
+    if (item.kind !== "tool" || item.previewTruncated) continue
     const outcome: ChangeOutcome = item.status === "completed" ? "completed"
       : ["failed", "error", "cancelled", "canceled", "rejected", "denied"].includes(item.status || "") ? "failed"
         : ["pending", "in_progress", "running", "queued"].includes(item.status || "") ? "pending" : "unconfirmed"

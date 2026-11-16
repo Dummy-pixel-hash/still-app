@@ -1,6 +1,6 @@
 //! Device-owned agent history. Each conversation has an append-only journal;
 //! acknowledged records are flushed before returning, independently of WebView life.
-use crate::{agent::{Event, Snapshot}, core::StillError};
+use crate::{agent::{Event, Snapshot}, agent_history, core::StillError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashSet, fs::{self, OpenOptions}, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
@@ -9,6 +9,50 @@ use tauri::{AppHandle, Emitter, Manager};
 static WRITER: Mutex<()> = Mutex::new(());
 static VALIDATED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static CHECKPOINT_SIZES: OnceLock<Mutex<std::collections::HashMap<PathBuf, u64>>> = OnceLock::new();
+struct Summary { length: u64, modified: Option<std::time::SystemTime>, row: Value }
+static SUMMARIES: OnceLock<Mutex<std::collections::HashMap<PathBuf, Summary>>> = OnceLock::new();
+
+fn summary(path: &Path, warnings: &mut Vec<String>) -> Result<Value, String> {
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    if let Ok(cache) = SUMMARIES.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock() {
+        if let Some(saved) = cache.get(path).filter(|saved| saved.length == metadata.len() && saved.modified == metadata.modified().ok()) { return Ok(saved.row.clone()); }
+    }
+    let row = agent_history::index(path, warnings)?.row;
+    if agent_history::json_size(&row) <= agent_history::PAGE_BYTES {
+        let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+        if let Ok(mut cache) = SUMMARIES.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock() {
+            if cache.len() >= 64 { if let Some(old) = cache.keys().next().cloned() { cache.remove(&old); } }
+            cache.insert(path.to_path_buf(), Summary { length: metadata.len(), modified: metadata.modified().ok(), row: row.clone() });
+        }
+    }
+    Ok(row)
+}
+
+fn update_summary(path: &Path, before: u64, record: &Record) {
+    let Ok(mut cache) = SUMMARIES.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock() else { return };
+    // Cache metadata only. Draft saves and account polling must not re-scan an
+    // 84 MB transcript on every keystroke; output bodies never enter this cache.
+    if let Some(saved) = cache.get_mut(path).filter(|saved| saved.length == before) {
+        match record {
+            Record::Update { fields } => merge(&mut saved.row, fields.clone()),
+            Record::Metadata { meta } => {
+                let activity = saved.row["meta"]["activityAt"].as_u64().unwrap_or(0).max(saved.row["touchedAt"].as_u64().unwrap_or(0)).max(meta["activityAt"].as_u64().unwrap_or(0));
+                saved.row["meta"] = meta.clone(); saved.row["meta"]["activityAt"] = json!(activity);
+            }
+            Record::Event { fields, event } => {
+                if fields["executionId"] != saved.row["executionId"] || event.sequence > saved.row["lastSequence"].as_u64().unwrap_or(0) {
+                    merge(&mut saved.row, fields.clone());
+                    if let Some(activity) = fields["touchedAt"].as_u64() { saved.row["meta"]["activityAt"] = json!(activity); }
+                }
+            }
+            _ => { cache.remove(path); return; },
+        }
+        saved.row["pendingPermission"] = Value::Null; saved.row["pendingInput"] = Value::Null;
+        if agent_history::json_size(&saved.row) > agent_history::PAGE_BYTES { cache.remove(path); return; }
+        if let Ok(metadata) = fs::metadata(path) { saved.length = metadata.len(); saved.modified = metadata.modified().ok(); }
+        else { cache.remove(path); }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
@@ -37,8 +81,8 @@ fn sync_directory(root: &Path) -> Result<(), String> {
 fn append(path: &Path, record: &Record) -> Result<(), String> {
     let mut validated = VALIDATED.get_or_init(|| Mutex::new(HashSet::new())).lock().map_err(|_| "History validation is unavailable")?;
     if path.exists() && !validated.contains(path) {
-        let existing = records(path, &mut Vec::new())?;
-        if path.file_stem().and_then(|v| v.to_str()) != Some("workspace") { replay(existing)?; }
+        if path.file_stem().and_then(|v| v.to_str()) == Some("workspace") { records(path, &mut Vec::new())?; }
+        else { summary(path, &mut Vec::new())?; }
     }
     validated.insert(path.to_path_buf());
     drop(validated);
@@ -50,7 +94,8 @@ fn append(path: &Path, record: &Record) -> Result<(), String> {
         output.seek(SeekFrom::End(-1)).map_err(|e| e.to_string())?;
         let mut tail = [0_u8]; output.read_exact(&mut tail).map_err(|e| e.to_string())?;
         if tail[0] != b'\n' {
-            records(path, &mut Vec::new())?;
+            if path.file_stem().and_then(|v| v.to_str()) == Some("workspace") { records(path, &mut Vec::new())?; }
+            else { agent_history::index(path, &mut Vec::new())?; }
             before = output.metadata().map_err(|e| e.to_string())?.len();
         }
     }
@@ -62,11 +107,14 @@ fn append(path: &Path, record: &Record) -> Result<(), String> {
     }
     sync_directory(path.parent().ok_or("Missing storage directory")?)?;
     drop(output);
+    update_summary(path, before, record);
     // Maintenance is never an acknowledgement failure: the appended record is
     // already durable, and a failed checkpoint leaves that journal authoritative.
     let boundary = matches!(record, Record::Metadata { .. } | Record::Workspace { .. })
         || matches!(record, Record::Event { event, .. } if matches!(event.kind.as_str(), "threadComplete" | "threadError" | "historyReverted"));
-    if boundary {
+    // Keep conversation journals append-only: a giant Create checkpoint copies
+    // the whole transcript into memory and invalidates history paging cursors.
+    if boundary && path.file_stem().and_then(|v| v.to_str()) == Some("workspace") {
         let length = before + bytes.len() as u64;
         if let Ok(mut sizes) = CHECKPOINT_SIZES.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock() {
             let threshold = sizes.get(path).copied().unwrap_or(0).saturating_add(8 * 1024 * 1024);
@@ -206,7 +254,7 @@ fn fields(snapshot: &Snapshot) -> Value {
 pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, StillError> {
     let mut snapshot = disk(app, move |root| {
         if file(root, &id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
-        let row = replay(records(&file(root, &id, "jsonl")?, &mut Vec::new())?)?;
+        let row = agent_history::page(&file(root, &id, "jsonl")?, None, &mut Vec::new())?;
         serde_json::from_value(row).map_err(|error| error.to_string())
     }).await?;
     crate::agent::restore_capabilities(&mut snapshot);
@@ -254,7 +302,7 @@ pub async fn register(app: &AppHandle, snapshot: &Snapshot, resume: bool) -> Res
         let path = file(root, &snapshot.conversation_id, "jsonl")?;
         if file(root, &snapshot.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted".into()); }
         if resume {
-            let row = replay(records(&path, &mut Vec::new())?)?;
+            let row = summary(&path, &mut Vec::new())?;
             if row["meta"]["hostKey"] != snapshot.host_key || row["cwd"] != snapshot.cwd || row["agentId"] != snapshot.agent_id {
                 return Err("The saved conversation belongs to another server, folder, or agent".into());
             }
@@ -281,9 +329,8 @@ pub async fn lease(app: &AppHandle, id: String) -> Result<fs::File, StillError> 
 
 pub async fn history_messages(app: &AppHandle, id: String) -> Result<Vec<Event>, StillError> {
     disk(app, move |root| {
-        let row = replay(records(&file(root, &id, "jsonl")?, &mut Vec::new())?)?;
-        row["transcript"].as_array().ok_or("History has no transcript")?.iter().filter(|event| event["type"] == "userMessage")
-            .map(|event| serde_json::from_value(event.clone()).map_err(|error| error.to_string())).collect()
+        agent_history::messages(&file(root, &id, "jsonl")?)?.into_iter()
+            .map(|event| serde_json::from_value(event).map_err(|error| error.to_string())).collect()
     }).await
 }
 
@@ -332,14 +379,13 @@ pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
             let path = entry.map_err(|e| e.to_string())?.path();
             if path.extension().and_then(|v| v.to_str()) != Some("jsonl") { continue; }
             if path.with_extension("deleted").exists() { continue; }
-            let result = records(&path, &mut warnings);
             if path.file_stem().and_then(|v| v.to_str()) == Some("workspace") {
-                match result {
+                match records(&path, &mut warnings) {
                     Ok(records) => for record in records { if let Record::Workspace { key, value } = record { workspace[key] = value; } },
                     Err(error) => warnings.push(error),
                 }
             } else {
-                match result.and_then(replay) { Ok(row) => rows.push(row), Err(error) => warnings.push(error) }
+                match summary(&path, &mut warnings) { Ok(row) => rows.push(row), Err(error) => warnings.push(error) }
             }
         }
         for row in &mut rows { stale_library_capabilities(row); crate::agent::restore_todo_fields(row); }
@@ -347,6 +393,19 @@ pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
     }).await?;
     library["liveExecutions"] = json!(crate::agent::live_executions().await);
     Ok(library)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryArgs { conversation_id: String, before: Option<usize> }
+
+#[tauri::command]
+pub async fn still_agent_history(app: AppHandle, args: HistoryArgs) -> Result<Value, StillError> {
+    disk(&app, move |root| {
+        if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let row = agent_history::page(&file(root, &args.conversation_id, "jsonl")?, args.before, &mut Vec::new())?;
+        Ok(json!({"executionId":row["executionId"],"lastSequence":row["lastSequence"],"transcript":row["transcript"],"before":row["historyBefore"],"total":row["historyTotal"],"latest":row["historyLatest"]}))
+    }).await
 }
 
 #[derive(Deserialize)]
@@ -434,7 +493,7 @@ fn migrate(root: &Path, args: MigrationArgs) -> Result<Vec<String>, String> {
             let path = match file(root, &id, "jsonl") { Ok(path) => path, Err(error) => { warnings.push(error); continue; } };
             if file(root, &id, "deleted")?.exists() { continue; }
             if path.exists() {
-                if let Err(error) = records(&path, &mut warnings).and_then(replay) { warnings.push(error); }
+                if let Err(error) = agent_history::index(&path, &mut warnings) { warnings.push(error); }
                 continue;
             }
             row["conversationId"] = json!(id);
@@ -475,6 +534,25 @@ pub fn report(app: &AppHandle, id: &str, sequence: u64, result: &Result<(), Stil
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn summary_cache_tracks_durable_metadata_without_retaining_output_and_detects_external_appends() {
+        let root = root();
+        let path = file(&root, "cached", "jsonl").unwrap();
+        append(&path, &Record::Create { row: legacy_row("cached", "attempt") }).unwrap();
+        assert!(summary(&path, &mut Vec::new()).unwrap()["transcript"].as_array().unwrap().is_empty());
+        let event: Event = serde_json::from_value(json!({"type":"assistantMessage","sequence":1,"text":"x".repeat(1_000_000)})).unwrap();
+        append(&path, &Record::Event { fields: json!({"executionId":"attempt","lastSequence":1,"touchedAt":2}), event }).unwrap();
+        append(&path, &Record::Metadata { meta: json!({"id":"cached","title":"Renamed","activityAt":1,"draft":"Draft retained"}) }).unwrap();
+        let cached = summary(&path, &mut Vec::new()).unwrap();
+        assert_eq!(cached, agent_history::index(&path, &mut Vec::new()).unwrap().row);
+        assert!(agent_history::json_size(&cached) < 1024);
+        assert_eq!(cached["meta"]["activityAt"], 2);
+        let mut external = OpenOptions::new().append(true).open(&path).unwrap();
+        serde_json::to_writer(&mut external, &json!({"version":1,"record":{"op":"update","fields":{"lastSequence":2,"state":"detached"}}})).unwrap();
+        external.write_all(b"\n").unwrap(); external.sync_all().unwrap(); drop(external);
+        assert_eq!(summary(&path, &mut Vec::new()).unwrap()["state"], "detached");
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn request_history_retains_identity_and_outcome_without_form_payloads() {
         let question: Event = serde_json::from_value(json!({"sequence":1,"attemptId":"execution","type":"input","input":{"requestId":"q-1","title":"Choose a branch","schema":{"properties":{"secret":{"type":"string","default":"never-store-this"}}}}})).unwrap();

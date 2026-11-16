@@ -26,7 +26,7 @@ import { bindTerminalClipboard } from "./clipboard"
 import { bindTerminalLinks } from "./links"
 import { bindApplicationWheel } from "./wheel"
 import CustomScrollbar from "./CustomScrollbar"
-import type { ImageInsertStyle, TerminalPrefs } from "../types"
+import { terminalScrollback, type ImageInsertStyle, type TerminalPrefs } from "../types"
 
 const textEncoder = new TextEncoder()
 
@@ -117,7 +117,7 @@ export default function SessionTerminal({
         "'Geist Mono', ui-monospace, Consolas, 'Segoe UI Emoji', 'Noto Color Emoji', 'Apple Color Emoji', monospace",
       fontSize: prefs.fontSize,
       lineHeight: TERMINAL_LINE_HEIGHT,
-      scrollback: prefs.scrollback,
+      scrollback: terminalScrollback(prefs.scrollback),
       // Smooth viewport animation for local scrollback (normal buffer,
       // zero IPC). 160ms is quick enough to stay responsive on a mouse
       // wheel; xterm ignores it for raw trackpad momentum streams
@@ -382,8 +382,8 @@ export default function SessionTerminal({
       if (terminal.options.cursorStyle !== prefs.cursorStyle) {
         terminal.options.cursorStyle = prefs.cursorStyle
       }
-      if (terminal.options.scrollback !== prefs.scrollback) {
-        terminal.options.scrollback = prefs.scrollback
+      if (terminal.options.scrollback !== terminalScrollback(prefs.scrollback)) {
+        terminal.options.scrollback = terminalScrollback(prefs.scrollback)
       }
       // Re-fit AND re-push (next frame, after xterm lays out the new
       // font): smaller font fits more cols/rows, so the server must be

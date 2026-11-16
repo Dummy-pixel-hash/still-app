@@ -66,6 +66,9 @@ export interface TerminalPrefs {
   scrollback: number
 }
 
+// Enforce the settings UI's existing range at the persisted/native boundary too.
+export const terminalScrollback = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(1000, Math.min(50000, Math.trunc(value))) : 5000
+
 /**
  * How an uploaded image's location is typed into an agent's input.
  * "path" (plain file path) auto-attaches in Claude Code, Codex and Pi;

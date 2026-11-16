@@ -3,7 +3,8 @@ import type {AgentGitDiff,AgentGitSnapshot,AgentGitView} from "../agents/git"
 import type {Unsubscribe} from "./nativeBridge"
 const unavailable=()=>new Error("Remote ACP execution needs Still's native SSH bridge. Browser mode will never start a local agent.")
 export const unavailableAgentBridge={
- agentLibrary:async():Promise<import('../agents/types').AgentLibrary>=>{throw unavailable()},
+  agentLibrary:async():Promise<import('../agents/types').AgentLibrary>=>{throw unavailable()},
+  agentHistory:async():Promise<import('../agents/types').AgentHistoryPage>=>{throw unavailable()},
  agentFlush:async():Promise<void>=>{},
  agentSaveMetadata:async():Promise<void>=>{throw unavailable()},
  agentSaveWorkspace:async():Promise<void>=>{throw unavailable()},

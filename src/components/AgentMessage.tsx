@@ -46,6 +46,8 @@ const markdownComponents: Components = {
        img: ({ src, alt }) => <span className="agent-media-fallback">{alt || "Image"}{src && <ExternalLink href={src} modifier={false}>Open image in browser</ExternalLink>}</span>,
 }
 export const AgentMessage = memo(function AgentMessage({ text }: { text: string }) {
+  // Huge markdown/code fences can allocate far more than their source text.
+  if (text.length > 32 * 1024) return <div className="agent-prose"><pre>{text.slice(0, 32 * 1024)}</pre><p className="agent-muted">Plain-text preview shortened. Full output remains in saved history.</p></div>
   return <div className="agent-prose"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={markdownComponents}>{text}</ReactMarkdown></div>
 })
 

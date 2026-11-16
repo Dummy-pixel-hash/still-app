@@ -1,7 +1,7 @@
 //! Remote ACP transport attached to a private, detached server-side worker.
 //! Losing SSH detaches the UI; the worker and its replay journal stay on the server.
 use crate::{
-    agent_store,
+    agent_store, agent_history,
     commands::AppState,
     core::{SessionStatus, StillError},
     ssh_worker,
@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
-const HISTORY_LIMIT: usize = 1200;
+const HISTORY_LIMIT: usize = agent_history::PAGE_EVENTS;
 /// Prints the remote Node version and one bounded `--version` result per provider.
 /// Runs only where Node exists; a missing/failing probe simply omits version data.
 const VERSION_PROBE: &str = r#"import { spawn } from "node:child_process";
@@ -152,6 +152,8 @@ pub struct Event {
     pub recovery_reason: Option<RecoveryReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_request: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_truncated: Option<bool>,
 }
 impl Event {
     fn new(kind: &str) -> Self {
@@ -190,6 +192,7 @@ impl Event {
             capabilities: None,
             recovery_reason: None,
             subagent_request: None,
+            preview_truncated: None,
         }
     }
 }
@@ -1117,22 +1120,38 @@ async fn test_custom_connection(session_id: &str, custom: &CustomAgent) -> Resul
 
 fn append_history(history: &mut Vec<Event>, event: Event) {
     apply_history_event(history, &event);
+    let event = display_event(&event);
+    let mut merged = false;
     if matches!(event.kind.as_str(), "assistantChunk" | "reasoningChunk") {
         if let Some(last) = history
             .last_mut()
-            .filter(|last| last.kind == event.kind && last.message_id == event.message_id)
+            .filter(|last| last.kind == event.kind && last.message_id == event.message_id && last.attempt_id == event.attempt_id
+                && last.text.as_ref().map_or(0, String::len) + event.text.as_ref().map_or(0, String::len) <= agent_history::EVENT_BYTES / 2)
         {
             last.text
                 .get_or_insert_with(String::new)
                 .push_str(event.text.as_deref().unwrap_or(""));
             last.end_sequence = Some(event.sequence);
-            return;
+            merged = true;
         }
     }
-    if history.len() >= HISTORY_LIMIT {
-        history.remove(0);
+    if !merged { history.push(event); }
+    let mut bytes = 0;
+    let mut start = history.len();
+    for event in history.iter().rev().take(HISTORY_LIMIT) {
+        let size = agent_history::json_size(event);
+        if bytes + size > agent_history::PAGE_BYTES { break; }
+        bytes += size;
+        start -= 1;
     }
-    history.push(event);
+    if start > 0 { history.drain(..start); }
+}
+
+fn display_event(event: &Event) -> Event {
+    // Live request schemas/configuration are authoritative controls, not output.
+    if !matches!(event.kind.as_str(), "userMessage" | "assistantChunk" | "assistantMessage" | "reasoningChunk" | "toolStart" | "toolUpdate" | "notice")
+        || agent_history::json_size(event) <= agent_history::EVENT_BYTES { return event.clone(); }
+    serde_json::from_value(agent_history::preview(serde_json::to_value(event).unwrap())).unwrap()
 }
 /// Apply provider-acknowledged boundaries; the journal records the boundary durably.
 pub(super) fn apply_history_event(history: &mut Vec<Event>, event: &Event) {
@@ -1174,7 +1193,7 @@ async fn emit(thread: &mut Thread, mut e: Event) {
     agent_store::report(&thread.app, &thread.snapshot.conversation_id, e.sequence, &result);
     let _ = thread.app.emit(
         &format!("still://agent-event/{}", thread.snapshot.execution_id),
-        e,
+        display_event(&e),
     );
 }
 
@@ -3833,6 +3852,28 @@ mod tests {
         append_history(&mut history, Event::new("toolStart"));
         append_history(&mut history, Event::new("assistantChunk"));
         assert_eq!(history.len(), 4);
+    }
+    #[test]
+    fn output_windows_bound_bytes_and_endless_chunks_without_changing_original_events() {
+        let mut history = Vec::new();
+        for sequence in 1..=1500 {
+            let mut event = Event::new("assistantChunk");
+            event.sequence = sequence; event.text = Some("x".repeat(4096));
+            append_history(&mut history, event);
+        }
+        assert!(history.len() <= HISTORY_LIMIT);
+        assert!(agent_history::json_size(&history) <= agent_history::PAGE_BYTES + HISTORY_LIMIT + 2);
+        assert!(history.iter().all(|event| event.text.as_ref().unwrap().len() <= agent_history::EVENT_BYTES / 2));
+        assert_eq!(history.last().unwrap().end_sequence, Some(1500));
+        let mut original = Event::new("toolUpdate");
+        original.raw_output = Some(json!({"output":"x".repeat(2_000_000)}));
+        let preview = display_event(&original);
+        assert_eq!(original.raw_output.as_ref().unwrap()["output"].as_str().unwrap().len(), 2_000_000);
+        assert_eq!(preview.preview_truncated, Some(true));
+        assert!(agent_history::json_size(&preview) <= agent_history::EVENT_BYTES);
+        let mut configuration = Event::new("configOptions");
+        configuration.config_options = Some(vec![json!({"id":"model","description":"x".repeat(100_000)})]);
+        assert_eq!(serde_json::to_value(display_event(&configuration)).unwrap(), serde_json::to_value(configuration).unwrap());
     }
     #[test]
     fn acknowledged_revert_clears_trimmed_and_resumed_snapshots_at_the_requested_boundary() {

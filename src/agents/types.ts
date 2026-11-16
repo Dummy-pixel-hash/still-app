@@ -129,6 +129,7 @@ export interface AgentConfigOption {
 
 }
 export interface AgentThreadEvent {
+  previewTruncated?: boolean
   sequence: number
   attemptId?: string
   endSequence?: number
@@ -203,6 +204,8 @@ export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeS
 export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string; providerRuntime?: AgentProviderRuntime; checkedAt?: number }
 
 export interface AgentThreadSnapshot {
+  historyLoaded?: boolean
+  historyBefore?: number | null
   conversationId?: string
   parentConversationId?: string
   hostKey?: string
@@ -243,6 +246,15 @@ export interface AgentLibrary {
   storagePath: string
   warnings: string[]
   liveExecutions?: string[]
+}
+
+export interface AgentHistoryPage {
+  executionId: string
+  lastSequence: number
+  transcript: AgentThreadEvent[]
+  before: number | null
+  total: number
+  latest: boolean
 }
 
 export interface AgentCatalog { commands: AgentCommand[]; configOptions: AgentConfigOption[]; version?: string; warning?: string }

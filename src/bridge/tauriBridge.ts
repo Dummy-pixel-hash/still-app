@@ -33,6 +33,7 @@ export const tauriBridge: NativeBridge = {
   adapterName: "Tauri native bridge",
   isDevelopmentAdapter: false,
   agentLibrary: () => invoke<AgentLibrary>("still_agent_library"),
+  agentHistory: (conversationId, before) => invoke("still_agent_history", { args: { conversationId, before } }),
   agentFlush: () => invoke("still_agent_flush"),
   agentSaveMetadata: (conversationId, meta) => invoke("still_agent_save_metadata", { args: { conversationId, meta } }),
   agentSaveWorkspace: (key, value) => invoke("still_agent_save_workspace", { args: { key, value } }),

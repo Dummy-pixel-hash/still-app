@@ -20,6 +20,7 @@ import { useAgentListMotion } from "../agents/useAgentListMotion"
 import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
 import { commandInventory } from "../agents/commands"
+import { clearAgentHistoryPage, loadAgentHistory, loadEarlierAgentHistory } from "../session/agentThreads"
 import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, reconcileAgentRequest, reconcileAgentThread, refreshAgentCommands, refreshAgentThread, respondAgentInput, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
 import { agentDiscoverySelectionKey, discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
@@ -381,8 +382,9 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const agentModeControl = modeOption(fields)
   const otherControls = fields.filter(option => option !== modelControl && option !== reasoningControl && option !== agentModeControl)
   const items = useMemo(() => {
-    const transcript = conversation(current?.transcript || [])
+    const transcript = conversation(current?.historyPage?.transcript || current?.transcript || [])
     if (!current) return transcript
+    if (current.historyPage) return transcript
     const kind = current.pendingPermission ? "permission" : current.pendingInput ? "question" : undefined
     const request = current.pendingPermission || current.pendingInput
     if (!kind || !request) return transcript
@@ -392,7 +394,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       else found.agentInput = current.pendingInput
     } else transcript.push({ id: `pending-${requestKey(current.executionId, kind, request.requestId)}`, kind: "request", attemptId: current.executionId, requestKind: kind, requestId: request.requestId, title: request.title, text: "", permission: current.pendingPermission, agentInput: current.pendingInput })
     return transcript
-  }, [current?.transcript, current?.pendingPermission, current?.pendingInput])
+  }, [current?.transcript, current?.historyPage, current?.pendingPermission, current?.pendingInput])
   const changes = useMemo(() => conversationChanges(items), [items])
   const openHistoryAction = useCallback((message: TranscriptItem, retry: boolean) => { setError(""); setHistoryAction({ message, retry }) }, [])
   const historyActions = useMemo(() => ({ capabilities: current?.historyCapabilities, enabled: connectedHere && !busy && !configBusy && !!current && !current.turnActive && !current.pendingInput && !current.pendingPermission && !current.meta.archivedAt && !current.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(current.state), act: openHistoryAction }), [current?.historyCapabilities, current?.state, current?.turnActive, current?.pendingInput, current?.pendingPermission, current?.meta.archivedAt, current?.meta.submissionUnknown, connectedHere, busy, configBusy, openHistoryAction])
@@ -401,16 +403,19 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const historyStart = historyWindows.get(historyId)
   const firstItem = historyStart === undefined ? Math.max(0, items.length - 120) : historyStart === "" ? 0 : Math.max(0, items.findIndex(item => item.id === historyStart))
   const visibleItems = useMemo(() => items.slice(firstItem), [items, firstItem])
-  const turnActive = !!(current?.turnActive && !current.pendingInput && !current.pendingPermission)
+  const olderHistory = !!current?.historyPage
+  const earlierCursor = current?.historyPage ? current.historyPage.before : current?.historyBefore
+  const hasEarlierHistory = typeof earlierCursor === "number" && earlierCursor > 0 || !olderHistory && !!current?.historyTruncated
+  const turnActive = !!(current?.turnActive && !olderHistory && !current.pendingInput && !current.pendingPermission)
   const lastVisibleUser = visibleItems.reduce((last, item, index) => item.kind === "user" ? index : last, -1)
   const hasActiveReasoning = turnActive && visibleItems.some((item, index) => item.kind === "reasoning" && (lastVisibleUser < 0 || index > lastVisibleUser))
-  useLayoutEffect(() => { if (historyId && !historyWindows.has(historyId)) historyWindows.set(historyId, items[firstItem]?.id || "") }, [historyId, items, firstItem])
-  const plan = useMemo(() => current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript])
-  const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript)
+  useLayoutEffect(() => { if (historyId && current?.historyLoaded !== false && !historyWindows.has(historyId)) historyWindows.set(historyId, items[firstItem]?.id || "") }, [historyId, items, firstItem, current?.historyLoaded])
+  const plan = useMemo(() => current?.historyPage ? undefined : current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript, current?.historyPage])
+  const scroll = useConversationScroll(current?.meta.id ? `${current.meta.id}${olderHistory ? `:history:${earlierCursor ?? "start"}` : ""}` : `${view}:${contextKey}`, current?.historyPage || current?.transcript)
   const showComposer = startScreen || !!current
   const composerCollapsed = !!current && !composerExpanded && !draft && !attachments.length
   const { dock: composerDock, compact: compactChat } = useComposerOverlay(!!current)
-  const canSend = hydrated && connectedHere && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
+  const canSend = hydrated && connectedHere && !olderHistory && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
   const projects = [...prefs.projects]
   for (const row of libraryThreads) if (!projects.some(p => p.host === row.meta.hostKey && p.folder === row.meta.folder)) projects.push({ host: row.meta.hostKey, folder: row.meta.folder })
@@ -527,7 +532,14 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     void checkDiscovery()
   }, [host, connected, transportId, hydrated, customDiscoveryKey])
   useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
-  useEffect(() => { if (current) void subscribeRemoteAgent(current.executionId); setError(""); setMenu(null); setCommandOpen(false) }, [selected, current?.executionId])
+  useEffect(() => {
+    if (current) {
+      void subscribeRemoteAgent(current.executionId)
+      void loadAgentHistory(current.executionId).catch(() => {})
+    }
+    setError(""); setMenu(null); setCommandOpen(false)
+    return () => { if (current) clearAgentHistoryPage(current.executionId) }
+  }, [selected, current?.executionId])
   useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
   useEffect(() => { if (!current?.todos?.items.length) setTodosOpen(false) }, [current?.meta.id, current?.todos?.items.length])
   useLayoutEffect(() => { setAgentDetailsOpen(false) }, [contextKey, agentId, activeAgent?.executionId, activeAgent?.agentId, activeAgent?.agentSessionId, activeAgent?.cwd, transportId, view])
@@ -871,10 +883,19 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     } catch (e) { if (navigation.current === revision) setCatalogError(messageOf(e)) }
     finally { setCatalogBusy(false) }
   }
-  const loadEarlier = () => {
+  const loadEarlier = async () => {
     scroll.preparePrepend()
-    historyWindows.set(historyId, items[Math.max(0, firstItem - 120)]?.id || "")
-    updateHistoryWindow(value => value + 1)
+    if (firstItem > 0) {
+      historyWindows.set(historyId, items[Math.max(0, firstItem - 120)]?.id || "")
+      updateHistoryWindow(value => value + 1)
+    } else if (current) {
+      try {
+        await loadEarlierAgentHistory(current.executionId)
+        historyWindows.delete(historyId)
+        updateHistoryWindow(value => value + 1)
+        if (scroll.viewport.current) scroll.viewport.current.scrollTop = 0
+      } catch { /* The history error includes a retry control below. */ }
+    }
   }
   const findMessage = (id: string) => {
     const index = items.findIndex(item => item.id === id)
@@ -1028,6 +1049,15 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
         {isSubagent && <div className="agent-subagent-context"><AgentIcon name="folder" size={13} /><span>Subagent of <strong>{parentThread ? threadTitle(parentThread) : "unavailable parent"}</strong></span><span>·</span><span>Shared project folder</span></div>}
         <div ref={scroll.viewport} className={`agent-conversation${current ? " agent-conversation--hierarchy" : ""}`} tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
           <div ref={scroll.content} className="agent-message-list">
+            {current && <>
+              {(!firstItem && hasEarlierHistory || olderHistory || current.historyLoading) && <div className="agent-history-page">
+                {!firstItem && hasEarlierHistory && <button type="button" disabled={current.historyLoading} onClick={() => void loadEarlier()}>{current.historyLoading ? "Loading saved activity…" : "Load earlier saved activity"}</button>}
+                {current.historyLoading && !hasEarlierHistory && <span role="status">Loading saved activity…</span>}
+                {olderHistory && <button type="button" className="agent-link-button" onClick={() => { clearAgentHistoryPage(current.executionId); historyWindows.delete(historyId); updateHistoryWindow(value => value + 1); requestAnimationFrame(scroll.follow) }}>Back to latest activity</button>}
+              </div>}
+              {current.historyError && <div className="agent-history-page" role="alert"><span>{current.historyError}</span><button type="button" disabled={current.historyLoading} onClick={() => void (current.historyLoaded === false ? loadAgentHistory(current.executionId) : loadEarlierAgentHistory(current.executionId)).catch(() => {})}>Retry loading history</button></div>}
+              {olderHistory && <p className="agent-muted">Viewing an older saved page. Return to latest activity to reply. Full history remains saved on this device.</p>}
+            </>}
             {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}</>
               : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
@@ -1108,7 +1138,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     {expandedItem && <div className="agent-confirm-backdrop agent-request-backdrop"><AgentRequest key={expandedItem.id} item={expandedItem} actions={requestActions} expanded /></div>}
     {extraControl && <div className="agent-confirm-backdrop"><section className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-label={fields.find(option => option.id === extraControl)?.name || "Agent control"}><div className="agent-modal-heading"><h2>{fields.find(option => option.id === extraControl)?.name || "Agent control"}</h2><button className="agent-icon-button" aria-label="Close agent control" onClick={() => setExtraControl(null)}><AgentIcon name="close" /></button></div>{fields.filter(option => option.id === extraControl).map(option => <div key={option.id}>{option.description && <p>{option.description}</p>}<ConfigPicker option={option} disabled={!connectedHere || !idle(activeAgent) || configBusy} change={changeSecondaryConfig} /></div>)}{configError && <p className="agent-model-error" role="alert">{configError}</p>}</section></div>}
     {historyAction && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-history-confirm" role="dialog" aria-modal="true" aria-labelledby="agent-history-title"><h2 id="agent-history-title">{historyAction.retry ? "Retry this message?" : "Revert to this message?"}</h2><p>{historyAction.retry ? "Return to before this message and send it again with the currently selected model." : "Return to before this message. Its replies and later messages will leave the active conversation."}</p><blockquote>{historyAction.message.text.slice(0, 240)}{historyAction.message.text.length > 240 ? "…" : ""}</blockquote><p>Project files stay as they are. {current.agentId === "pi" ? "Pi continues from a fork at this point." : "This updates the agent’s conversation history."}</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" disabled={busy} onClick={() => setHistoryAction(null)}>Cancel</button><button className="agent-primary" disabled={busy || !connectedHere || !canChangeAgentHistory(current, historyAction.message.messageId || "", historyAction.retry)} onClick={() => void applyHistoryAction()}>{busy ? "Updating history…" : historyAction.retry ? "Retry message" : "Revert conversation"}</button></div></section></div>}
-    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input ref={timelineSearch} autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
+    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><p id="agent-history-search-scope" className="agent-muted">Searches the loaded page. Load earlier saved activity to search older messages.</p><label className="agent-field">Search this conversation<input ref={timelineSearch} aria-describedby="agent-history-search-scope" autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
     {customSetup && <CustomAgentSetup key={customSetup.id} agent={customSetup} serverName={hosts.find(server => hostKey(server) === customSetup.hostKey)?.name || hostLabel(customSetup.hostKey)} connected={connected && host === customSetup.hostKey} onTest={agent => callbacks.current.onCheck(agent.id, undefined, agent, true)} onClose={() => setCustomSetup(null)} onSave={agent => {
       setPrefs(old => ({ ...old, customAgents: { ...old.customAgents, [agent.hostKey]: [...(old.customAgents[agent.hostKey] || []).filter(row => row.id !== agent.id), agent] } }))
       setCustomSetup(null)

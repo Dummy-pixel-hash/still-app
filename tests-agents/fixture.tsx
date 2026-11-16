@@ -39,6 +39,7 @@ const h = {
   attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   snapshotReads: [] as string[],
+  historyReads: [] as Array<{ id: string; before?: number }>,
   refreshThread: refreshAgentThread,
   rawTodoEvent(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
@@ -138,6 +139,13 @@ Object.assign(window, { agentFixture: h })
 registerNativeBridge({
   ...mockBridge,
   agentLibrary: async () => ({ ...library(), storagePath: "Fixture native-store boundary", warnings: [], liveExecutions: preview && scenario ? [...snapshots.keys()] : [] }),
+  agentHistory: async (id, before) => {
+    h.historyReads.push({ id, before })
+    const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)
+    const transcript: AgentThreadEvent[] = JSON.parse(localStorage.getItem(`still.test.agent-history:${id}`) || "null") || saved.transcript
+    const end = Math.min(before ?? transcript.length, transcript.length), start = Math.max(0, end - 200)
+    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, total: transcript.length, latest: end === transcript.length }
+  },
   agentMigrate: async (rows, deleted, workspaces) => {
     const data = library(); data.deleted.push(...deleted)
     for (const value of rows) { const row = value as any; const id = row.meta.id; if (!data.deleted.includes(id) && !data.rows.some((item: any) => item.meta.id === id)) data.rows.push({ ...row, conversationId: id }) }

@@ -12,6 +12,7 @@ import {
   blankDraft,
   newSessionId,
   tmuxNameFor,
+  terminalScrollback,
   type AppSettings,
   type KeyEntry,
   type Project,
@@ -105,6 +106,7 @@ function load(): StoreShape {
       settings: {
         ...DEFAULT_SETTINGS,
         ...(parsed.settings ?? {}),
+        terminal: { ...DEFAULT_SETTINGS.terminal, ...parsed.settings?.terminal, scrollback: terminalScrollback(parsed.settings?.terminal?.scrollback) },
         // Deleted legacy orb settings never re-enable the new companion.
         orb: normalizeOrbPreferences(parsed.settings?.orb),
       },
@@ -356,21 +358,14 @@ export function removeKey(id: string) {
 export function updateSettings(patch: Partial<AppSettings>) {
   const store = getStore()
   const settings = { ...store.settings, ...patch }
+  if ("terminal" in patch) settings.terminal = { ...settings.terminal, scrollback: terminalScrollback(settings.terminal.scrollback) }
   if ("orb" in patch) settings.orb = normalizeOrbPreferences(patch.orb)
   persist({ ...store, settings })
   notify()
 }
 
 export function updateTerminalPrefs(patch: Partial<AppSettings["terminal"]>) {
-  const store = getStore()
-  persist({
-    ...store,
-    settings: {
-      ...store.settings,
-      terminal: { ...store.settings.terminal, ...patch },
-    },
-  })
-  notify()
+  updateSettings({ terminal: { ...getStore().settings.terminal, ...patch } })
 }
 
 export { blankDraft }

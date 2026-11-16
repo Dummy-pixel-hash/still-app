@@ -14,6 +14,12 @@ const { conversationChanges, changeTotals } = await load("../src/agents/changes.
 const patch = { type: "diff", path: "src/main.ts", oldText: "const before = 1;\n", newText: "const after = 2;\n" }
 const tool = { sequence: 1, attemptId: "execution-a", type: "toolStart", toolCallId: "edit-1", title: "Edit", toolKind: "edit", content: [patch] }
 
+test("shortened output previews never invent complete diffs or change totals", () => {
+  const items = conversation([{ ...tool, previewTruncated: true, status: "completed" }])
+  assert.equal(items[0].previewTruncated, true)
+  assert.deepEqual(conversationChanges(items), [])
+})
+
 test("a completion containing only tool output cannot erase an earlier supplied edit", () => {
   const items = conversation([tool, { sequence: 2, attemptId: "execution-a", type: "toolUpdate", toolCallId: "edit-1", status: "completed", content: [{ type: "content", content: { type: "text", text: "Successfully replaced text" } }] }])
   const changes = conversationChanges(items)

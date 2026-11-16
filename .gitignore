@@ -15,6 +15,7 @@ playwright-report/
 # Local docs & media scratch; keep public guides and README screenshots.
 !docs/
 docs/*
+!docs/history-memory.md
 !docs/agents-t3-review.md
 !docs/agents-ui-and-persistence.md
 !docs/images/

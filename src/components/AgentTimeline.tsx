@@ -21,8 +21,9 @@ function ToolRow({ item }: { item: TranscriptItem }) {
       {!failed && (item.status === "in_progress" || item.status === "running") && <small role="status">Running</small>}
     </header>
     <div className="agent-tool-body">
+      {item.previewTruncated && <p className="agent-muted">Output preview shortened. Full output remains in saved history; partial edits are not shown as complete diffs.</p>}
       {item.input && <details className="agent-tool-input"><summary>Input</summary><pre>{JSON.stringify(item.input, null, 2)}</pre></details>}
-      {!!item.content?.length && <AgentToolResult content={item.content} />}
+      {!!item.content?.length && !item.previewTruncated && <AgentToolResult content={item.content} />}
       {item.text && !item.content?.length && <pre>{item.text}</pre>}
       {output?.exitCode !== undefined && <p className="agent-tool-exit">Exit code: {String(output.exitCode)}</p>}
       {item.output !== undefined && item.output !== null && <details className="agent-tool-input"><summary>Raw output</summary><pre>{JSON.stringify(item.output, null, 2) ?? String(item.output)}</pre></details>}
@@ -66,7 +67,7 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
 })
 const Message = memo(function Message({ item, author, agentId, actions }: { item: TranscriptItem; author: string; agentId: string; actions?: MessageActions }) {
   const { id, kind, text } = item
-  const canAct = kind === "user" && item.messageId && item.checkpoint && actions
+  const canAct = kind === "user" && !item.previewTruncated && item.messageId && item.checkpoint && actions
   return <article data-timeline-id={id} className={`agent-message agent-message-${kind}`}><div className="agent-message-author">{kind !== "user" && <AgentProviderMark id={agentId} size={19} />}{author}</div>{kind === "user" ? <p className="agent-user-text">{text}</p> : <AgentMessage text={text} />}
     {canAct && (actions.capabilities?.revert || actions.capabilities?.retry) && <div className="agent-message-actions" aria-label="Message actions">
       {actions.capabilities?.revert && <button type="button" disabled={!actions.enabled} title="Return to before this message; files stay as they are" onClick={() => actions.act(item, false)}><AgentIcon name="back" size={13} />Revert</button>}

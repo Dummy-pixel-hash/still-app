@@ -157,6 +157,7 @@ export interface NativeBridge extends OrbBridge {
   readonly isDevelopmentAdapter: boolean
 
   agentLibrary(): Promise<AgentLibrary>
+  agentHistory(conversationId: string, before?: number): Promise<import("../agents/types").AgentHistoryPage>
   agentFlush(): Promise<void>
   agentSaveMetadata(conversationId: string, meta: ConversationMeta): Promise<void>
   agentSaveWorkspace(key: string, value: object): Promise<void>
