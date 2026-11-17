@@ -35,6 +35,12 @@ test("a 35-thread library lazily loads only the selected thread and keeps histor
   await expect(page.locator(".agent-change-summary")).toHaveCSS("opacity", "0")
   await page.locator(".agent-chat").hover()
   await expect(page.locator(".agent-change-summary")).toHaveCSS("opacity", "1")
+  const centerOffset = await page.evaluate(() => {
+    const chat = document.querySelector(".agent-chat")!.getBoundingClientRect()
+    const summary = document.querySelector(".agent-change-summary")!.getBoundingClientRect()
+    return Math.abs(chat.left + chat.width / 2 - summary.left - summary.width / 2)
+  })
+  expect(centerOffset).toBeLessThan(2)
   await page.locator(".agent-change-summary").click()
   await expect(page.locator(".agent-review")).toContainText("src/old-file.ts")
   await expect(page.locator(".agent-review")).toContainText("new historical content")

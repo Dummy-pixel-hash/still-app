@@ -794,7 +794,8 @@
 .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary {
   position: absolute;
   z-index: 6;
-  right: max(16px, calc((100% - 960px) / 2 + 16px));
+  right: auto;
+  left: 50%;
   bottom: calc(var(--ag-composer-height, 0px) + 48px);
   width: 42px;
   height: 42px;
@@ -805,6 +806,7 @@
   flex-wrap: nowrap;
   justify-content: center;
   overflow: hidden;
+  transform: translateX(-50%);
 }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary > svg { flex: none; }
 .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary > :is(strong, .agent-change-numbers, .agent-change-attempts, .agent-change-summary-action) { display: none; }
@@ -824,7 +826,7 @@
   .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary {
     opacity: 0;
     pointer-events: none;
-    transform: translateY(5px);
+    transform: translate(-50%, 5px);
     transition: opacity 140ms ease, transform 140ms ease, background 120ms, border-color 120ms;
   }
   .agent-workspace .agent-chat:not(.is-launch):hover > .agent-change-summary,
@@ -839,7 +841,7 @@
     flex-wrap: wrap;
     opacity: 1;
     pointer-events: auto;
-    transform: none;
+    transform: translate(-50%, 0);
   }
   .agent-workspace .agent-chat:not(.is-launch):hover > .agent-change-summary > :is(strong, .agent-change-numbers, .agent-change-attempts),
   .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible > :is(strong, .agent-change-numbers, .agent-change-attempts) { display: inline-flex; }
