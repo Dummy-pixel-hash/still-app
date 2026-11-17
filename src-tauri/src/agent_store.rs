@@ -397,14 +397,46 @@ pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoryArgs { conversation_id: String, before: Option<usize> }
+pub struct HistoryArgs { conversation_id: String, before: Option<usize>, after: Option<usize> }
 
 #[tauri::command]
 pub async fn still_agent_history(app: AppHandle, args: HistoryArgs) -> Result<Value, StillError> {
     disk(&app, move |root| {
+        if args.before.is_some() && args.after.is_some() { return Err("Choose a history cursor in one direction".into()); }
         if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
-        let row = agent_history::page(&file(root, &args.conversation_id, "jsonl")?, args.before, &mut Vec::new())?;
-        Ok(json!({"executionId":row["executionId"],"lastSequence":row["lastSequence"],"transcript":row["transcript"],"before":row["historyBefore"],"total":row["historyTotal"],"latest":row["historyLatest"]}))
+        let row = agent_history::window(&file(root, &args.conversation_id, "jsonl")?, args.before, args.after, &mut Vec::new())?;
+        Ok(json!({"executionId":row["executionId"],"lastSequence":row["lastSequence"],"transcript":row["transcript"],"before":row["historyBefore"],"after":row["historyAfter"],"total":row["historyTotal"],"latest":row["historyLatest"]}))
+    }).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeHistoryArgs { conversation_id: String }
+
+#[tauri::command]
+pub async fn still_agent_change_history(app: AppHandle, args: ChangeHistoryArgs) -> Result<Value, StillError> {
+    disk(&app, move |root| {
+        if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let path = file(root, &args.conversation_id, "jsonl")?;
+        let index = agent_history::index(&path, &mut Vec::new())?;
+        let changes = agent_history::change_summaries(&path)?;
+        Ok(json!({"executionId":index.row["executionId"],"changes":changes}))
+    }).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDetailsArgs { conversation_id: String, path: String }
+
+#[tauri::command]
+pub async fn still_agent_change_details(app: AppHandle, args: ChangeDetailsArgs) -> Result<Value, StillError> {
+    disk(&app, move |root| {
+        if args.path.is_empty() || args.path.len() > 4096 || args.path.chars().any(char::is_control) { return Err("Invalid changed-file identity".into()); }
+        if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let path = file(root, &args.conversation_id, "jsonl")?;
+        let index = agent_history::index(&path, &mut Vec::new())?;
+        let events = agent_history::change_details(&path, &args.path)?;
+        Ok(json!({"executionId":index.row["executionId"],"path":args.path,"events":events}))
     }).await
 }
 

@@ -134,6 +134,8 @@ pub fn run() {
             agent_git::still_agent_git_diff,
             agent_store::still_agent_library,
             agent_store::still_agent_history,
+            agent_store::still_agent_change_history,
+            agent_store::still_agent_change_details,
             agent_store::still_agent_save_metadata,
             agent_store::still_agent_save_workspace,
             agent_store::still_agent_delete_saved,

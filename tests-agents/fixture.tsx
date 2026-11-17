@@ -39,6 +39,9 @@ const h = {
   attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   snapshotReads: [] as string[],
+  historyReads: [] as Array<{ id: string; before?: number; after?: number }>,
+  changeReads: [] as string[],
+  changeDetailReads: [] as Array<{ id: string; path: string }>,
   historyReads: [] as Array<{ id: string; before?: number }>,
   refreshThread: refreshAgentThread,
   rawTodoEvent(id: string, event: Omit<AgentThreadEvent, "sequence">) {
@@ -139,6 +142,29 @@ Object.assign(window, { agentFixture: h })
 registerNativeBridge({
   ...mockBridge,
   agentLibrary: async () => ({ ...library(), storagePath: "Fixture native-store boundary", warnings: [], liveExecutions: preview && scenario ? [...snapshots.keys()] : [] }),
+  agentHistory: async (id, before) => {
+    h.historyReads.push({ id, before })
+    const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)
+    const transcript: AgentThreadEvent[] = JSON.parse(localStorage.getItem(`still.test.agent-history:${id}`) || "null") || saved.transcript
+    const end = Math.min(before ?? transcript.length, transcript.length), start = Math.max(0, end - 200)
+    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, after: end < transcript.length ? end : null, total: transcript.length, latest: end === transcript.length }
+  },
+  agentHistoryWindow: async (id, before, after) => {
+    h.historyReads.push({ id, before, after })
+    const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)
+    const transcript: AgentThreadEvent[] = JSON.parse(localStorage.getItem(`still.test.agent-history:${id}`) || "null") || saved.transcript
+    const start = after ?? Math.max(0, Math.min(before ?? transcript.length, transcript.length) - 200)
+    const end = Math.min(start + 200, before ?? transcript.length)
+    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, after: end < transcript.length ? end : null, total: transcript.length, latest: end === transcript.length }
+  },
+  agentChangeHistory: async id => {
+    h.changeReads.push(id)
+    return { executionId: id, changes: JSON.parse(localStorage.getItem(`still.test.agent-changes:${id}`) || "null") || [] }
+  },
+  agentChangeDetails: async (id, path) => {
+    h.changeDetailReads.push({ id, path })
+    return { executionId: id, path, events: JSON.parse(localStorage.getItem(`still.test.agent-change-details:${id}:${path}`) || "[]") }
+  },
   agentHistory: async (id, before) => {
     h.historyReads.push({ id, before })
     const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)

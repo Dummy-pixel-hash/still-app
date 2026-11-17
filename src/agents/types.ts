@@ -206,6 +206,7 @@ export interface AgentAvailability { agentId: string; executable?: string; avail
 export interface AgentThreadSnapshot {
   historyLoaded?: boolean
   historyBefore?: number | null
+  historyAfter?: number | null
   conversationId?: string
   parentConversationId?: string
   hostKey?: string
@@ -253,9 +254,19 @@ export interface AgentHistoryPage {
   lastSequence: number
   transcript: AgentThreadEvent[]
   before: number | null
+  after: number | null
   total: number
   latest: boolean
 }
+
+export interface AgentChangeIndexItem {
+  id: string
+  path: string
+  toolCallId: string
+  outcome: "completed" | "failed" | "pending" | "unconfirmed"
+}
+export interface AgentChangeHistory { executionId: string; changes: AgentChangeIndexItem[] }
+export interface AgentChangeDetails { executionId: string; path: string; events: AgentThreadEvent[] }
 
 export interface AgentCatalog { commands: AgentCommand[]; configOptions: AgentConfigOption[]; version?: string; warning?: string }
 

@@ -158,6 +158,9 @@ export interface NativeBridge extends OrbBridge {
 
   agentLibrary(): Promise<AgentLibrary>
   agentHistory(conversationId: string, before?: number): Promise<import("../agents/types").AgentHistoryPage>
+  agentHistoryWindow(conversationId: string, before?: number, after?: number): Promise<import("../agents/types").AgentHistoryPage>
+  agentChangeHistory(conversationId: string): Promise<import("../agents/types").AgentChangeHistory>
+  agentChangeDetails(conversationId: string, path: string): Promise<import("../agents/types").AgentChangeDetails>
   agentFlush(): Promise<void>
   agentSaveMetadata(conversationId: string, meta: ConversationMeta): Promise<void>
   agentSaveWorkspace(key: string, value: object): Promise<void>

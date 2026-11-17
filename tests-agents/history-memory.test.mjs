@@ -10,14 +10,26 @@ const importSource = source => import(`data:text/javascript;base64,${Buffer.from
 const todos = await importSource(await typescript("../src/agents/todos.ts"))
 
 async function store(library) {
-  const callbacks = new Map(), calls = { history: [] }
+  const callbacks = new Map(), calls = { history: [], windows: [], changes: [] }
   const bridge = {
     agentHistory: async (id, before) => {
       calls.history.push({ id, before })
       const saved = library.rows.find(row => (row.conversationId || row.executionId) === id)
       const events = library.history?.[id] || saved.transcript
       const end = Math.min(before ?? events.length, events.length), start = Math.max(0, end - 200)
-      return structuredClone({ executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: events.slice(start, end), before: start || null, total: events.length, latest: end === events.length })
+      return structuredClone({ executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: events.slice(start, end), before: start || null, after: end < events.length ? end : null, total: events.length, latest: end === events.length })
+    },
+    agentHistoryWindow: async (id, before, after) => {
+      calls.windows.push({ id, before, after })
+      const saved = library.rows.find(row => (row.conversationId || row.executionId) === id)
+      const events = library.history?.[id] || saved.transcript
+      const start = after ?? Math.max(0, Math.min(before ?? events.length, events.length) - 200)
+      const end = Math.min(start + 200, before ?? events.length)
+      return structuredClone({ executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: events.slice(start, end), before: start || null, after: end < events.length ? end : null, total: events.length, latest: end === events.length })
+    },
+    agentChangeHistory: async id => {
+      calls.changes.push(id)
+      return structuredClone({ executionId: id, changes: library.changeHistory?.[id] || [] })
     },
     subscribeToAgent: async (id, callback) => { callbacks.set(id, callback); return () => callbacks.delete(id) },
     agentSnapshot: async id => structuredClone(library.rows.find(row => row.executionId === id)),
@@ -52,7 +64,7 @@ function row(id, overrides = {}) {
   }
 }
 
-test("opening a 35-conversation library fetches no bodies; selected history uses replaceable bounded pages", async () => {
+test("opening a 35-conversation library loads no bodies; scrolling merges bounded older/newer windows", async () => {
   const saved = Array.from({ length: 35 }, (_, index) => row(`saved-${index}`, { transcript: [], lastSequence: 7323, historyLoaded: false }))
   const events = Array.from({ length: 7323 }, (_, index) => ({ type: "assistantMessage", sequence: index + 1, attemptId: "saved-0", text: `Message ${index + 1}` }))
   const f = await store({ rows: saved, history: { "saved-0": events }, workspaces: {}, warnings: [] })
@@ -65,15 +77,19 @@ test("opening a 35-conversation library fetches no bodies; selected history uses
   assert.equal(recent.transcript.at(-1).sequence, 7323)
   assert.ok(f.module.useAgentThreads().filter(row => row.executionId !== "saved-0").every(row => row.transcript.length === 0))
   await f.module.loadEarlierAgentHistory("saved-0")
-  assert.equal(recent.historyPage.transcript.length, 200)
-  assert.equal(recent.historyPage.transcript.at(-1).sequence, 7123)
-  await f.module.loadEarlierAgentHistory("saved-0")
-  assert.equal(recent.historyPage.transcript.length, 200)
-  assert.equal(recent.historyPage.transcript.at(-1).sequence, 6923)
-  assert.equal(recent.transcript.length, 200, "older pages must not accumulate in the live transcript")
-  f.module.clearAgentHistoryPage("saved-0")
-  assert.equal(recent.historyPage, undefined)
+  assert.equal(recent.transcript.length, 400)
+  assert.equal(recent.transcript[0].sequence, 6924)
   assert.equal(recent.transcript.at(-1).sequence, 7323)
+  await f.module.loadEarlierAgentHistory("saved-0")
+  assert.equal(recent.transcript.length, 400, "the scroll window must stay bounded")
+  assert.equal(recent.transcript[0].sequence, 6724)
+  assert.equal(recent.transcript.at(-1).sequence, 7123)
+  assert.equal(recent.historyAfter, 7123)
+  await f.module.loadLaterAgentHistory("saved-0")
+  assert.equal(recent.transcript.length, 400)
+  assert.equal(recent.transcript[0].sequence, 6924)
+  assert.equal(recent.transcript.at(-1).sequence, 7323)
+  assert.equal(recent.historyAfter, null)
   assert.equal(recent.meta.draft, "Unsent local message")
 })
 
@@ -102,7 +118,7 @@ test("a stale disk page cannot overwrite a newer event, even if a snapshot repla
   const loading = f.module.loadAgentHistory("live")
   await f.module.refreshAgentThread("live")
   f.callbacks.get("live")({ type: "assistantChunk", attemptId: "live", sequence: 1, text: "New live output" })
-  finish({ executionId: "live", lastSequence: 0, transcript: [], before: null, total: 0, latest: true })
+  finish({ executionId: "live", lastSequence: 0, transcript: [], before: null, after: null, total: 0, latest: true })
   await loading
   const current = f.module.useAgentThreads()[0]
   assert.equal(current.transcript.at(-1).text, "New live output")
@@ -117,7 +133,7 @@ test("history failures are visible and retryable without losing drafts or leavin
   let current = f.module.useAgentThreads()[0]
   assert.match(current.historyError, /Disk unavailable/)
   assert.equal(current.historyLoading, false)
-  f.bridge.agentHistory = async () => ({ executionId: "saved", lastSequence: 1, transcript: [{ type: "assistantMessage", sequence: 1, text: "Recovered" }], before: null, total: 1, latest: true })
+  f.bridge.agentHistory = async () => ({ executionId: "saved", lastSequence: 1, transcript: [{ type: "assistantMessage", sequence: 1, text: "Recovered" }], before: null, after: null, total: 1, latest: true })
   await f.module.loadAgentHistory("saved")
   current = f.module.useAgentThreads()[0]
   assert.equal(current.historyError, "")
@@ -126,14 +142,16 @@ test("history failures are visible and retryable without losing drafts or leavin
   assert.equal(current.meta.draft, "Unsent local message")
 })
 
-test("leaving an older page cancels a late page response instead of reopening it", async () => {
-  const f = await store({ rows: [row("saved")], workspaces: {}, warnings: [] })
-  let finish
-  f.bridge.agentHistory = () => new Promise(resolve => { finish = resolve })
-  const loading = f.module.loadAgentHistory("saved", 20)
-  f.module.clearAgentHistoryPage("saved")
-  finish({ executionId: "saved", lastSequence: 1, transcript: [], before: null, total: 20, latest: false })
-  await loading
-  assert.equal(f.module.useAgentThreads()[0].historyPage, undefined)
-  assert.equal(f.module.useAgentThreads()[0].historyLoading, false)
+test("historical changes are indexed independently and live edits appear without another prompt", async () => {
+  const indexed = [{ id: "old-tool:src/old.ts", path: "src/old.ts", toolCallId: "old-tool", outcome: "completed" }]
+  const f = await store({ rows: [row("saved", { transcript: [], historyLoaded: false })], liveExecutions: ["saved"], changeHistory: { saved: indexed }, workspaces: {}, warnings: [] })
+  await f.module.loadAgentChangeHistory("saved")
+  await f.module.subscribeRemoteAgent("saved")
+  const current = f.module.useAgentThreads()[0]
+  assert.deepEqual(current.changeSummaries.map(item => item.path), ["src/old.ts"])
+  f.callbacks.get("saved")({ type: "toolStart", sequence: 2, attemptId: "saved", toolCallId: "live-tool", toolKind: "edit", title: "Edit file", status: "in_progress", rawInput: { path: "src/live.ts" } })
+  assert.deepEqual(current.changeSummaries.map(item => item.path), ["src/old.ts", "src/live.ts"])
+  assert.equal(current.transcript.some(event => event.type === "userMessage"), false)
+  f.callbacks.get("saved")({ type: "toolUpdate", sequence: 3, attemptId: "saved", toolCallId: "live-tool", status: "completed" })
+  assert.equal(current.changeSummaries.find(item => item.path === "src/live.ts").outcome, "completed")
 })
