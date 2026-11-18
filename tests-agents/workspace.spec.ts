@@ -251,7 +251,7 @@ test("tools, supplied diffs, plan and the full command catalog are accessible", 
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
   await expect(page.locator(".agent-message-assistant h2")).toHaveText("Reconnect behavior")
-  await page.locator(".agent-work-group > summary").click()
+  await page.locator(".agent-activity-rail").last().click()
   await page.locator(".agent-tool").first().locator("summary").first().click()
   await expect(page.locator(".agent-tool-body").first()).toContainText("connectSession(id)")
   await page.locator(".agent-tool").nth(1).locator("summary").first().click()
@@ -1248,9 +1248,12 @@ test("failed and pending edits remain inspectable without counting as completed 
   await connect(page)
   await page.evaluate(() => {
     const h = (window as any).agentFixture
+    h.emit(h.current, { type: "userMessage", text: "Inspect these files" })
     h.emit(h.current, { type: "toolStart", toolCallId: "failed-edit", status: "failed", content: [{ type: "diff", path: "src/failed.ts", oldText: "", newText: "export const failed = true;\n" }] })
     h.emit(h.current, { type: "toolStart", toolCallId: "pending-edit", status: "in_progress", content: [{ type: "diff", path: "src/pending.ts", oldText: "", newText: "export const pending = true;\n" }] })
   })
+  await expect(page.locator(".agent-change-summary")).toHaveCount(0)
+  await page.evaluate(() => (window as any).agentFixture.finish())
   await expect(page.getByRole("button", { name: "Review 2 reported files", exact: true })).toContainText("2 edits not completed")
   await expect(page.locator(".agent-change-summary .agent-change-numbers")).toHaveCount(0)
   await page.getByRole("button", { name: "Review changes", exact: true }).click()

@@ -406,9 +406,17 @@
 .agent-activity-block.is-failed .agent-activity-rail > span { background: var(--ag-red); }
 .agent-activity-event-list { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding-top: 3px; }
 .agent-activity-reasoning { min-width: 0; padding: 4px 0 7px; }
+.agent-activity-reasoning > summary { display: flex; align-items: center; gap: 8px; min-height: 32px; list-style: none; cursor: pointer; }
+.agent-activity-reasoning > summary::-webkit-details-marker { display: none; }
+.agent-activity-reasoning > summary > svg { flex: 0 0 auto; color: var(--ag-faint); transition: transform 160ms var(--ag-ease); }
+.agent-activity-reasoning[open] > summary > svg { transform: rotate(90deg); }
+.agent-activity-reasoning > summary h3 { margin: 0; }
+.agent-activity-reasoning-body { padding: 3px 0 6px 20px; }
 .agent-activity-reasoning h3 { margin: 0 0 4px; color: var(--ag-dim); font-size: 10px; font-weight: 500; }
 .agent-tool--inline { min-width: 0; margin: 0; }
 .agent-tool-heading { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--ag-dim); font-size: 11px; }
+.agent-tool--inline > summary { list-style: none; cursor: pointer; }
+.agent-tool--inline > summary::-webkit-details-marker { display: none; }
 .agent-tool-heading > svg { flex: 0 0 auto; color: var(--ag-faint); }
 .agent-tool--inline .agent-tool-label { flex-wrap: wrap; gap: 2px 8px; }
 .agent-tool--inline .agent-tool-label > span { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
