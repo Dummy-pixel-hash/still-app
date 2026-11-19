@@ -1,6 +1,6 @@
 # AG-12 — Subagent integration and direct chat
 
-Updated: **2026-11-10**. Status: **IN PROGRESS — create/resume fix and parent-model guide implemented locally; Windows verification pending**.
+Updated: **2026-11-19**. Status: **IN PROGRESS — server-owned coordination implemented and fixture/native tested; real-provider and updated packaged-platform acceptance pending**.
 Feature status and delivery order live in the [Agents tracker](README.md).
 The implementation checklist is in [AG-12](agents-roadmap.md#ag-12-subagent-integration).
 
@@ -16,14 +16,38 @@ reattach; the app handles `list`, cross-agent `spawn`, `inspect`, queued `guide`
 The child remains directly openable/messageable in the UI, and parent guidance is
 serialized with `Parent agent` provenance. Cancellation pauses queued parent guidance
 and reports a request rather than claiming confirmed completion. Children cannot spawn
-children; a shared-folder limit of three concurrent children is enforced in the app.
+children; protocol-v4 workers enforce the three-active-child limit through the shared
+remote catalog, while legacy clients retain their app-side guard.
 
 The shared tool description/schema now carries the model-facing delegation guide. A
 parent can prepare a child, inspect its exact model/effort/mode choices, then spawn it
 using validated IDs. New child IDs now select local-history creation unless the request
 also supplies an explicit provider session ID for resume; a native unit test covers
-that distinction. These corrections are present locally but still need a fresh Windows
-ARM64 workflow and real-provider exercise.
+that distinction. Those corrections were pushed as `f747b18` and its Windows ARM64
+workflow passed. That build predates the server-owned coordination checkpoint below;
+real-provider exercise and a packaged build of the newer implementation remain open.
+
+### Server-owned coordination checkpoint — 2026-11-19
+
+`src-tauri/agent-host/subagents.mjs` owns parent tool dispatch and durable child
+identities, receipts, settings selection, cancellation fences and guidance queues.
+The coordinator works without an attached desktop or phone. New server-managed
+spawns require an existing prepared `childId`; replaying an operation cannot silently
+create another paid task. Human-created children are discovered through the same
+account-private catalog and share its capacity boundary.
+
+The dependency set includes protocol-v4 subscribers, verified-SSH catalog discovery,
+native draft-preserving projection and the desktop conversation index so the user
+can open the same child rather than a replacement. Remote catalog locking requires
+Node.js 20+ and `flock` from util-linux. The catalog's notification outbox stays opt-in;
+this checkpoint does not supply a deployed relay or Android push delivery.
+
+Verification on the isolated commit tree: 224 Node tests passed; 103 Rust tests
+passed with three environment-dependent integrations ignored; frontend production
+build and all three targeted subagent browser tests passed. Node coordination tests
+use synthetic provider peers, not real models.
+This is not full AG-12 acceptance: the live cross-provider/direct-chat/reconnect
+journey and the preparation refinement below remain open.
 
 **Model and mode controls (2026-11-09):** parents can call `prepare` to start a child
 without sending its task and receive that provider's exact model, effort/reasoning, and
@@ -278,10 +302,10 @@ event bus, or dependency solely for this feature.
   operations. A resumed execution must preserve the conversation relationship.
 - Keep execution authority remote so closing a chat, switching projects, or losing
   SSH does not terminate already-running children. Closing a view is not cancellation.
-- Keep one controlling submission route per child. The current supervisor has a
-  single controlling attachment: opening a child in the UI must not take ownership
-  away from the parent coordinator, or vice versa. Reuse/proxy the same authority
-  for observation, queued messages, permissions, and cancellation.
+- Keep one serialized submission lane per child. Protocol-v4 workers accept concurrent
+  UI/coordinator subscribers without displacing either connection; legacy workers
+  retain their single controlling attachment. Opening a child must never steal
+  execution ownership or authorize the parent to answer user-owned requests.
 - Make spawn and message retries idempotent with durable operation identities.
   Reconcile an uncertain acknowledgement before retrying; do not create duplicates.
 - Order/deduplicate events by child, execution, and source operation/journal identity.

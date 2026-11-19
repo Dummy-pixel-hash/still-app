@@ -1,6 +1,6 @@
 import type { ConnectionStatus } from "../types"
 import type { OrbBridge } from "../orb/types"
-import type { AgentAvailability, AgentCatalog, CustomAgent, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot } from "../agents/types"
+import type { AgentAvailability, AgentCatalog, CustomAgent, AgentLaunchOptions, AgentLibrary, AgentThreadEvent, AgentThreadSnapshot, SharedLibraryPage, SharedOperation, SharedOperationResult } from "../agents/types"
 import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../agents/git"
 import type { ConversationMeta } from "../agents/workspace"
 
@@ -161,6 +161,8 @@ export interface NativeBridge extends OrbBridge {
   agentHistoryWindow(conversationId: string, before?: number, after?: number): Promise<import("../agents/types").AgentHistoryPage>
   agentChangeHistory(conversationId: string): Promise<import("../agents/types").AgentChangeHistory>
   agentChangeDetails(conversationId: string, path: string): Promise<import("../agents/types").AgentChangeDetails>
+  agentRemoteLibrary(nativeSessionId: string, after?: string): Promise<SharedLibraryPage>
+  agentSharedOperation(nativeSessionId: string, input: SharedOperation): Promise<SharedOperationResult>
   agentFlush(): Promise<void>
   agentSaveMetadata(conversationId: string, meta: ConversationMeta): Promise<void>
   agentSaveWorkspace(key: string, value: object): Promise<void>

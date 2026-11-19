@@ -118,6 +118,8 @@ pub fn run() {
             agent::still_agent_attach,
             agent::still_agent_check,
             agent::still_agent_catalog,
+            agent::still_agent_remote_library,
+            agent::still_agent_shared_operation,
             agent::still_agent_resolve_folder,
             agent::still_agent_send,
             agent::still_agent_revert,

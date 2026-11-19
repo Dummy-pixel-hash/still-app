@@ -139,6 +139,130 @@ test("remote worker survives transport death and replays offline output without 
   assert.match((await second.wait(frame=>frame.id===102)).error.message,/already submitted/)
 }))
 
+test("continuity subscribers coexist and see the same accepted prompt and result", {timeout:15000}, () => fixture(async({make,directory}) => {
+  const desktop = make({continuity:true,conversationId:"shared-task"}); await initialize(desktop)
+  const before = JSON.parse(await readFile(join(directory,"state.json"),"utf8"))
+  const phone = make({continuity:true,create:false}); await initialize(phone)
+  await phone.wait(frame => frame.method === "_still/caught_up")
+  assert.equal(desktop.process.exitCode,null)
+  const prompt = {jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"Continue from phone"}],_meta:{messageId:"phone-message",expectedConfigGeneration:0}}}
+  phone.send(prompt)
+  const accepted = await phone.wait(frame => frame.id===101 && frame.result?.accepted)
+  assert.equal(accepted.result.messageId,"phone-message")
+  for (const client of [desktop,phone]) {
+    const record = await client.wait(frame => frame.method==="_still/prompt_accepted")
+    assert.equal(record.params.text,"Continue from phone")
+    await client.wait(frame => frame.method==="_still/turn_finished")
+  }
+  phone.send({...prompt,id:102})
+  await phone.wait(frame => frame.id===102 && frame.result?.accepted)
+  assert.equal(phone.frames.filter(frame => frame.method==="_still/prompt_accepted").length,1)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/replaced"),false)
+  const after = JSON.parse(await readFile(join(directory,"state.json"),"utf8"))
+  assert.equal(before.childPid,after.childPid)
+  await desktop.close()
+  phone.send({...prompt,id:103,params:{...prompt.params,_meta:{...prompt.params._meta,messageId:"phone-next"}}})
+  await phone.wait(frame=>frame.id===103 && frame.result?.accepted)
+  await phone.wait(frame=>frame.method==="_still/prompt_accepted" && frame.params.messageId==="phone-next")
+}))
+
+test("simultaneous continuity sends reserve one turn without RPC ID collisions", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  const prompt = id=>({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"build"}],_meta:{messageId:id,expectedConfigGeneration:0}}})
+  desktop.send(prompt("desktop"));phone.send(prompt("phone"))
+  const replies=await Promise.all([desktop.wait(frame=>frame.id===101),phone.wait(frame=>frame.id===101)])
+  assert.equal(replies.filter(frame=>frame.result?.accepted).length,1)
+  assert.equal(replies.filter(frame=>frame.error?.message.includes("busy")).length,1)
+  await desktop.wait(frame=>frame.method==="_still/turn_finished")
+  assert.equal(desktop.frames.filter(frame=>frame.method==="_still/prompt_accepted").length,1)
+}))
+
+test("either device can answer a shared request and a competing answer is rejected", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"approval"}],_meta:{messageId:"approval-shared",expectedConfigGeneration:0}}})
+  await desktop.wait(frame=>frame.method==="session/request_permission")
+  const approval = await phone.wait(frame=>frame.method==="session/request_permission")
+  phone.send({jsonrpc:"2.0",id:"approval-1",result:{outcome:{outcome:"selected",optionId:"yes"}},_meta:{expectedRequestIndex:approval._still.index,operationId:"phone-answer"}})
+  await desktop.wait(frame=>frame.method==="_still/request_outcome" && frame.params.outcome==="approved")
+  await phone.wait(frame=>frame.method==="_still/request_outcome")
+  desktop.send({jsonrpc:"2.0",id:"approval-1",result:{outcome:{outcome:"selected",optionId:"no"}}})
+  assert.match((await desktop.wait(frame=>frame.id==="approval-1" && frame.error)).error.message,/already been answered/)
+  assert.equal(phone.frames.filter(frame=>frame.method==="_still/request_outcome").length,1)
+}))
+
+test("fresh continuity subscriber replays original user text and offline outcomes", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true,agentId:"pi"});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"original user prompt"}],_meta:{messageId:"replayed-message",expectedConfigGeneration:0}}})
+  await desktop.wait(frame=>frame.result?.accepted)
+  await desktop.close()
+  await new Promise(resolve=>setTimeout(resolve,180))
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  const prompt=await phone.wait(frame=>frame.method==="_still/prompt_accepted")
+  assert.equal(prompt.params.text,"original user prompt")
+  assert.equal(prompt.params.text.includes("Still conversation title"),false)
+  await phone.wait(frame=>frame.method==="_still/turn_finished")
+}))
+
+test("continuity model changes fan out and stale configuration generations cannot send", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  phone.send({jsonrpc:"2.0",id:101,method:"session/set_config_option",params:{sessionId:"server-session",configId:"model",value:"b",_meta:{expectedConfigGeneration:0}}})
+  await phone.wait(frame=>frame.id===101&&frame.result?.configOptions)
+  await desktop.wait(frame=>frame.params?.update?.sessionUpdate==="config_option_update")
+  await desktop.wait(frame=>frame.method==="_still/config_generation"&&frame.params.configGeneration===1)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"stale prompt"}],_meta:{messageId:"stale-config",expectedConfigGeneration:0}}})
+  assert.match((await desktop.wait(frame=>frame.id===101&&frame.error)).error.message,/Settings changed/)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/prompt_accepted"),false)
+}))
+
+test("stale request boundaries and unoffered approvals cannot reach the provider", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"approval"}],_meta:{messageId:"fenced-approval",expectedConfigGeneration:0}}})
+  const request=await desktop.wait(frame=>frame.method==="session/request_permission")
+  desktop.send({jsonrpc:"2.0",id:request.id,result:{outcome:{outcome:"selected",optionId:"yes"}},_meta:{expectedRequestIndex:request._still.index-1}})
+  assert.match((await desktop.wait(frame=>frame.id===request.id&&frame.error)).error.message,/older request/)
+  desktop.send({jsonrpc:"2.0",id:request.id,result:{outcome:{outcome:"selected",optionId:"invented"}},_meta:{expectedRequestIndex:request._still.index}})
+  assert.match((await desktop.wait(frame=>frame.id===request.id&&frame.error?.message.includes("permission option"))).error.message,/permission option/)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/request_outcome"),false)
+  desktop.send({jsonrpc:"2.0",id:request.id,result:{outcome:{outcome:"selected",optionId:"no"}},_meta:{expectedRequestIndex:request._still.index,operationId:"actual-answer"}})
+  const outcome=await desktop.wait(frame=>frame.method==="_still/request_outcome")
+  assert.equal(outcome.params.operationId,"actual-answer")
+}))
+
+test("cancel targets the observed turn and never cancels a newer prompt", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  const prompt = messageId=>({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"build"}],_meta:{messageId,expectedConfigGeneration:0}}})
+  desktop.send(prompt("old-turn"))
+  const accepted=await desktop.wait(frame=>frame.method==="_still/prompt_accepted")
+  await desktop.wait(frame=>frame.method==="_still/turn_finished")
+  desktop.send({...prompt("next-turn"),id:102})
+  await desktop.wait(frame=>frame.method==="_still/prompt_accepted"&&frame.params.messageId==="next-turn")
+  desktop.send({jsonrpc:"2.0",id:103,method:"session/cancel",params:{sessionId:"server-session",_meta:{promptId:accepted.params.promptId}}})
+  assert.match((await desktop.wait(frame=>frame.id===103&&frame.error)).error.message,/already finished/)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/cancel_requested"),false)
+}))
+
+test("an ended continuity worker can replay shared history without starting another provider", {timeout:15000}, () => fixture(async({make,directory}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"retained prompt"}],_meta:{messageId:"ended-history",expectedConfigGeneration:0}}})
+  await desktop.wait(frame=>frame.method==="_still/turn_finished")
+  const original=JSON.parse(await readFile(join(directory,"state.json"),"utf8"))
+  const stop=make({create:false,continuity:true})
+  await initialize(stop)
+  stop.send({jsonrpc:"2.0",id:901,method:"_still/shutdown"})
+  await stop.wait(frame=>frame.id===901&&frame.result?.closed)
+  await waitForRemoved(join(directory,"worker.lock"))
+  const phone=make({create:false,continuity:true,requireContinuity:true})
+  await initialize(phone)
+  const record=await phone.wait(frame=>frame.method==="_still/prompt_accepted")
+  assert.equal(record.params.text,"retained prompt")
+  const caughtUp=await phone.wait(frame=>frame.method==="_still/caught_up")
+  assert.equal(caughtUp.params.ended,true)
+  assert.equal(JSON.parse(await readFile(join(directory,"state.json"),"utf8")).childPid,original.childPid)
+}))
+
 test("a missing worker reports structured unavailability without creating a replacement",{timeout:15000},()=>fixture(async({make,directory})=>{
   const client=make({create:false})
   const frame=await client.wait(frame=>frame.method==="_still/unavailable")
@@ -157,7 +281,7 @@ test("provider exit reports recoverable worker loss to both the current transpor
   assert.equal((await second.wait(frame=>frame.method==="_still/unavailable")).params.executionId,"agent-fixture")
 }))
 
-test("explicit recovery after worker death resumes the same provider session and retains Todos without replaying prompts",{timeout:20000},()=>fixture(async({make,directory,config})=>{
+test("explicit upgrade after legacy worker death resumes the same provider session and retains Todos without replaying prompts",{timeout:20000},()=>fixture(async({make,directory,config})=>{
   const previousId="agent-before-restart", nextId="agent-after-restart", conversationId="restart-conversation"
   const previousDirectory=join(directory,previousId), nextDirectory=join(directory,nextId)
   const first=make({directory:previousDirectory,executionId:previousId,conversationId})
@@ -168,11 +292,12 @@ test("explicit recovery after worker death resumes the same provider session and
   first.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"already submitted"}],_meta:{messageId:"old-message"}}})
   await first.wait(frame=>frame.params?.update?.content?.text==="Started")
   const state=JSON.parse(await readFile(join(previousDirectory,"state.json"),"utf8"))
+  assert.equal(state.version,3)
   process.kill(-state.pid,"SIGKILL")
   await first.close()
   const missing=make({directory:previousDirectory,executionId:previousId,conversationId,create:false})
   await missing.wait(frame=>frame.method==="_still/unavailable")
-  const replacement=make({directory:nextDirectory,executionId:nextId,conversationId,recoverFrom:{executionId:previousId,agentSessionId:session.result.sessionId}})
+  const replacement=make({directory:nextDirectory,executionId:nextId,conversationId,continuity:true,recoverFrom:{executionId:previousId,agentSessionId:session.result.sessionId}})
   const resumed=await initialize(replacement,session.result.sessionId)
   assert.equal(resumed.result.sessionId,session.result.sessionId)
   assert.equal(resumed.result.resumed,true)
@@ -181,7 +306,9 @@ test("explicit recovery after worker death resumes the same provider session and
   assert.deepEqual(restored.items,added.items)
   assert.equal((await readFile(join(nextDirectory,"events.jsonl"),"utf8")).includes("Started"),false)
   assert.equal((await readFile(join(previousDirectory,"events.jsonl"),"utf8")).includes("Started"),true)
-  assert.notEqual(JSON.parse(await readFile(join(nextDirectory,"state.json"),"utf8")).pid,state.pid)
+  const upgraded=JSON.parse(await readFile(join(nextDirectory,"state.json"),"utf8"))
+  assert.notEqual(upgraded.pid,state.pid)
+  assert.equal(upgraded.version,4)
 }))
 
 test("a pending question returns after reattach even when its original cursor was saved",{timeout:15000},()=>fixture(async({make})=>{
@@ -410,9 +537,52 @@ test("a clean shutdown releases Todo ownership before a provider has ever been s
     await new Promise(resolve=>setTimeout(resolve,25))
   }
   assert.equal(JSON.parse(await readFile(ownerPath,"utf8")).executionId,config.executionId)
+  // Wait for the first transport's attach acknowledgement before asking a
+  // second transport to stop it. Otherwise the first can attach after the stop
+  // transport and legitimately replace it under the legacy v3 protocol.
+  first.send({jsonrpc:"2.0",id:500,method:"_still/status",params:{}})
+  await first.wait(frame=>frame.id===500)
   const stop=attach({...config,create:false},"stop")
   try {await stop.wait(frame=>frame.id==="close");await waitForRemoved(ownerPath)}
   finally {await stop.close();await first.close()}
+}))
+
+test("prompt receipt lookup resolves acknowledgement loss without resubmitting", {timeout:15000}, () => fixture(async({make}) => {
+  const first=make({continuity:true});await initialize(first)
+  first.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"record this once"}],_meta:{messageId:"lost-ack",expectedConfigGeneration:0}}})
+  await first.wait(frame=>frame.method==="_still/prompt_accepted")
+  await first.close()
+  const next=make({continuity:true,create:false});await initialize(next)
+  next.send({jsonrpc:"2.0",id:700,method:"_still/prompt_receipt",params:{messageId:"lost-ack"}})
+  assert.equal((await next.wait(frame=>frame.id===700)).result.status,"accepted")
+  next.send({jsonrpc:"2.0",id:701,method:"_still/prompt_receipt",params:{messageId:"never-sent"}})
+  assert.equal((await next.wait(frame=>frame.id===701)).result.status,"notAccepted")
+  assert.equal(next.frames.filter(frame=>frame.method==="_still/prompt_accepted"&&frame.params.messageId==="lost-ack").length,1)
+}))
+
+test("old client attachment is refused without displacing a shared worker's subscribers", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  const legacy=make({continuity:false,create:false})
+  const closed = new Promise(resolve => legacy.process.once("close", resolve))
+  await closed
+  await legacy.close()
+  desktop.send({jsonrpc:"2.0",id:702,method:"_still/status",params:{}})
+  assert.equal((await desktop.wait(frame=>frame.id===702)).result.busy,false)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/replaced"),false)
+}))
+
+test("new subscriber sees an answered request and its outcome in the shared transcript", {timeout:15000}, () => fixture(async({make}) => {
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"approval"}],_meta:{messageId:"answered-request-history",expectedConfigGeneration:0}}})
+  const request=await desktop.wait(frame=>frame.method==="session/request_permission")
+  desktop.send({jsonrpc:"2.0",id:request.id,result:{outcome:{outcome:"selected",optionId:"no"}},_meta:{expectedRequestIndex:request._still.index,operationId:"desktop-answer"}})
+  await desktop.wait(frame=>frame.method==="_still/request_outcome")
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  const creation=await phone.wait(frame=>frame.method==="session/request_permission")
+  const outcome=await phone.wait(frame=>frame.method==="_still/request_outcome")
+  assert.equal(creation.id,outcome.params.requestId)
+  assert.equal(outcome.params.outcome,"rejected")
+  assert.ok(outcome._still.index>creation._still.index)
 }))
 
 test("only the authenticated agent tool can change the revisioned conversation todo list",{timeout:15000},()=>fixture(async({make})=>{

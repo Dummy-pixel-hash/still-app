@@ -230,6 +230,14 @@ pub struct Snapshot {
     #[serde(default)]
     pub persistent: bool,
     #[serde(default)]
+    pub continuity: bool,
+    #[serde(default)]
+    pub remote_imported: bool,
+    #[serde(default)]
+    pub config_generation: u64,
+    #[serde(default)]
+    pub pending_message_id: Option<String>,
+    #[serde(default)]
     pub remote_cursor: u64,
     #[serde(default)]
     pub prompt_id: Option<Value>,
@@ -256,7 +264,7 @@ impl Snapshot {
             transcript: Vec::new(), config_options: Vec::new(), commands: Vec::new(), pending_input: None, pending_permission: None,
             history_capabilities: self.history_capabilities.clone(),
             active_message_ids: None,
-            persistent: self.persistent, remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
+            persistent: self.persistent, continuity: self.continuity, remote_imported: self.remote_imported, config_generation: self.config_generation, pending_message_id: self.pending_message_id.clone(), remote_cursor: self.remote_cursor, prompt_id: self.prompt_id.clone(), recovery_required: self.recovery_required,
             recovery_reason: self.recovery_reason,
             todos: self.todos.clone(),
             todo_sync: self.todo_sync.clone(),
@@ -309,6 +317,8 @@ struct Thread {
     awaiting_catch_up: bool,
     capability_remote_cursor: u64,
     subagent_requests: HashMap<String, Instant>,
+    prompt_delivery: Option<(u64, oneshot::Sender<Result<(), String>>)>,
+    cancel_delivery: Option<(u64, oneshot::Sender<Result<(), String>>)>,
 }
 struct PendingHistory {
     request_id: u64,
@@ -330,6 +340,7 @@ struct PendingConfig {
 }
 struct PendingResponse {
     id: Value,
+    operation_id: String,
     outcome: Value,
     reply: oneshot::Sender<Result<(), String>>,
 }
@@ -1275,7 +1286,120 @@ pub struct FolderArgs { native_session_id: String, cwd: String }
 #[tauri::command]
 pub async fn still_agent_resolve_folder(args: FolderArgs) -> Result<String, StillError> {
     if args.cwd.trim().is_empty() { return Err(StillError::friendly("agent_project_required", "Enter the remote project folder.")); }
-    remote_cwd(&args.native_session_id, &args.cwd).await
+    let cwd = remote_cwd(&args.native_session_id, &args.cwd).await?;
+    shared_library_call(&args.native_session_id, json!({"method":"project.register","cwd":cwd})).await?;
+    Ok(cwd)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteLibraryArgs { native_session_id: String, after: Option<String> }
+
+async fn shared_library_call(native_session_id: &str, request: Value) -> Result<Value, StillError> {
+    let input = serde_json::to_vec(&request).map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
+    if input.len() > 1024 * 1024 { return Err(StillError::friendly("agent_shared_library", "Shared-library request exceeded 1 MiB.")); }
+    let script = login_command(&format!("exec node --input-type=module -e {} shared-call", quote(include_str!("../agent-host/shared-library.mjs"))));
+    let mut channel = ssh_worker::open_agent_exec(native_session_id, &script).await.map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
+    for chunk in input.chunks(16 * 1024) {
+        channel.data_bytes(chunk.to_vec()).await.map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
+    }
+    channel.eof().await.map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
+    let output = tokio::time::timeout(Duration::from_secs(20), collect_exec(&mut channel, 4 * 1024 * 1024)).await;
+    let _ = channel.close().await;
+    let output = output.map_err(|_| StillError::friendly("agent_shared_library", "Shared-library request timed out. Retry with the same operation identity."))?
+        .map_err(|e| StillError::friendly("agent_shared_library", e))?;
+    let output = String::from_utf8(output).map_err(|_| StillError::friendly("agent_shared_library", "Invalid shared-library response encoding."))?;
+    if let Some(error) = output.lines().find_map(|line| line.strip_prefix("STILL_SHARED_ERROR:")) {
+        let message: String = serde_json::from_str(error).unwrap_or_else(|_| "The shared catalog rejected this operation. The original data was preserved.".into());
+        return Err(StillError::friendly("agent_shared_library", message));
+    }
+    let line = output.lines().find_map(|line| line.strip_prefix("STILL_SHARED:")).ok_or_else(|| StillError::friendly("agent_shared_library", "The server did not return its shared library."))?;
+    serde_json::from_str(line).map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedOperationArgs { native_session_id: String, input: Value }
+
+#[tauri::command]
+pub async fn still_agent_shared_operation(app: AppHandle, state: State<'_, AppState>, args: SharedOperationArgs) -> Result<Value, StillError> {
+    let owner = state.sessions.lock().await.get(&args.native_session_id).cloned().ok_or_else(|| StillError::friendly("agent_session", "Connect and verify this account before syncing changes."))?;
+    let server = owner.lock().await;
+    if server.status != SessionStatus::Live { return Err(StillError::friendly("agent_session", "The account is offline. Your change remains saved on this device.")); }
+    let host_key = json!([server.config.host.to_lowercase(), server.config.port, server.config.username]).to_string();
+    drop(server);
+    let result = shared_library_call(&args.native_session_id, json!({"method":"mutate","input":args.input})).await?;
+    if let Some(current) = result.get("current") {
+        let id = current["conversationId"].as_str().ok_or_else(|| StillError::friendly("agent_shared_library", "The shared response had no conversation identity."))?;
+        agent_store::apply_shared_metadata(&app, id.to_owned(), host_key, current.clone()).await?;
+    }
+    Ok(result)
+}
+
+/// Discover another device's executions over verified SSH without attaching or
+/// changing their processes. Legacy workers are visible but never taken over.
+#[tauri::command]
+pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppState>, args: RemoteLibraryArgs) -> Result<Value, StillError> {
+    let owner = state.sessions.lock().await.get(&args.native_session_id).cloned().ok_or_else(|| StillError::friendly("agent_session", "Connect and verify this server first."))?;
+    let server = owner.lock().await;
+    if server.status != SessionStatus::Live { return Err(StillError::friendly("agent_session", "Wait for the SSH connection.")); }
+    let host_key = json!([server.config.host.to_lowercase(), server.config.port, server.config.username]).to_string();
+    let local_session_id = format!("agents:{host_key}");
+    drop(server);
+    let mut page = shared_library_call(&args.native_session_id, json!({"method":"list","options":{"after":args.after.unwrap_or_default(),"limit":100}})).await?;
+    if page["protocolVersion"] != 4 || page["serverAccountId"].as_str().and_then(|id| uuid::Uuid::parse_str(id).ok()).is_none()
+        || page["rows"].as_array().is_none_or(|rows| rows.len() > 100) {
+        return Err(StillError::friendly("agent_library_remote", "The remote library identity or page limits were invalid."));
+    }
+    agent_store::bind_shared_account(&app, host_key.clone(), page["serverAccountId"].as_str().unwrap_or_default().to_owned(), page["revision"].clone(), page["projects"].clone()).await?;
+    let remote_rows = page["rows"].as_array().ok_or_else(|| StillError::friendly("agent_library_remote", "Invalid remote conversation page."))?.clone();
+    let mut imported = Vec::new();
+    for remote in remote_rows {
+        let id = remote["conversationId"].as_str().ok_or_else(|| StillError::friendly("agent_library_remote", "Missing conversation ID"))?;
+        if remote["conversationId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 100 || id.chars().any(char::is_control))
+            || remote["executionId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 160 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+            || remote["cwd"].as_str().is_none_or(|cwd| !cwd.starts_with('/') || cwd.len() > 4096 || cwd.chars().any(char::is_control)) {
+            return Err(StillError::friendly("agent_library_remote", "A remote conversation had an invalid identity or project folder."));
+        }
+        let definition = definition(remote["agentId"].as_str().unwrap_or(""));
+        let Some(definition) = definition else { continue; };
+        let snapshot: Snapshot = serde_json::from_value(json!({
+            "conversationId":id,"hostKey":host_key,"executionId":remote["executionId"],"localSessionId":local_session_id,
+            "agentId":remote["agentId"],"agentName":definition.name,"agentSessionId":remote["agentSessionId"],
+            "parentConversationId":remote["parentConversationId"],"customAgent":remote["customAgent"],
+            "cwd":remote["cwd"],"state":"saved","transcript":[],"pendingPermission":null,"pendingInput":null,
+            "lastError":null,"lastSequence":0,"turnActive":false,"configOptions":[],"commands":[],
+            "persistent":true,"continuity":remote["protocolVersion"]==4,"remoteImported":true,"configGeneration":0,"remoteCursor":0,
+            "resumable":remote["resumable"],"historyCapabilities":{"revert":false,"retry":false}
+        })).map_err(|e| StillError::friendly("agent_library_remote", e.to_string()))?;
+        if let Some(previous) = remote["replacesExecutionId"].as_str() {
+            let retired = registry().lock().await.get(previous).cloned();
+            if let Some(retired) = retired {
+                let mut old = retired.lock().await;
+                if old.transport_active || old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required {
+                    return Err(StillError::friendly("agent_shared_migration", "The previous local execution still needs catch-up or reconciliation. It was not replaced."));
+                }
+                flush_history(&mut old).await?;
+                old.history_lease.take();
+                drop(old);
+                registry().lock().await.remove(previous);
+            }
+        }
+        if let Some(saved) = agent_store::import_remote_snapshot(&app, snapshot, remote.clone()).await? {
+            if remote["shared"].is_object() {
+                agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
+            }
+            imported.push(json!({"conversationId":id,"executionId":saved.execution_id,"cwd":saved.cwd,"protocolVersion":if saved.continuity {4} else {3},"shared":remote["shared"],"activityAt":remote["activityAt"]}));
+        }
+    }
+    page["rows"] = json!(imported);
+    page["hostKey"] = json!(host_key);
+    if let Some(deleted) = page["tombstones"].as_array() {
+        if deleted.len() > 4096 { return Err(StillError::friendly("agent_shared_library", "Too many shared tombstones.")); }
+        let ids: Vec<String> = deleted.iter().map(|value| value.as_str().map(str::to_owned).ok_or_else(|| StillError::friendly("agent_shared_library", "Invalid shared tombstone."))).collect::<Result<_, _>>()?;
+        agent_store::apply_shared_tombstones(&app, host_key, page["serverAccountId"].as_str().unwrap_or_default().to_owned(), ids).await?;
+    }
+    Ok(page)
 }
 
 #[derive(Deserialize)]
@@ -1325,13 +1449,16 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
     } else {
         (vec!["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), include_str!("../agent-host/bridge.mjs").to_owned()], json!({"STILL_AGENT_DRIVER":agent_id,"STILL_AGENT_EXECUTABLE":executable}))
     };
-    let mut payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env});
+    let mut payload = json!({"executionId":execution,"conversationId":conversation_id,"agentId":agent_id,"cwd":cwd,"create":create,"after":cursor,"command":command,"env":env,"continuity":true,"customAgent":custom});
     if let Some(parent) = parent_conversation_id { payload["parentConversationId"] = json!(parent); }
     if create {
         payload["source"] = json!(include_str!("../agent-host/supervisor.mjs"));
         payload["todosSource"] = json!(include_str!("../agent-host/todos.mjs"));
         payload["todoPiSource"] = json!(include_str!("../agent-host/todo-pi.mjs"));
         payload["recoverySource"] = json!(include_str!("../agent-host/recovery.mjs"));
+        payload["sharedLibrarySource"] = json!(include_str!("../agent-host/shared-library.mjs"));
+        payload["subagentsSource"] = json!(include_str!("../agent-host/subagents.mjs"));
+        payload["bridgeSource"] = json!(include_str!("../agent-host/bridge.mjs"));
         if let Some(previous) = recover_from { payload["recoverFrom"] = previous.clone(); }
         if let Some(seed) = todo_seed { payload["todoSeed"] = seed.clone(); }
         if let Some(runtime) = runtime {
@@ -1550,7 +1677,7 @@ pub async fn still_agent_start(
             todos: Some(initial_todos),
             todo_sync: Some(TodoSync { state: "stale".into(), reason: Some("Waiting for this execution to confirm the conversation Todo list.".into()) }),
         active_message_ids: None,
-        persistent: true, remote_cursor: 0, prompt_id: None, recovery_required: false,
+        persistent: true, continuity: false, remote_imported: false, config_generation: 0, pending_message_id: None, remote_cursor: 0, prompt_id: None, recovery_required: false,
         recovery_reason: None,
         capabilities: None,
     };
@@ -1593,6 +1720,8 @@ pub async fn still_agent_start(
         awaiting_catch_up: false,
         capability_remote_cursor: 0,
         subagent_requests: HashMap::new(),
+        prompt_delivery: None,
+        cancel_delivery: None,
     }));
     registry().lock().await.insert(execution_id, row.clone());
     tokio::spawn(run(channel, row, outbound_rx, cancel_rx, close_rx, cwd, bootstrap_data));
@@ -1620,6 +1749,12 @@ async fn run(
         if mark_todos_stale(&mut thread.snapshot) { emit_todos(&mut thread).await; }
         if let Some(pending) = thread.response_delivery.take() {
             let _ = pending.reply.send(Err("The agent connection closed before the response was sent.".into()));
+        }
+        if let Some((_, reply)) = thread.prompt_delivery.take() {
+            let _ = reply.send(Err("Prompt delivery could not be confirmed after the connection closed.".into()));
+        }
+        if let Some((_, reply)) = thread.cancel_delivery.take() {
+            let _ = reply.send(Err("Cancellation delivery could not be confirmed after the connection closed.".into()));
         }
     }
     drop(thread);
@@ -1661,6 +1796,44 @@ async fn run_stream(
     loop {
         tokio::select! {
           Some(reply) = close.recv() => {
+            if row.lock().await.snapshot.continuity {
+                let closing = async {
+                    send(channel, &json!({"jsonrpc":"2.0","id":"still-close","method":"_still/shutdown"})).await?;
+                    loop {
+                        let mut issue = None;
+                        let mut response = None;
+                        // Shutdown can lose a race with another device's prompt.
+                        // Keep the normal partial frame and project every shared event,
+                        // including events in the same packet as the rejection.
+                        while let Some(frame) = next_agent_frame(&mut buffer, &mut discarding_frame, &mut issue) {
+                            if frame["id"] == "still-close" && frame.get("method").is_none() {
+                                response = Some(if frame.pointer("/result/closed").and_then(Value::as_bool) == Some(true) { Ok(()) }
+                                    else { Err(frame.pointer("/error/message").and_then(Value::as_str).unwrap_or("The server did not acknowledge shutdown.").to_owned()) });
+                            } else if !handle_agent_frame(channel, &row, &cwd, &mut stage, &mut session_id, &mut permission, frame).await? {
+                                return Err("The conversation needs recovery; shutdown was not confirmed.".to_owned());
+                            }
+                        }
+                        if let Some(message) = issue { return Err(message.to_owned()); }
+                        if let Some(response) = response { return response; }
+                        match channel.wait().await {
+                            Some(ChannelMsg::Data { data }) => buffer.extend_from_slice(&data),
+                            Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return Err("The connection closed without acknowledging shutdown.".to_owned()),
+                            _ => {}
+                        }
+                    }
+                };
+                let result = tokio::time::timeout(Duration::from_secs(8), closing).await
+                    .unwrap_or_else(|_| Err("Shared worker shutdown acknowledgement timed out.".to_owned()));
+                if result.is_err() {
+                    // A second client may have started a turn before shutdown.
+                    // Do not interpret this rejection as a successful deletion.
+                    let _ = reply.send(result);
+                    continue;
+                }
+                let _ = channel.eof().await; let _ = channel.close().await;
+                let _ = reply.send(Ok(()));
+                return;
+            }
             if row.lock().await.snapshot.persistent {
                 if let Err(error) = send(&channel, &json!({"jsonrpc":"2.0","id":"still-close","method":"_still/shutdown"})).await {
                     let _ = reply.send(Err(format!("Could not stop the persistent worker: {error}"))); return;
@@ -1723,7 +1896,8 @@ async fn run_stream(
                 }
              }
             if let Some(session)=session_id.as_ref(){
-               if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await{fail(&row,&error).await;return;}
+                let prompt_id = row.lock().await.snapshot.prompt_id.clone();
+               if let Err(error)=send(&channel,&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session,"_meta":{"promptId":prompt_id}}})).await{fail(&row,&error).await;return;}
               let mut thread=row.lock().await;
               if thread.snapshot.turn_active {
                 thread.snapshot.state="working".into();
@@ -1815,14 +1989,26 @@ async fn receive_agent_frames(
 ) -> Result<bool, String> {
     let mut issue = None;
     while let Some(value) = next_agent_frame(buffer, discarding, &mut issue) {
-        handle(channel, row, cwd, stage, session_id, permission, value).await?;
-        if row.lock().await.snapshot.recovery_reason.is_some() { return Ok(false); }
+        if !handle_agent_frame(channel, row, cwd, stage, session_id, permission, value).await? { return Ok(false); }
     }
     if let Some(message) = issue {
         if *stage < 3 { return Err(message.into()); }
         protocol_warning(row, message).await;
     }
     Ok(true)
+}
+
+async fn handle_agent_frame(
+    channel: &mut Channel<client::Msg>, row: &Arc<Mutex<Thread>>, cwd: &str,
+    stage: &mut u8, session_id: &mut Option<String>, permission: &mut Option<(Value, Vec<Value>)>, value: Value,
+) -> Result<bool, String> {
+    handle(channel, row, cwd, stage, session_id, permission, value).await?;
+    let mut thread = row.lock().await;
+    if thread.snapshot.continuity {
+        // Do not consume another shared frame after a failed cache write.
+        flush_history(&mut thread).await.map_err(|error| error.message)?;
+    }
+    Ok(thread.snapshot.recovery_reason.is_none())
 }
 
 async fn send(channel: &Channel<client::Msg>, value: &Value) -> Result<(), String> {
@@ -1845,6 +2031,60 @@ async fn handle(
         thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(cursor);
     }
     if let Some(method) = value.get("method").and_then(Value::as_str) {
+        if method == "_still/continuity" {
+            row.lock().await.snapshot.continuity = value.pointer("/params/version").and_then(Value::as_u64) == Some(4);
+            return Ok(());
+        }
+        if method == "_still/upgrade_required" { return Err("This worker requires a continuity upgrade; its existing client was not displaced.".into()); }
+        if method == "_still/config_generation" {
+            row.lock().await.snapshot.config_generation = value.pointer("/params/configGeneration").and_then(Value::as_u64).ok_or("Missing configuration generation")?;
+            return Ok(());
+        }
+        if method == "_still/cancel_requested" {
+            let mut thread = row.lock().await;
+            let mut event = Event::new("threadStopped"); event.text = Some("Cancellation requested; waiting for the provider to confirm.".into());
+            emit(&mut thread, event).await; return Ok(());
+        }
+        if method == "_still/prompt_accepted" {
+            let params = &value["params"];
+            let message_id = params["messageId"].as_str().ok_or("Shared prompt omitted message identity")?;
+            let text = params["text"].as_str().ok_or("Shared prompt omitted user text")?;
+            if text.len() > 120_000 || message_id.len() > 300 { return Err("Shared prompt exceeded limits".into()); }
+            let mut thread = row.lock().await;
+            thread.snapshot.turn_active = true;
+            thread.snapshot.state = "working".into();
+            if thread.snapshot.pending_message_id.as_deref().is_none_or(|id| id == message_id) {
+                thread.snapshot.pending_message_id = None;
+                thread.snapshot.recovery_required = false;
+                thread.recovering_uncertain = false;
+            }
+            thread.snapshot.last_error = None;
+            thread.prompt = Some(params["promptId"].clone());
+            thread.snapshot.prompt_id = thread.prompt.clone();
+            if !thread.messages.iter().any(|event| event.message_id.as_deref() == Some(message_id)) {
+                let mut event = Event::new("userMessage"); event.text = Some(text.to_owned());
+                event.message_id = Some(message_id.to_owned()); event.source = Some(params["source"].as_str().unwrap_or("user").to_owned());
+                emit(&mut thread, event).await;
+            }
+            return Ok(());
+        }
+        if method == "_still/turn_finished" {
+            let mut thread = row.lock().await;
+            let params = &value["params"];
+            thread.prompt = None; thread.snapshot.prompt_id = None;
+            thread.snapshot.turn_active = false;
+            if thread.snapshot.pending_message_id.is_none() { thread.snapshot.recovery_required = false; thread.recovering_uncertain = false; }
+            let stop = params["stopReason"].as_str();
+            let failed = params["error"].as_str().or_else(|| (!matches!(stop, Some("end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled"))).then_some("The provider did not confirm a supported turn outcome."));
+            thread.snapshot.state = if failed.is_some() { "error" } else if params["stopReason"] == "cancelled" { "cancelled" } else { "complete" }.into();
+            thread.snapshot.last_error = failed.map(str::to_owned);
+            thread.snapshot.pending_permission = None; thread.snapshot.pending_input = None;
+            thread.permission = None; thread.pending_input_id = None; *permission = None;
+            let mut event = Event::new(if failed.is_some() { "threadError" } else { "threadComplete" });
+            event.state = Some(thread.snapshot.state.clone()); event.text = failed.map(str::to_owned);
+            emit(&mut thread,event).await;
+            return Ok(());
+        }
         if method == "_still/subagents_request" {
             let request_id = value.pointer("/params/requestId").and_then(Value::as_str).ok_or("Subagent request omitted its identity")?.to_owned();
             let input = value.pointer("/params/input").cloned().ok_or("Subagent request omitted its action")?;
@@ -1888,7 +2128,9 @@ async fn handle(
             thread.snapshot.state = "working".into();
             let mut event = Event::new("requestOutcome"); event.request_outcome = Some(outcome); emit(&mut thread,event).await;
             if thread.response_delivery.as_ref().is_some_and(|pending| pending.id == request_id) {
-                let pending = thread.response_delivery.take().unwrap(); let _ = pending.reply.send(Ok(()));
+                let pending = thread.response_delivery.take().unwrap();
+                let own = !thread.snapshot.continuity || value.pointer("/params/operationId").and_then(Value::as_str) == Some(pending.operation_id.as_str());
+                let _ = pending.reply.send(if own { Ok(()) } else { Err("Another device answered this request first. Your answer was not sent.".into()) });
             }
             let mut event = Event::new("threadState"); event.state = Some("working".into()); emit(&mut thread,event).await;
             return Ok(());
@@ -1953,10 +2195,16 @@ async fn handle(
         if method == "_still/caught_up" {
             let mut thread = row.lock().await;
             let params = &value["params"];
+            thread.snapshot.config_generation = params["configGeneration"].as_u64().unwrap_or(thread.snapshot.config_generation);
             let caught_up_index = params["index"].as_u64().unwrap_or(0);
             thread.snapshot.remote_cursor = thread.snapshot.remote_cursor.max(caught_up_index);
             if update_todos(&mut thread.snapshot, params.get("todos"), TodoObservation::CatchUp) { emit_todos(&mut thread).await; }
             thread.awaiting_catch_up = false;
+            if thread.snapshot.continuity && params["ended"] == true {
+                drop(thread);
+                worker_unavailable(row).await;
+                return Ok(());
+            }
             if let Some(raw) = params.get("capabilities") {
                 match accept_capabilities(&mut thread, raw, Some(caught_up_index), true) {
                     Ok(true) => {
@@ -1972,7 +2220,7 @@ async fn handle(
             } else if mark_capabilities_stale(&mut thread.snapshot) {
                 emit_capabilities(&mut thread).await;
             }
-            let unconfirmed_prompt = thread.prompt.is_some() && params["busy"] == false;
+            let unconfirmed_prompt = !thread.snapshot.continuity && thread.prompt.is_some() && params["busy"] == false;
             thread.snapshot.turn_active = params["busy"].as_bool().unwrap_or(false);
             if unconfirmed_prompt || thread.recovering_uncertain {
                 thread.snapshot.state = "submissionUnknown".into();
@@ -1986,7 +2234,7 @@ async fn handle(
                 return Ok(());
             }
             if thread.snapshot.pending_input.is_some() || thread.snapshot.pending_permission.is_some() { thread.snapshot.state = "inputRequired".into(); }
-            else { thread.snapshot.state = "working".into(); }
+            else if thread.snapshot.turn_active || !matches!(thread.snapshot.state.as_str(), "complete" | "cancelled") { thread.snapshot.state = "working".into(); }
             thread.prompt = params.get("activePrompt").filter(|value| !value.is_null()).cloned();
             thread.snapshot.prompt_id = thread.prompt.clone();
             thread.snapshot.last_error = None;
@@ -2028,7 +2276,7 @@ async fn handle(
             if thread.pending_input_id.is_some() {
                 return Err("A second question arrived before the first was answered.".into());
             }
-            let input = json!({"requestId":id,"title":params.get("message").and_then(Value::as_str).unwrap_or("Agent needs your input"),"schema":params.get("requestedSchema")});
+            let input = json!({"requestId":id,"title":params.get("message").and_then(Value::as_str).unwrap_or("Agent needs your input"),"schema":params.get("requestedSchema"),"remoteRequestIndex":value.pointer("/_still/index")});
             thread.pending_input_id = Some(id);
             thread.snapshot.pending_input = Some(input.clone());
             thread.snapshot.state = "inputRequired".into();
@@ -2061,6 +2309,8 @@ async fn handle(
             }
             let tool = params.get("toolCall").cloned().unwrap_or(Value::Null);
             let detail = json!({"requestId":id,"sessionId":params.get("sessionId").and_then(Value::as_str).unwrap_or(""),"toolCallId":tool.get("toolCallId").and_then(Value::as_str).unwrap_or(""),"title":tool.get("title").and_then(Value::as_str).or_else(||tool.get("name").and_then(Value::as_str)).unwrap_or("Permission required"),"description":tool.get("description"),"command":tool.get("rawInput").and_then(|v|v.get("command")).or_else(||tool.get("content").and_then(Value::as_array).and_then(|a|a.first()).and_then(|x|x.pointer("/content/text"))),"rawInput":tool.get("rawInput"),"content":tool.get("content"),"options":options});
+            let mut detail = detail;
+            detail["remoteRequestIndex"] = value.pointer("/_still/index").cloned().unwrap_or(Value::Null);
             *permission = Some((id.clone(), options.clone()));
             {
                 let mut thread = row.lock().await;
@@ -2090,6 +2340,27 @@ async fn handle(
             .and_then(Value::as_str)
             .unwrap_or("Remote ACP request failed.");
         if let Some(id) = id {
+            let mut thread = row.lock().await;
+            if thread.cancel_delivery.as_ref().is_some_and(|pending| id.as_u64() == Some(pending.0)) {
+                let (_, reply) = thread.cancel_delivery.take().unwrap(); let _ = reply.send(Err(message.to_owned())); return Ok(());
+            }
+            if thread.prompt_delivery.as_ref().is_some_and(|pending| id.as_u64() == Some(pending.0)) {
+                let (_, reply) = thread.prompt_delivery.take().unwrap();
+                let uncertain = message.contains("delivery is uncertain");
+                thread.snapshot.recovery_required = uncertain;
+                thread.recovering_uncertain = uncertain;
+                if !uncertain { thread.snapshot.pending_message_id = None; }
+                if uncertain { thread.snapshot.state = "submissionUnknown".into(); }
+                let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone());
+                emit(&mut thread, event).await;
+                let _ = reply.send(Err(message.to_owned()));
+                return Ok(());
+            }
+            if thread.response_delivery.as_ref().is_some_and(|pending| pending.id == id) {
+                let pending = thread.response_delivery.take().unwrap(); let _ = pending.reply.send(Err(message.to_owned()));
+                return Ok(());
+            }
+            drop(thread);
             if let Some(number) = id.as_u64() {
                 let mut thread = row.lock().await;
                 if thread.reconcile_request.as_ref().is_some_and(|pending| pending.request_id == number) {
@@ -2148,6 +2419,20 @@ async fn handle(
     let Some(result) = value.get("result") else {
         return Ok(());
     };
+    if result["cancellationRequested"] == true {
+        let mut thread = row.lock().await;
+        if thread.cancel_delivery.as_ref().is_some_and(|pending| id.as_ref().and_then(Value::as_u64) == Some(pending.0)) {
+            let (_, reply) = thread.cancel_delivery.take().unwrap(); let _ = reply.send(Ok(()));
+        }
+        return Ok(());
+    }
+    if result["accepted"] == true {
+        let mut thread = row.lock().await;
+        if thread.prompt_delivery.as_ref().is_some_and(|pending| id.as_ref().and_then(Value::as_u64) == Some(pending.0)) {
+            let (_, reply) = thread.prompt_delivery.take().unwrap(); let _ = reply.send(Ok(()));
+        }
+        return Ok(());
+    }
     if *stage == 0 && id.as_ref().and_then(Value::as_u64) == Some(1) {
         if result.get("protocolVersion").and_then(Value::as_u64) != Some(1) {
             return Err("Remote agent must negotiate ACP v1.".into());
@@ -2200,12 +2485,13 @@ async fn handle(
             .unwrap_or_default();
         add_legacy_config(&mut configs, result);
         let mut t = row.lock().await;
+        t.snapshot.continuity |= result.pointer("/_meta/continuity").and_then(Value::as_bool) == Some(true);
         if let Some(maximum) = result.pointer("/_meta/maxRequestId").and_then(Value::as_u64) { IDS.fetch_max(maximum,Ordering::SeqCst); }
         t.snapshot.agent_session_id = Some(sid.clone());
         let reported_resumable = result.pointer("/_meta/resumable").and_then(Value::as_bool);
         t.snapshot.resumable = provider_resumable(&t.snapshot.agent_id, reported_resumable, t.load_session, &sid);
         let capabilities = result.pointer("/_meta/historyCapabilities");
-        t.snapshot.history_capabilities = json!({"revert":capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),"retry":capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false)});
+        t.snapshot.history_capabilities = if t.snapshot.continuity { json!({"revert":false,"retry":false}) } else { json!({"revert":capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),"retry":capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false)}) };
         let mut capability_event = Event::new("historyCapabilities");
         capability_event.history_capabilities = Some(t.snapshot.history_capabilities.clone());
         emit(&mut t, capability_event).await;
@@ -2224,18 +2510,21 @@ async fn handle(
             }
         }
         t.snapshot.config_options = configs.clone();
+        t.snapshot.continuity |= result.pointer("/_meta/continuity").and_then(Value::as_bool) == Some(true);
+        t.snapshot.config_generation = result.pointer("/_meta/configGeneration").and_then(Value::as_u64).unwrap_or(0);
         t.snapshot.turn_active = result.pointer("/_meta/busy").and_then(Value::as_bool).unwrap_or(t.snapshot.turn_active);
         let restored_prompt = result.pointer("/_meta/activePrompt").filter(|value| !value.is_null()).cloned();
         if let Some(prompt) = restored_prompt { t.prompt = Some(prompt); }
         t.snapshot.prompt_id = t.prompt.clone();
-        t.snapshot.state = "working".into();
+        t.snapshot.state = if t.snapshot.continuity { "connecting" } else { "working" }.into();
+        if t.snapshot.continuity { t.awaiting_catch_up = true; }
         if !configs.is_empty() {
             let mut config_event = Event::new("configOptions");
             config_event.config_options = Some(configs);
             emit(&mut t, config_event).await;
         }
         let mut e = Event::new("threadState");
-        e.state = Some("working".into());
+        e.state = Some(t.snapshot.state.clone());
         emit(&mut t, e).await;
         let early = std::mem::take(&mut t.early_updates);
         drop(t);
@@ -2252,6 +2541,22 @@ async fn handle(
                 let _ = pending.reply.send(Err("The remote worker did not report its execution state.".into()));
                 return Ok(());
             };
+            if let Some(message_id) = thread.snapshot.pending_message_id.clone() {
+                if result["messageId"] != message_id || !matches!(result["status"].as_str(), Some("accepted" | "notAccepted")) {
+                    let _ = pending.reply.send(Err("The prompt receipt is still uncertain. It has not been resent.".into())); return Ok(());
+                }
+                if result["status"] == "accepted" && !thread.messages.iter().any(|message| message.message_id.as_deref() == Some(message_id.as_str())) {
+                    let _ = pending.reply.send(Err("The prompt was accepted, but its transcript has not caught up. Reconnect before continuing.".into())); return Ok(());
+                }
+                thread.snapshot.pending_message_id = None;
+                thread.snapshot.recovery_required = false;
+                thread.recovering_uncertain = false;
+                thread.snapshot.state = if busy { "working" } else { "complete" }.into();
+                thread.snapshot.last_error = None;
+                thread.snapshot.turn_active = busy;
+                let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
+                let _ = pending.reply.send(Ok(())); return Ok(());
+            }
             if busy {
                 thread.snapshot.turn_active = true;
                 thread.snapshot.state = if thread.snapshot.pending_input.is_some() || thread.snapshot.pending_permission.is_some() { "inputRequired" } else { "working" }.into();
@@ -2620,7 +2925,7 @@ async fn transport_lost(row: &Arc<Mutex<Thread>>, detail: &str) {
     if legacy_worker_unavailable(detail) {
         drop(thread); worker_unavailable(row).await; return;
     }
-    thread.recovering_uncertain = thread.recovering_uncertain || thread.history_request.is_some() || matches!(thread.snapshot.state.as_str(), "submissionUnknown" | "rewinding");
+    thread.recovering_uncertain = thread.recovering_uncertain || thread.snapshot.pending_message_id.is_some() || thread.prompt_delivery.is_some() || thread.history_request.is_some() || matches!(thread.snapshot.state.as_str(), "submissionUnknown" | "rewinding");
     thread.snapshot.recovery_required = thread.recovering_uncertain;
     thread.snapshot.state = "detached".into();
     thread.transport_active = false;
@@ -2802,12 +3107,17 @@ async fn emit_todos(thread: &mut Thread) {
 }
 
 async fn queue_request_response(thread: &mut Thread, id: Value, response: Value, outcome: Value) -> Result<oneshot::Receiver<Result<(), String>>, StillError> {
+    if thread.snapshot.continuity && (thread.awaiting_catch_up || !thread.transport_active) {
+        return Err(StillError::friendly("agent_response_offline", "Catch up before answering this shared request."));
+    }
     if thread.response_delivery.is_some() {
         return Err(StillError::friendly("agent_response_busy", "A response is already being sent."));
     }
     let (reply, receiver) = oneshot::channel();
-    thread.response_delivery = Some(PendingResponse { id: id.clone(), outcome, reply });
-    if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"result":response})).is_err() {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    thread.response_delivery = Some(PendingResponse { id: id.clone(), operation_id: operation_id.clone(), outcome, reply });
+    let request_index = thread.snapshot.pending_permission.as_ref().or(thread.snapshot.pending_input.as_ref()).and_then(|request| request.get("remoteRequestIndex")).cloned();
+    if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"result":response,"_meta":{"operationId":operation_id,"expectedRequestIndex":request_index}})).is_err() {
         thread.response_delivery = None;
         return Err(StillError::friendly("agent_disconnected", "The agent disconnected before the response could be queued."));
     }
@@ -2835,7 +3145,7 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     if !["user", "parentAgent"].contains(&source) {
         return Err(StillError::friendly("agent_prompt_source", "Invalid message source."));
     }
-    let message_id = args.message_id.unwrap_or_else(|| format!("{}-{}", thread.snapshot.execution_id, next_request_id()));
+    let message_id = args.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if message_id.is_empty() || message_id.len() > 300 || message_id.chars().any(char::is_control) {
         return Err(StillError::friendly("agent_prompt_identity", "Invalid prompt identity."));
     }
@@ -2861,6 +3171,36 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
         StillError::friendly("agent_not_ready", "ACP session is still initializing.")
     })?;
     let id = next_request_id();
+    if thread.snapshot.continuity {
+        if thread.awaiting_catch_up || !thread.transport_active || thread.prompt_delivery.is_some() || thread.snapshot.recovery_required {
+            return Err(StillError::friendly("agent_not_ready", "Wait for this conversation to catch up before sending."));
+        }
+        let (reply, receive) = oneshot::channel();
+        thread.prompt_delivery = Some((id, reply));
+        let generation = thread.snapshot.config_generation;
+        // Persist uncertain intent before the SSH write. A process restart cannot
+        // turn an unacknowledged send into a fresh, automatically retried prompt.
+        thread.snapshot.recovery_required = true;
+        thread.snapshot.pending_message_id = Some(message_id.clone());
+        let mut pending = Event::new("threadState"); pending.state = Some(thread.snapshot.state.clone());
+        emit(&mut thread, pending).await;
+        if let Err(error) = flush_history(&mut thread).await {
+            thread.prompt_delivery = None;
+            return Err(error);
+        }
+        let request = json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id,"source":source,"expectedConfigGeneration":generation}}});
+        if thread.outbound.send(request).is_err() {
+            thread.prompt_delivery = None; thread.snapshot.recovery_required = false; thread.snapshot.pending_message_id = None;
+            let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
+            return Err(StillError::friendly("agent_prompt_rejected", "The connection closed before this prompt was sent."));
+        }
+        drop(thread);
+        return match tokio::time::timeout(Duration::from_secs(20), receive).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(message))) => Err(StillError::friendly(if message.starts_with("Prompt delivery could not") || message.contains("delivery is uncertain") { "agent_submission_unknown" } else { "agent_prompt_rejected" }, message)),
+            _ => Err(StillError::friendly("agent_submission_unknown", "Prompt acceptance was not confirmed. Reconnect and check history before retrying.")),
+        };
+    }
     thread.prompt = Some(json!(id));
     thread.snapshot.prompt_id = Some(json!(id));
     thread.snapshot.turn_active = true;
@@ -2883,6 +3223,7 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
 pub async fn still_agent_revert(args: RevertArgs) -> Result<Snapshot, StillError> {
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
+    if thread.snapshot.continuity { return Err(StillError::friendly("agent_history_unsupported", "Shared-session rewind is not enabled yet. Its history remains intact.")); }
     if thread.snapshot.history_capabilities["revert"] != true { return Err(StillError::friendly("agent_history_unsupported", "This agent does not support reverting conversation messages.")); }
     if thread.snapshot.last_sequence != args.expected_sequence || thread.snapshot.turn_active || thread.prompt.is_some() || thread.permission.is_some() || thread.pending_input_id.is_some() || !thread.config_requests.is_empty() || thread.history_request.is_some() || !matches!(thread.snapshot.state.as_str(), "working" | "complete" | "cancelled" | "error") {
         return Err(StillError::friendly("agent_history_busy", "The conversation changed or is busy. Wait until it is idle before reverting."));
@@ -2963,7 +3304,7 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
     }
     let request_id = next_request_id();
     let (reply, receive) = oneshot::channel();
-    let request = match args.config_id.as_str() {
+    let mut request = match args.config_id.as_str() {
         "still:mode" => {
             json!({"jsonrpc":"2.0","id":request_id,"method":"session/set_mode","params":{"sessionId":session,"modeId":args.value}})
         }
@@ -2974,6 +3315,7 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
             json!({"jsonrpc":"2.0","id":request_id,"method":"session/set_config_option","params":{"sessionId":session,"configId":args.config_id,"value":args.value}})
         }
     };
+    if thread.snapshot.continuity { request["params"]["_meta"] = json!({"expectedConfigGeneration": thread.snapshot.config_generation}); }
     let previous_capabilities = thread.snapshot.capabilities.clone();
     let previous_config = effective_config_key(&thread.snapshot.config_options);
     let previous_capability_cursor = thread.capability_remote_cursor;
@@ -3031,6 +3373,9 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
     if saved.execution_id != args.execution_id || saved.conversation_id != args.conversation_id || saved.host_key != host_key || !saved.persistent {
         return Err(StillError::friendly("agent_attach_identity", "This persistent execution belongs to a different conversation or server."));
     }
+    if saved.remote_imported && !saved.continuity {
+        return Err(StillError::friendly("agent_continuity_upgrade", "This conversation uses an older worker. Sync its saved session details, then use Upgrade saved session after its previous worker has stopped. Its desktop connection has not been replaced and no prompt has been resent."));
+    }
     if let Some(row) = &existing {
         let thread = row.lock().await;
         if thread.transport_active {
@@ -3038,7 +3383,12 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             return Ok(thread.snapshot.clone());
         }
     }
-    let (remote, bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None, saved.custom_agent.as_ref(), saved.parent_conversation_id.as_deref())?;
+    let (remote, mut bootstrap_payload) = persistent_command(&saved.execution_id, &saved.conversation_id, &saved.cwd, &saved.agent_id, "", false, saved.remote_cursor, None, None, None, saved.custom_agent.as_ref(), saved.parent_conversation_id.as_deref())?;
+    if saved.continuity {
+        let mut payload: Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(&bootstrap_payload).unwrap()).unwrap();
+        payload["requireContinuity"] = json!(true);
+        bootstrap_payload = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+    }
     let mut channel = ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|error| StillError::friendly("agent_attach", format!("Could not reattach to the server-side agent: {error}")))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -3079,7 +3429,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
             unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None, reconcile_request: None,
             load_session: false, capability_notice: None,
-            awaiting_catch_up: true, capability_remote_cursor, subagent_requests: HashMap::new(),
+            awaiting_catch_up: true, capability_remote_cursor, subagent_requests: HashMap::new(), prompt_delivery: None, cancel_delivery: None,
         }));
         if stale_changed {
             let mut thread = row.lock().await;
@@ -3118,7 +3468,10 @@ pub async fn still_agent_reconcile(args: IdArgs) -> Result<(), StillError> {
     let request_id = next_request_id();
     let (reply, receive) = oneshot::channel();
     thread.reconcile_request = Some(PendingReconcile { request_id, reply });
-    if thread.outbound.send(json!({"jsonrpc":"2.0","id":request_id,"method":"_still/status","params":{}})).is_err() {
+    let request = if let Some(message_id) = &thread.snapshot.pending_message_id {
+        json!({"jsonrpc":"2.0","id":request_id,"method":"_still/prompt_receipt","params":{"messageId":message_id}})
+    } else { json!({"jsonrpc":"2.0","id":request_id,"method":"_still/status","params":{}}) };
+    if thread.outbound.send(request).is_err() {
         thread.reconcile_request = None;
         return Err(StillError::friendly("agent_reconcile_offline", "The status request could not reach the remote worker."));
     }
@@ -3136,12 +3489,30 @@ pub async fn still_agent_reconcile(args: IdArgs) -> Result<(), StillError> {
 #[tauri::command]
 pub async fn still_agent_cancel(args: IdArgs) -> Result<(), StillError> {
     let row = find_thread(&args.execution_id).await?;
-    let thread = row.lock().await;
+    let mut thread = row.lock().await;
     if !thread.snapshot.turn_active {
         return Err(StillError::friendly(
             "agent_turn_idle",
             "There is no active prompt to cancel.",
         ));
+    }
+    if thread.snapshot.continuity {
+        if thread.awaiting_catch_up || !thread.transport_active || thread.cancel_delivery.is_some() {
+            return Err(StillError::friendly("agent_cancel_busy", "Wait for the conversation to catch up or the previous cancellation to finish."));
+        }
+        let id = next_request_id();
+        let (reply, receive) = oneshot::channel();
+        thread.cancel_delivery = Some((id, reply));
+        if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/cancel","params":{"sessionId":thread.snapshot.agent_session_id,"_meta":{"promptId":thread.snapshot.prompt_id}}})).is_err() {
+            thread.cancel_delivery = None;
+            return Err(StillError::friendly("agent_process_lost", "The connection closed; cancellation was not sent."));
+        }
+        drop(thread);
+        return match tokio::time::timeout(Duration::from_secs(15), receive).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(message))) => Err(StillError::friendly("agent_cancel_failed", message)),
+            _ => Err(StillError::friendly("agent_cancel_unknown", "Cancellation was not confirmed. Check the current turn before retrying.")),
+        };
     }
     thread.cancel.send(()).map_err(|_| {
         StillError::friendly(
@@ -3194,7 +3565,7 @@ pub async fn still_agent_close(args: IdArgs) -> Result<(), StillError> {
     let sent = thread.close.send(reply).is_ok();
     drop(thread);
     if sent {
-        tokio::time::timeout(Duration::from_secs(8), response).await
+        tokio::time::timeout(Duration::from_secs(10), response).await
             .map_err(|_| StillError::friendly("agent_close_unknown", "Agent shutdown was not confirmed. Refresh before deleting this conversation."))?
             .map_err(|_| StillError::friendly("agent_close_unknown", "Agent shutdown acknowledgement was lost. Refresh before deleting this conversation."))?
             .map_err(|message| StillError::friendly("agent_close_unknown", message))?;
@@ -3505,7 +3876,7 @@ mod tests {
             pending_permission: None, last_error: None, last_sequence: 0, turn_active: false,
             config_options: Vec::new(), commands: Vec::new(), pending_input: None, resumable: true,
             history_capabilities: json!({"revert":false,"retry":false}), active_message_ids: None,
-            persistent: true, remote_cursor: 12, prompt_id: None, recovery_required: false,
+            persistent: true, continuity: false, remote_imported: false, config_generation: 0, pending_message_id: None, remote_cursor: 12, prompt_id: None, recovery_required: false,
             recovery_reason: None,
             todos: None, todo_sync: None, capabilities: Some(report),
         }
@@ -3708,6 +4079,129 @@ mod tests {
         assert!(next_request_id() > remote_maximum);
         let a = next_request_id(); let b = next_request_id(); assert!(b > a);
     }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires an X display and the existing localhost SSH test key; uses a temporary ACP test peer, not a model"]
+    fn native_continuity_discovers_and_replays_another_clients_worker_over_verified_ssh() {
+        use tauri::Manager;
+        let mut context = tauri::generate_context!();
+        context.config_mut().identifier = format!("dev.still.continuity-test-{}", agent_store::timestamp());
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().manage(AppState::new()).build(context).unwrap();
+        let handle = app.handle().clone();
+        let storage = handle.path().app_data_dir().unwrap();
+        tauri::async_runtime::block_on(async {
+            let state = app.state::<AppState>();
+            let home = std::env::var("HOME").unwrap();
+            let secret = std::fs::read_to_string(format!("{home}/.ssh/still_poc_test")).unwrap();
+            let id = format!("native-continuity-{}", agent_store::timestamp());
+            let project = std::env::temp_dir().join(format!("still-continuity-project-{id}"));
+            std::fs::create_dir_all(&project).unwrap();
+            let peer = project.join("peer.mjs");
+            std::fs::write(&peer, r#"#!/usr/bin/env node
+import readline from 'node:readline';
+const send=m=>process.stdout.write(JSON.stringify(m)+'\n');
+readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);
+if(m.method==='initialize')send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:1,agentInfo:{name:'Continuity test peer'}}});
+else if(['session/new','session/load'].includes(m.method))send({jsonrpc:'2.0',id:m.id,result:{sessionId:'same-provider-session',configOptions:[]}});
+else if(m.method==='session/prompt'){const racing=m.params.prompt[0].text==='closing-race';send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'same-provider-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:racing?'Output during rejected shutdown':'Native shared output'}}}});const finish=()=>send({jsonrpc:'2.0',id:m.id,result:{stopReason:'end_turn'}});if(racing)setTimeout(finish,1000);else finish();}
+});
+"#).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&peer, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let connected = crate::commands::still_connect(handle.clone(), state.clone(), crate::core::SshConnectArgs {
+                host:"127.0.0.1".into(),port:22,username:std::env::var("USER").unwrap(),auth_kind:"privateKey".into(),secret:Some(secret),remember:Some(false),
+                tmux_session:Some("unused-continuity-test".into()),working_directory:None,ssh_only:Some(true),cols:None,rows:None,client_id:Some(id.clone()),
+            }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop { if state.sessions.lock().await.get(&connected.session_id).unwrap().lock().await.status == SessionStatus::Live { break }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }).await.unwrap();
+            let host = json!(["127.0.0.1",22,std::env::var("USER").unwrap()]).to_string();
+            let custom = CustomAgent { id:"custom-continuity-test".into(),host_key:host,name:"Continuity test peer".into(),executable:peer.to_string_lossy().into(),args:vec![],transport:"acp-v1".into() };
+            let start = still_agent_start(handle.clone(),state.clone(),StartArgs {
+                native_session_id:connected.session_id.clone(),local_session_id:id.clone(),agent_id:custom.id.clone(),cwd:Some(project.to_string_lossy().into()),executable:None,
+                resume_session_id:None,conversation_id:Some(id.clone()),custom_agent:Some(custom),parent_conversation_id:None,
+            }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(20),async {
+                loop { let snapshot=still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();
+                    if snapshot.state=="working" && snapshot.continuity { break }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }).await.unwrap();
+            let (remote,payload)=persistent_command(&start.execution_id,&id,project.to_str().unwrap(),"custom-continuity-test","",false,0,None,None,None,None,None).unwrap();
+            let mut other=ssh_worker::open_agent_exec(&connected.session_id,&remote).await.unwrap();
+            let mut buffer=bootstrap_remote(&mut other,&payload).await.unwrap();
+            send(&other,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).await.unwrap();
+            send(&other,&json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{}})).await.unwrap();
+            let receive_until = |buffer: &mut Vec<u8>, wanted: &str| -> bool {
+                String::from_utf8_lossy(buffer).contains(wanted)
+            };
+            tokio::time::timeout(Duration::from_secs(10),async {
+                while !receive_until(&mut buffer,"_still/caught_up") {
+                    if let Some(ChannelMsg::Data{data})=other.wait().await {buffer.extend_from_slice(&data)}
+                }
+            }).await.unwrap();
+            send(&other,&json!({"jsonrpc":"2.0","id":101,"method":"session/prompt","params":{"sessionId":"same-provider-session","prompt":[{"type":"text","text":"Message from the other device"}],"_meta":{"messageId":"other-device-message","expectedConfigGeneration":0}}})).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop { let snapshot=still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();
+                    if snapshot.state=="complete" && snapshot.transcript.iter().any(|event| event.text.as_deref()==Some("Native shared output")) {
+                        assert_eq!(snapshot.agent_session_id.as_deref(),Some("same-provider-session"));
+                        assert!(snapshot.transcript.iter().any(|event| event.message_id.as_deref()==Some("other-device-message")&&event.text.as_deref()==Some("Message from the other device")));break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }).await.unwrap();
+            let library=still_agent_remote_library(handle.clone(),state.clone(),RemoteLibraryArgs{native_session_id:connected.session_id.clone(),after:None}).await.unwrap();
+            assert!(library["rows"].as_array().unwrap().iter().any(|row|row["conversationId"]==id));
+            still_agent_send(SendArgs{execution_id:start.execution_id.clone(),message:"Reply from native client".into(),message_id:Some("native-message".into()),source:None}).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10),async {
+                while !receive_until(&mut buffer,"native-message") {
+                    if let Some(ChannelMsg::Data{data})=other.wait().await {buffer.extend_from_slice(&data)}
+                }
+            }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10),async {
+                while still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap().turn_active {tokio::time::sleep(Duration::from_millis(50)).await}
+            }).await.unwrap();
+            // Queue a local close while preventing its reader from observing the
+            // other client's newly accepted turn. This is the real close/send race,
+            // not a forced provider restart or an optimistic local busy flag.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let native_row = find_thread(&start.execution_id).await.unwrap();
+            let thread = native_row.lock().await;
+            let (reply, response) = oneshot::channel();
+            thread.close.send(reply).unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            send(&other,&json!({"jsonrpc":"2.0","id":102,"method":"session/prompt","params":{"sessionId":"same-provider-session","prompt":[{"type":"text","text":"closing-race"}],"_meta":{"messageId":"closing-race-message","expectedConfigGeneration":0}}})).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10),async {
+                while !receive_until(&mut buffer,"closing-race-message") {
+                    if let Some(ChannelMsg::Data{data})=other.wait().await {buffer.extend_from_slice(&data)}
+                }
+            }).await.unwrap();
+            drop(thread);
+            let rejected = tokio::time::timeout(Duration::from_secs(10),response).await.unwrap().unwrap().unwrap_err();
+            assert!(rejected.contains("busy"), "shutdown must not close the other client's turn: {rejected}");
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let snapshot = still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();
+                    if !snapshot.turn_active && snapshot.transcript.iter().any(|event| event.text.as_deref()==Some("Output during rejected shutdown")) {
+                        assert!(snapshot.transcript.iter().any(|event| event.message_id.as_deref()==Some("closing-race-message")));
+                        assert_eq!(snapshot.agent_session_id.as_deref(),Some("same-provider-session"));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.unwrap();
+            let _=other.eof().await;let _=other.close().await;
+            still_agent_close(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();
+            crate::commands::still_disconnect(state.clone(),crate::commands::IdArgs{session_id:connected.session_id}).await.unwrap();
+            // This directory was created by this test and contains only its peer.
+            std::fs::remove_dir_all(project).unwrap();
+        });
+        std::fs::remove_dir_all(storage).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires localhost SSH fixture and installed Pi/Claude/Codex/OpenCode; performs no model prompts"]

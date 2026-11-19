@@ -59,6 +59,18 @@ test("legacy worker records remain recoverable after both recorded processes hav
   owner.release()
 }))
 
+test("legacy recovery preflight accepts a missing Todo store without creating it or bypassing live-process checks", () => fixture(async f => {
+  await rm(f.todoDirectory, { recursive: true })
+  const before = await readFile(f.statePath, "utf8")
+  verifyExecutionRecovery(f.directory, f.config, f.todoDirectory)
+  await assert.rejects(stat(f.todoDirectory), { code: "ENOENT" })
+  assert.equal(await readFile(f.statePath, "utf8"), before)
+  f.state.childPid = process.pid
+  await f.saveState()
+  assert.throws(() => verifyExecutionRecovery(f.directory, f.config, f.todoDirectory), /still running/)
+  await assert.rejects(stat(f.todoDirectory), { code: "ENOENT" })
+}))
+
 test("bootstrap preflight verifies recovery without changing either execution's ownership", () => fixture(async f => {
   const before = await readFile(f.ownerPath, "utf8")
   verifyExecutionRecovery(f.directory, f.config, f.todoDirectory)
