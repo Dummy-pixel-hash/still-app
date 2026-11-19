@@ -1363,6 +1363,7 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
     agent_store::bind_shared_account(&app, host_key.clone(), page["serverAccountId"].as_str().unwrap_or_default().to_owned(), page["revision"].clone(), page["projects"].clone()).await?;
     let remote_rows = page["rows"].as_array().ok_or_else(|| StillError::friendly("agent_library_remote", "Invalid remote conversation page."))?.clone();
     let mut imported = Vec::new();
+    let mut blocked = Vec::new();
     for remote in remote_rows {
         let id = remote["conversationId"].as_str().ok_or_else(|| StillError::friendly("agent_library_remote", "Missing conversation ID"))?;
         if remote["conversationId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 100 || id.chars().any(char::is_control))
@@ -1381,20 +1382,33 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
             "persistent":true,"continuity":remote["protocolVersion"]==4,"remoteImported":true,"configGeneration":0,"remoteCursor":0,
             "resumable":remote["resumable"],"historyCapabilities":{"revert":false,"retry":false}
         })).map_err(|e| StillError::friendly("agent_library_remote", e.to_string()))?;
-        if let Some(previous) = remote["replacesExecutionId"].as_str() {
-            let retired = registry().lock().await.get(previous).cloned();
-            if let Some(retired) = retired {
-                let mut old = retired.lock().await;
-                if old.transport_active || old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required {
-                    return Err(StillError::friendly("agent_shared_migration", "The previous local execution still needs catch-up or reconciliation. It was not replaced."));
-                }
-                flush_history(&mut old).await?;
-                old.history_lease.take();
-                drop(old);
-                registry().lock().await.remove(previous);
+        let previous = remote["replacesExecutionId"].as_str().map(str::to_owned);
+        let retired = if let Some(previous) = previous.as_ref() { registry().lock().await.get(previous).cloned() } else { None };
+        let mut old = if let Some(retired) = retired.as_ref() { Some(retired.lock().await) } else { None };
+        if let Some(old) = old.as_mut() {
+            if old.transport_active || old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required {
+                blocked.push(json!({"conversationId":id,"executionId":remote["executionId"],"reason":"The previous execution still needs catch-up or reconciliation. Your saved history and draft were kept."}));
+                continue;
             }
+            flush_history(old).await?;
         }
-        if let Some(saved) = agent_store::import_remote_snapshot(&app, snapshot, remote.clone()).await? {
+        let saved = match agent_store::import_remote_snapshot(&app, snapshot, remote.clone()).await {
+            Ok(saved) => saved,
+            Err(error) if error.message.contains("Execution migration needs explicit recovery or reconciliation.") => {
+                blocked.push(json!({"conversationId":id,"executionId":remote["executionId"],"reason":"The server execution could not be safely matched to this saved conversation. Your original history and draft were kept."}));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(saved) = saved {
+            if previous.as_deref().is_some_and(|previous| previous != saved.execution_id) {
+                if let Some(old) = old.as_mut() { old.history_lease.take(); }
+                drop(old);
+                if let (Some(previous), Some(retired)) = (previous.as_ref(), retired.as_ref()) {
+                    let mut entries = registry().lock().await;
+                    if entries.get(previous).is_some_and(|entry| Arc::ptr_eq(entry, retired)) { entries.remove(previous); }
+                }
+            }
             if remote["shared"].is_object() {
                 agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
             }
@@ -1402,6 +1416,7 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
         }
     }
     page["rows"] = json!(imported);
+    page["blockedConversations"] = json!(blocked);
     page["hostKey"] = json!(host_key);
     if let Some(deleted) = page["tombstones"].as_array() {
         if deleted.len() > 4096 { return Err(StillError::friendly("agent_shared_library", "Too many shared tombstones.")); }

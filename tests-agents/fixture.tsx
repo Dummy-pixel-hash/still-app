@@ -420,9 +420,13 @@ function PreviewLayoutControl() {
 function FixtureWorkspace() {
   const [transportId, setTransportId] = React.useState("ssh-fixture")
   const [connected, setConnected] = React.useState(true)
+  const rows = useAgentThreads()
+  const blockedId = React.useRef<string | undefined>(undefined)
+  if (new URLSearchParams(location.search).has("blocked-sync") && !blockedId.current && rows.length) blockedId.current = rows[0].meta.id
+  const syncIssues = blockedId.current ? [{ conversationId: blockedId.current, executionId: "server-replacement", reason: "The original history and draft were kept." }] : undefined
   h.replaceTransport = () => setTransportId(id => `${id}-replaced`)
   h.setConnected = setConnected
-  return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} connected={connected} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
+  return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} connected={connected} syncIssues={syncIssues} syncNotice={syncIssues && <span>Library sync details fixture</span>} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
 }
 createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a><PreviewLayoutControl /></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
 if (preview && scenario) {

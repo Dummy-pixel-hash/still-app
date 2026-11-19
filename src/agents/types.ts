@@ -307,6 +307,7 @@ export interface SharedOperation {
 }
 export interface SharedOperationResult { ok: boolean; code?: string; message?: string; current?: SharedConversation; project?: SharedProject; projects?: SharedProject[] }
 export interface LegacyAgentRecord { executionId: string; reason: string }
+export interface BlockedAgentConversation { conversationId: string; executionId: string; reason: string }
 export interface SharedLibraryPage {
   protocolVersion: number
   catalogVersion?: number
@@ -318,6 +319,7 @@ export interface SharedLibraryPage {
   rows: Array<{ conversationId: string; executionId: string; cwd: string; protocolVersion: number; shared?: SharedConversation; activityAt?: number }>
   warnings: string[]
   legacyRecords?: LegacyAgentRecord[]
+  blockedConversations?: BlockedAgentConversation[]
   /** Directories without a committed state record; not proof of worker death. */
   incompleteExecutions?: string[]
   next: string | null

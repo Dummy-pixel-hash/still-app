@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react"
 import { nativeBridge, type Unsubscribe } from "../bridge/nativeBridge"
-import type { AgentCapabilityReport, AgentCatalog, AgentChangeIndexItem, AgentChangeHistory, AgentHistoryPage, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot, LegacyAgentRecord, SharedConversation, SharedOperation, SharedProject } from "../agents/types"
+import type { AgentCapabilityReport, AgentCatalog, AgentChangeIndexItem, AgentChangeHistory, AgentHistoryPage, AgentLaunchOptions, AgentThreadEvent, AgentThreadSnapshot, LegacyAgentRecord, BlockedAgentConversation, SharedConversation, SharedOperation, SharedProject } from "../agents/types"
 import { hostKey, normalizeFolder, sharedAccount, type AgentProject, type ConversationMeta } from "../agents/workspace"
 import { reconcileTodos, restoreTodos, todoStaleReason } from "../agents/todos"
 import type { Session } from "../types"
@@ -264,8 +264,8 @@ export function loadAgentThreads() {
   return loading
 }
 
-export interface AgentLibrarySyncResult { conversations: number; warnings: string[]; legacyRecords: LegacyAgentRecord[] }
-export interface AgentLibrarySyncStatus { message: string; failed: boolean; warnings: string[]; legacyRecords: LegacyAgentRecord[] }
+export interface AgentLibrarySyncResult { conversations: number; warnings: string[]; legacyRecords: LegacyAgentRecord[]; blockedConversations?: BlockedAgentConversation[] }
+export interface AgentLibrarySyncStatus { message: string; failed: boolean; warnings: string[]; legacyRecords: LegacyAgentRecord[]; blockedConversations?: BlockedAgentConversation[] }
 type LibrarySyncListener = (status: AgentLibrarySyncStatus) => void
 const remoteLibrarySyncs = new Map<string, Promise<AgentLibrarySyncResult>>()
 const libraryWatchers = new Map<string, { stop: () => void; listeners: Set<LibrarySyncListener>; status?: AgentLibrarySyncStatus }>()
@@ -280,7 +280,7 @@ export function watchRemoteAgentLibrary(nativeId: string, listener: LibrarySyncL
       if (stopped || document.visibilityState === "hidden") return
       void syncRemoteAgentLibrary(nativeId).then(result => {
         const message = result.warnings.length ? `Conversations synced. ${result.warnings.length} record${result.warnings.length === 1 ? " needs" : "s need"} review.` : "Conversations synced."
-        publish({ message, failed: false, warnings: result.warnings, legacyRecords: result.legacyRecords })
+        publish({ message, failed: false, warnings: result.warnings, legacyRecords: result.legacyRecords, blockedConversations: result.blockedConversations })
       }).catch(error => publish({ message: error && typeof error === "object" && "message" in error ? String(error.message) : String(error), failed: true, warnings: [], legacyRecords: [] }))
     }
     const timer = setInterval(poll, 15000)
@@ -528,12 +528,14 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
     const deleted = new Set<string>()
     const warnings: string[] = []
     const legacyRecords = new Map<string, LegacyAgentRecord>()
+    const blocked = new Map<string, BlockedAgentConversation>()
     let account: { id: string; host: string; revision: number; projects: SharedProject[] } | undefined
     do {
       const page = await nativeBridge.agentRemoteLibrary(nativeId, after)
       for (const row of page.rows) { discovered.add(row.executionId); incoming.set(row.executionId, row) }
       warnings.push(...page.warnings || [])
       for (const record of page.legacyRecords || []) legacyRecords.set(record.executionId, record)
+      for (const record of page.blockedConversations || []) blocked.set(record.conversationId, record)
       for (const id of page.tombstones || []) deleted.add(id)
       if (page.catalogVersion === 1 && page.hostKey) {
         if (account && account.id !== page.serverAccountId) throw new Error("Remote account identity changed during pagination.")
@@ -550,7 +552,11 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
       if (rows.has(saved.executionId)) {
         const current = rows.get(saved.executionId)!
         if (saved.agentSessionId) {
-          if (current.agentSessionId && current.agentSessionId !== saved.agentSessionId) throw new Error("The saved provider session changed; the existing conversation and draft were kept.")
+          if (current.agentSessionId && current.agentSessionId !== saved.agentSessionId) {
+            blocked.set(saved.meta.id, { conversationId: saved.meta.id, executionId: saved.executionId, reason: "The saved provider session changed. The original conversation and draft were kept." })
+            discovered.delete(saved.executionId)
+            continue
+          }
           current.agentSessionId = saved.agentSessionId
           if (saved.resumable) current.resumable = true
         }
@@ -563,11 +569,15 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
       }
       const previous = [...rows.values()].find(row => row.meta.id === saved.meta.id && row.executionId !== saved.executionId)
       if (previous) {
-        if (!saved.meta.shared || saved.meta.shared.generation <= (previous.meta.shared?.generation || 0)) throw new Error("This execution needs explicit generation recovery; its original cache was kept.")
+        if (!saved.meta.shared || saved.meta.shared.generation <= (previous.meta.shared?.generation || 0)) {
+          blocked.set(saved.meta.id, { conversationId: saved.meta.id, executionId: saved.executionId, reason: "This execution needs generation recovery. The original history and draft were kept." })
+          discovered.delete(saved.executionId)
+          continue
+        }
         subscriptions.get(previous.executionId)?.(); subscriptions.delete(previous.executionId)
         rows.delete(previous.executionId); restored.delete(previous.executionId); historyRevisions.delete(previous.executionId)
         todoRefreshRevisions.delete(previous.executionId)
-        saved.meta = { ...saved.meta, draft: previous.meta.draft, draftAttachments: previous.meta.draftAttachments,
+        saved.meta = { ...saved.meta, draft: previous.meta.draft, draftAttachments: previous.meta.draftAttachments, pendingConfig: previous.meta.pendingConfig,
           sharedPending: previous.meta.sharedPending, sharedLocalChanges: previous.meta.sharedLocalChanges }
       }
       rows.set(saved.executionId, { ...saved, meta: metadata(saved), state: "saved", turnActive: false,
@@ -600,7 +610,7 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
     if (failures.length) throw new Error(`${failures.length} shared conversation${failures.length === 1 ? "" : "s"} could not catch up. Other conversations remain available. ${String(failures[0].reason?.message || failures[0].reason)}`)
     if (account) for (const row of rows.values()) if (row.meta.shared?.serverAccountId === account.id) await flushSharedChanges(row.executionId)
     if (account) await reconcileSharedProjectIntents(account.id, account.host, nativeId)
-    return { conversations: discovered.size, warnings: [...new Set(warnings)], legacyRecords: [...legacyRecords.values()] }
+    return { conversations: discovered.size, warnings: [...new Set(warnings)], legacyRecords: [...legacyRecords.values()], blockedConversations: [...blocked.values()] }
   })().finally(() => remoteLibrarySyncs.delete(nativeId))
   remoteLibrarySyncs.set(nativeId, task)
   return task

@@ -12,3 +12,6 @@
 .agent-library-sync-records li { margin-block: 0 12px; }
 .agent-library-sync-records li > strong { font-weight: 500; }
 .agent-library-sync-records li > span { display: block; }
+.agent-conversation-sync-issue { align-self: flex-start; margin: 8px 24px; color: var(--ag-dim); font-size: 12px; }
+.agent-conversation-sync-issue summary { cursor: pointer; }
+.agent-conversation-sync-issue p { max-width: 60ch; line-height: 1.5; }

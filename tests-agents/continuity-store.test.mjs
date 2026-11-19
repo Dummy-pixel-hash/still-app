@@ -80,6 +80,26 @@ test("remote discovery imports new identities and leaves live subscriptions and 
   assert.deepEqual(fixture.calls.attaches, ["discovered"], "periodic discovery must not invalidate a live subscription")
 })
 
+test("blocked migration does not stop healthy conversation discovery and preserves local drafts", async () => {
+  const library = { rows: [row("blocked")], liveExecutions: ["blocked"], workspaces: {}, warnings: [] }
+  library.rows[0].meta.pendingConfig = { model: "b" }
+  const fixture = await store(library)
+  fixture.bridge.agentRemoteLibrary = async () => {
+    if (!library.rows.some(item => item.executionId === "healthy")) library.rows.push(row("healthy"))
+    return { rows: [{ executionId: "healthy" }], blockedConversations: [{ conversationId: "blocked", executionId: "new-execution", reason: "Original cache was kept" }], warnings: [], next: null }
+  }
+  const result = await fixture.module.syncRemoteAgentLibrary("native")
+  assert.equal(result.blockedConversations.length, 1)
+  assert.deepEqual(fixture.calls.attaches, ["healthy"])
+  const existing = fixture.module.useAgentThreads().find(item => item.executionId === "blocked")
+  assert.equal(existing.meta.draft, "Unsent local message")
+  assert.deepEqual(existing.meta.pendingConfig, { model: "b" })
+  assert.equal(existing.transcript[0].text, "Initial response")
+  assert.deepEqual(fixture.calls.sends, [])
+  const again = await fixture.module.syncRemoteAgentLibrary("native")
+  assert.equal(again.blockedConversations.length, 1)
+})
+
 test("discovery waits for catch-up rather than enabling writes on an initialization handshake", async () => {
   const library = { rows: [], liveExecutions: [], workspaces: {}, warnings: [] }
   const fixture = await store(library)

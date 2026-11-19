@@ -26,6 +26,20 @@ async function addFolder(page: Page, path: string) {
   await page.getByLabel("Remote project folder").fill(path)
   await page.getByRole("button", { name: "Open folder", exact: true }).click()
 }
+
+test("a migration issue is scoped to its conversation rather than every chat", async ({ page }) => {
+  await page.goto("/tests-agents/fixture.html?blocked-sync")
+  await addFolder(page, "/srv/still")
+  await connect(page, "opencode", "Blocked conversation")
+  const issue = page.getByText("Conversation needs attention", { exact: true })
+  await expect(issue).toBeVisible()
+  await issue.click()
+  await expect(page.getByText("The original history and draft were kept.")).toBeVisible()
+  await page.getByRole("button", { name: "New conversation", exact: true }).click()
+  await connect(page, "opencode", "Healthy conversation")
+  await expect(issue).toHaveCount(0)
+  await expect(page.getByText("Library sync details fixture")).toHaveCount(0)
+})
 async function refreshSession(page: Page) {
   await page.getByLabel("Message agent").press("ControlOrMeta+p")
   await page.getByLabel("Search commands").fill("refresh-session")

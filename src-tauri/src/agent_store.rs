@@ -265,7 +265,10 @@ pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, Stil
 /// Missing, deleted and damaged caches are different outcomes. Discovery must
 /// never replace a damaged journal or resurrect a device-local tombstone.
 pub async fn import_remote_snapshot(app: &AppHandle, snapshot: Snapshot, remote: Value) -> Result<Option<Snapshot>, StillError> {
-    disk(app, move |root| {
+    disk(app, move |root| import_remote_snapshot_at(root, snapshot, remote)).await
+}
+
+fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> Result<Option<Snapshot>, String> {
         let id = &snapshot.conversation_id;
         if file(root, id, "deleted")?.exists() { return Ok(None); }
         let path = file(root, id, "jsonl")?;
@@ -303,7 +306,6 @@ pub async fn import_remote_snapshot(app: &AppHandle, snapshot: Snapshot, remote:
             append(&path, &Record::Create { row })?;
             Ok(Some(snapshot))
         }
-    }).await
 }
 
 fn refresh_remote_resume_identity(saved: &mut Snapshot, incoming: &Snapshot) -> Result<bool, String> {
@@ -897,6 +899,39 @@ mod tests {
         static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("still-history-{}-{}-{}", std::process::id(), timestamp(), ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         fs::create_dir_all(&root).unwrap(); root
+    }
+    #[test]
+    fn upgrade_conflict_keeps_preexisting_journal_while_other_conversations_import() {
+        let root = root();
+        let saved = json!({"conversationId":"old-chat","hostKey":"host","executionId":"old-execution",
+            "localSessionId":"local","agentId":"opencode","agentName":"OpenCode","agentSessionId":"provider-session","cwd":"/srv/project",
+            "state":"complete","transcript":[],"pendingPermission":null,"lastError":null,"lastSequence":0,
+            "turnActive":false,"configOptions":[],"commands":[],"pendingInput":null,"resumable":true,
+            "meta":{"id":"old-chat","hostKey":"host","folder":"/srv/project","title":"Old chat","pinned":false,"createdAt":1,"activityAt":1,"order":1,"draft":"unsent draft","draftAttachments":[{"id":"attachment"}],"pendingConfig":{"model":"b"}}});
+        let path = file(&root, "old-chat", "jsonl").unwrap();
+        append(&path, &Record::Create { row: saved.clone() }).unwrap();
+        let event: Event = serde_json::from_value(json!({"sequence":1,"attemptId":"old-execution","type":"assistantChunk","text":"Original history"})).unwrap();
+        append(&path, &Record::Event { fields: json!({"executionId":"old-execution","lastSequence":1}), event }).unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut incoming: Snapshot = serde_json::from_value(saved).unwrap();
+        incoming.execution_id = "new-execution".into();
+        let error = import_remote_snapshot_at(&root, incoming.clone(), json!({"replacesExecutionId":"different-execution","shared":{"generation":2}})).unwrap_err();
+        assert!(error.contains("explicit recovery"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(import_remote_snapshot_at(&root, incoming.clone(), json!({"replacesExecutionId":"old-execution","shared":{"generation":2}})).unwrap().is_some());
+        let migrated = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        assert_eq!(migrated["executionId"], "new-execution");
+        assert_eq!(migrated["meta"]["draft"], "unsent draft");
+        assert_eq!(migrated["meta"]["pendingConfig"]["model"], "b");
+        assert_eq!(migrated["transcript"][0]["text"], "Original history");
+        incoming.conversation_id = "healthy".into(); incoming.execution_id = "healthy-execution".into();
+        assert!(import_remote_snapshot_at(&root, incoming, json!({})).unwrap().is_some());
+        let preserved = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        assert_eq!(preserved["meta"]["draft"], "unsent draft");
+        assert_eq!(preserved["meta"]["draftAttachments"][0]["id"], "attachment");
+        assert_eq!(preserved["meta"]["pendingConfig"]["model"], "b");
+        assert_eq!(preserved["transcript"][0]["text"], "Original history");
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn restart_replays_durable_records_and_recovers_only_incomplete_suffix() {

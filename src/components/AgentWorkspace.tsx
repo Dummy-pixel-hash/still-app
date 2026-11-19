@@ -64,6 +64,7 @@ type Props = {
   connected?: boolean
   connectionNotice?: React.ReactNode
   syncNotice?: React.ReactNode
+  syncIssues?: import("../agents/types").BlockedAgentConversation[]
   onClose: () => void
   onOpenTerminal?: () => void
   onStart: (agentId: string, options?: AgentLaunchOptions, onCreated?: (row: AgentThreadRow) => void) => Promise<AgentThreadRow>
@@ -97,7 +98,7 @@ function relativeActivity(at: number) {
 }
 function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
 
-export default function AgentWorkspace({ presentation = "desktop", initialConversationId, initialView, initialProject, initialProjectPicker = false, closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, syncNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ presentation = "desktop", initialConversationId, initialView, initialProject, initialProjectPicker = false, closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, syncNotice, syncIssues, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const mobile = presentation === "mobile"
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
@@ -1086,7 +1087,12 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
 
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       {current?.meta.shared && (current.meta.sharedPending?.length || current.meta.sharedSyncError) ? <div className="agent-storage-notice" role="status"><span>{current.meta.sharedSyncError || "Saving organization changes to this account…"}</span>{!current.meta.sharedDeleted && <button className="agent-button" onClick={() => void retrySharedChanges(current.executionId)}>{current.meta.sharedConflict ? "Apply my saved changes" : "Retry sync"}</button>}</div> : null}
-      {syncNotice}
+      {!current && syncNotice}
+      {current && syncIssues?.find(issue => issue.conversationId === current.meta.id) && <details className="agent-library-sync-details agent-conversation-sync-issue">
+        <summary>Conversation needs attention</summary>
+        <p>{syncIssues.find(issue => issue.conversationId === current.meta.id)?.reason} Open the library sync details for more information.</p>
+        {current.meta.submissionUnknown && connectedHere && <button className="agent-button" type="button" disabled={busy} onClick={() => void run(() => reconcileAgentThread(current.executionId))}>Check remote status</button>}
+      </details>}
       {context && sharedProjectDeleted(context) && <div className="agent-storage-notice" role="status">This project was removed from the shared account. Your unfinished draft remains on this device. Add or choose a project before sending it.</div>}
       <div className="agent-workbody">
       <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`} inert={review || undefined} aria-hidden={review || undefined}>
