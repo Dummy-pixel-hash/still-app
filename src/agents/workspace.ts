@@ -22,6 +22,7 @@ export interface ConversationMeta {
   order: number
   draft: string
   draftAttachments?: AgentDraftAttachment[]
+  pendingConfig?: Record<string, string | boolean>
   submissionUnknown?: boolean
   prepared?: boolean
   parentConversationId?: string

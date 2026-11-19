@@ -181,7 +181,10 @@ function metadata(row: AgentThreadSnapshot & { meta?: ConversationMeta; touchedA
   const title = typeof row.meta.title === "string" ? row.meta.title : ""
   const firstPromptTitle = row.transcript?.find(event => event.type === "userMessage")?.text?.split("\n")[0].slice(0, 160)
   const titleSource = row.meta.titleSource || (title && title !== firstPromptTitle ? "user" : undefined)
-  return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title, ...(titleSource ? { titleSource } : {}), folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "" }
+  const pendingConfig = row.meta.pendingConfig && typeof row.meta.pendingConfig === "object" && !Array.isArray(row.meta.pendingConfig)
+    ? Object.fromEntries(Object.entries(row.meta.pendingConfig).filter(([id, value]) => typeof id === "string" && id.length > 0 && id.length <= 160 && !/[\p{Cc}]/u.test(id) && (typeof value === "boolean" || typeof value === "string" && value.length <= 4096 && !/[\p{Cc}]/u.test(value))).slice(0, 16)) as Record<string, string | boolean>
+    : undefined
+  return { ...defaults, ...row.meta, id: typeof row.meta.id === "string" ? row.meta.id : defaults.id, hostKey: typeof row.meta.hostKey === "string" ? row.meta.hostKey : "", title, ...(titleSource ? { titleSource } : {}), folder: typeof row.meta.folder === "string" ? row.meta.folder : defaults.folder, draft: typeof row.meta.draft === "string" ? row.meta.draft : "", pendingConfig }
 }
 function withoutObservationEvents(events: AgentThreadEvent[]) { return events.filter(event => event.type !== "capabilities" && event.type !== "todos") }
 function invalidateObservations(row: AgentThreadRow) {
@@ -811,7 +814,7 @@ export function subscribeRemoteAgent(id: string): Promise<void> {
   subscribing.set(id, task)
   return task
 }
-export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false, options?: { messageId?: string; source?: "user" | "parentAgent" }) {
+export async function sendAgentMessage(id: string, message: string, duringHistoryOperation = false, options?: { messageId?: string; source?: "user" | "parentAgent"; config?: Array<{ configId: string; value: string | boolean }> }) {
   const row = rows.get(id)
   if (!row || row.meta.sharedDeleted || row.remoteImported && !row.continuity || row.recoveryReason || resumeOperations.has(id) || !["working", "complete", "cancelled", "error"].includes(row.state) || row.turnActive || row.meta.submissionUnknown || historyOperations.has(id) && !duringHistoryOperation) throw new Error("Agent is not ready for another prompt.")
   // Sequence numbers and the user message come from the native runner, not an optimistic counter.
@@ -821,10 +824,11 @@ export async function sendAgentMessage(id: string, message: string, duringHistor
   catch (error) {
     const current = rows.get(id)
     if (!current) throw error
-    if (error && typeof error === "object" && "code" in error && ["agent_prompt_rejected", "agent_not_ready"].includes(String(error.code))) {
+    if (error && typeof error === "object" && "code" in error && ["agent_prompt_rejected", "agent_not_ready", "agent_config_failed", "agent_config_invalid", "agent_config_busy", "agent_config_unknown"].includes(String(error.code))) {
       await refreshAgentThread(id).catch(() => {})
       const refreshed = rows.get(id)!
       refreshed.lastError = "message" in error ? String(error.message) : "The server rejected this prompt; your draft is preserved."
+      if ("code" in error && String(error.code).startsWith("agent_config_")) refreshed.turnActive = false
       emit(); throw error
     }
     const submitted = current.transcript.find(event => event.type === "userMessage" && event.sequence > sequenceBeforeSend && event.text === message)

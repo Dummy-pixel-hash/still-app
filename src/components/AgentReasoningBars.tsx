@@ -7,7 +7,7 @@ type Props = {
   option: AgentConfigOption
   disabled: boolean
   disabledReason?: string
-  change: (id: string, value: string) => Promise<void>
+  change: (id: string, value: string) => void | Promise<void>
 }
 
 /** Model-derived low / medium-high / high-max presets, plus optional Ultra. */

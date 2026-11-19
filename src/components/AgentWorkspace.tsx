@@ -32,7 +32,7 @@ import AgentProviderMark, { StillAgentMark } from "./AgentProviderMark"
 import AgentChanges, { AgentChangeSummary } from "./AgentChanges"
 import AgentRepositoryChanges from "./AgentRepositoryChanges"
 import { conversationChanges, mergeChangeIndex } from "../agents/changes"
-import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
+import { CommandPicker, ConfigPicker, configValues, modeOption, reasoningOption } from "./AgentControls"
 import AgentModelPicker from "./AgentModelPicker"
 import AgentReasoningBars from "./AgentReasoningBars"
 import AgentAurora from "./AgentAurora"
@@ -116,6 +116,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
   const [undo, setUndo] = useState<{ id: string; at?: number } | null>(null)
   const [busy, setBusy] = useState(false), [configBusy, setConfigBusy] = useState(false)
+  const [configApplying, setConfigApplying] = useState(false)
   const [attachmentProgress, setAttachmentProgress] = useState<Record<string, string>>({})
   const [attachmentError, setAttachmentError] = useState("")
   const [draggingFiles, setDraggingFiles] = useState(false)
@@ -376,7 +377,10 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const agentDetailsScopeKey = activeAgent ? JSON.stringify([activeAgent.executionId, activeAgent.agentId, activeAgent.agentSessionId, activeAgent.cwd, contextKey, transportId]) : "no-agent"
   const draft = current ? current.meta.draft : prefs.drafts[draftKey] || ""
   const attachments: AgentDraftAttachment[] = current ? current.meta.draftAttachments || [] : prefs.draftAttachments?.[draftKey] || []
-  const fields = activeAgent?.configOptions || []
+  const pendingConfig = activeAgent?.meta.pendingConfig || {}
+  const fields = (activeAgent?.configOptions || []).map(option => Object.prototype.hasOwnProperty.call(pendingConfig, option.id)
+    ? { ...option, currentValue: pendingConfig[option.id] }
+    : option)
   const modelControl = fields.find(option => option.category === "model")
   const reasoningControl = reasoningOption(fields)
   const agentModeControl = modeOption(fields)
@@ -796,6 +800,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   }
   const send = async () => {
     const text = draft.trim(), submittedAttachments = [...attachments], parsed = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/)
+    const submittedConfig = { ...(activeAgent?.meta.pendingConfig || {}) }
     const command = commands.find(c => c.name === parsed?.[1]) || commands.find(c => c.aliases?.includes(parsed?.[1] || ""))
     if (command?.route === "client" || command?.unavailable) { chooseCommand(command, parsed?.[2]); if (!command.unavailable) setDraft(""); return }
     if (!canSend) return
@@ -834,7 +839,13 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       }
       const attachmentContext = sent.length ? `\n\nAttached files uploaded to this server (remote paths; image understanding depends on the selected agent):\n${sent.map(file => `- ${markdownCode(file.name.replace(/[\r\n]/g, " "))}: ${markdownCode(file.remotePath || "")}`).join("\n")}` : ""
       const message = `${text}${attachmentContext}`.trim() || `Please inspect the attached file${sent.length === 1 ? "" : "s"}.${attachmentContext}`
-      await sendAgentMessage(row.executionId, message)
+      const config = Object.entries(submittedConfig).map(([configId, value]) => ({ configId, value }))
+        .sort((a, b) => configOrder(row, a.configId) - configOrder(row, b.configId))
+      setConfigError("")
+      setConfigApplying(config.length > 0)
+      try { await sendAgentMessage(row.executionId, message, false, config.length ? { config } : undefined) }
+      finally { if (mounted.current) setConfigApplying(false) }
+      if (Object.keys(submittedConfig).length) updateThreadMeta(row.executionId, { pendingConfig: undefined })
        const rowCleared = clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
        const workspaceCleared = !!current || (prefsRef.current.drafts[draftKey] || "").trim() === text.trim() && (prefsRef.current.draftAttachments?.[draftKey] || []).map(file => file.id).join("|") === submittedAttachments.map(file => file.id).join("|")
        if (!current && workspaceCleared) {
@@ -845,12 +856,30 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       if (mounted.current && navigation.current === revision) scroll.anchorTurn(row.meta.id)
     })
   }
+  const configOrder = (row: AgentThreadRow, id: string) => {
+    const category = row.configOptions.find(option => option.id === id)?.category || ""
+    if (category === "model" || id === "still:model") return 0
+    if (["thought_level", "reasoning", "effort", "variant", "variants"].includes(category)) return 1
+    if (["mode", "agent", "agent_mode"].includes(category) || id === "still:mode") return 2
+    return 3
+  }
   const changeConfig = async (id: string, value: string | boolean) => {
     if (!activeAgent) throw new Error("Connect an agent before changing its configuration.")
     const revision = navigation.current
     setConfigBusy(true); setConfigError("")
     try { await setAgentConfig(activeAgent.executionId, id, value) }
     finally { if (mounted.current && revision === navigation.current) setConfigBusy(false) }
+  }
+  const stageConfig = (id: string, value: string | boolean) => {
+    if (!activeAgent || !idle(activeAgent)) { setConfigError("Wait until the agent is ready before changing settings."); return }
+    const option = activeAgent.configOptions.find(item => item.id === id)
+    const valid = option && (option.type === "boolean" ? typeof value === "boolean" : configValues(option).some(item => item.value === value))
+    if (!valid) { setConfigError(`That ${option?.name || "setting"} choice is no longer available. Refresh the agent settings before sending.`); return }
+    const next = { ...activeAgent.meta.pendingConfig }
+    if (option.currentValue === value) delete next[id]
+    else next[id] = value
+    updateThreadMeta(activeAgent.executionId, { pendingConfig: Object.keys(next).length ? next : undefined })
+    setConfigError("")
   }
   const changeSecondaryConfig = async (id: string, value: string | boolean) => {
     const revision = navigation.current
@@ -977,7 +1006,8 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   }) }
   const projectName = context ? projects.find(p => projectKey(p) === contextKey)?.name || folderName(context.folder) : ""
   const recent = threads.filter(row => view !== "project" || context && row.meta.hostKey === context.host && row.meta.folder === context.folder).sort((a, b) => Number(b.meta.pinned) - Number(a.meta.pinned) || b.meta.activityAt - a.meta.activityAt)
-  const composerNotice = discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : null
+  const stagedSettingCount = Object.keys(activeAgent?.meta.pendingConfig || {}).length
+  const composerNotice = configApplying ? "Applying settings before sending…" : stagedSettingCount ? `${stagedSettingCount} setting${stagedSettingCount === 1 ? "" : "s"} on next send` : discovery.checking ? "Finding agents…" : catalogBusy ? "Loading commands…" : !current && connectedHere && available && !available.available ? `${definition.label} is unavailable` : null
   const nativeShell = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
 
   const topbarIdle = !!current && !current.turnActive && !current.pendingPermission && !current.pendingInput && ["saved", "complete", "working"].includes(current.state)
@@ -1138,9 +1168,9 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
             <div className="agent-composer-toolbar">
               <div className="agent-composer-controls">
                 {!current && <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} />}
-                <AgentModelPicker key={activeAgent?.executionId || configurationKey} provider={current ? { id: current.agentId, name: current.agentName } : undefined} model={modelControl} open={modelMenu !== null} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : current?.state === "error" && idle(current) ? "This turn stopped; you can change its settings or continue" : "Connect the agent to configure its model"} change={changeConfig} />
-                {reasoningControl && <AgentReasoningBars key={`${activeAgent?.executionId}:${reasoningControl.id}`} option={reasoningControl} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its reasoning" : current?.turnActive ? "Wait for the agent to finish before changing its reasoning" : "Connect the agent to configure its reasoning"} change={changeConfig} />}
-                {agentModeControl && <ConfigPicker className="agent-mode-picker" key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
+                <AgentModelPicker key={activeAgent?.executionId || configurationKey} provider={current ? { id: current.agentId, name: current.agentName } : undefined} model={modelControl} open={modelMenu !== null} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : current?.state === "error" && idle(current) ? "This turn stopped; you can change its settings or continue" : "Connect the agent to configure its model"} change={stageConfig} />
+                {reasoningControl && <AgentReasoningBars key={`${activeAgent?.executionId}:${reasoningControl.id}`} option={reasoningControl} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its reasoning" : current?.turnActive ? "Wait for the agent to finish before changing its reasoning" : "Connect the agent to configure its reasoning"} change={stageConfig} />}
+                {agentModeControl && <ConfigPicker className="agent-mode-picker" key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={stageConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
             </div>

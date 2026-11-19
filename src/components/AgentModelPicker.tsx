@@ -9,7 +9,7 @@ type Props = {
   model?: AgentConfigOption
   disabled: boolean
   disabledReason?: string
-  change: (id: string, value: string | boolean) => Promise<void>
+  change: (id: string, value: string | boolean) => void | Promise<void>
   onOpenChange: (open: boolean) => void
   open: boolean
   provider?: { id: string; name: string }

@@ -104,7 +104,7 @@ async function worker() {
   const subscribers = new Set()
   let providerRequestId = 1000
   const subagentRequests = new Map()
-  let initializeResult = null, sessionResult = null, busy = false, activePrompt = null, closing = false, maxRequestId = 3
+  let initializeResult = null, sessionResult = null, busy = false, configuring = false, activePrompt = null, closing = false, maxRequestId = 3
   const titlePromptPath = join(directory, "chat-title-prompted")
   let initializeOperation = null, sessionOperation = null
   const todoRoot = join(process.env.HOME, ".local", "state", "still", "agent-todos")
@@ -148,7 +148,7 @@ async function worker() {
   const bootId = workerBootId()
   const remember = () => {
     const tmp = `${statePath}.tmp`
-    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, conversationId: conversation, cwd: config.cwd, agentId: config.agentId, customAgent: config.customAgent, parentConversationId: config.parentConversationId, title: sharedTitle, titleSource: sharedTitleSource, titleRevision: sharedTitleRevision, hasAcceptedPrompt, replacesExecutionId: config.recoverFrom?.executionId, replacesAgentSessionId: config.recoverFrom?.agentSessionId, bootId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, activePrompt, closed, ended: childEnded, initializeResult, sessionResult }), { mode: 0o600 })
+    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, conversationId: conversation, cwd: config.cwd, agentId: config.agentId, customAgent: config.customAgent, parentConversationId: config.parentConversationId, title: sharedTitle, titleSource: sharedTitleSource, titleRevision: sharedTitleRevision, hasAcceptedPrompt, replacesExecutionId: config.recoverFrom?.executionId, replacesAgentSessionId: config.recoverFrom?.agentSessionId, bootId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, configuring, activePrompt, closed, ended: childEnded, initializeResult, sessionResult }), { mode: 0o600 })
     renameSync(tmp, statePath)
   }
   const publish = message => {
@@ -319,19 +319,24 @@ async function worker() {
       }
       inflight.delete(JSON.stringify(message.id))
     }
-    if (continuity && responseRecord?.socket) {
+    if (continuity && responseRecord?.configurationBatch) {
+      if (settingChanged && sessionResult) publish({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sessionResult.sessionId, update: { sessionUpdate: "config_option_update", configOptions: sessionResult.configOptions || [] } } })
+      if (message.error) responseRecord.configurationBatch.reject(new Error(message.error.message || "Provider rejected the setting."))
+      else responseRecord.configurationBatch.resolve()
+    } else if (continuity && responseRecord?.socket) {
       if (responseRecord.method === "session/prompt") {
         publish({ jsonrpc: "2.0", method: "_still/turn_finished", params: { promptId: message.id, stopReason: message.result?.stopReason, error: message.error?.message } })
       } else {
-        if (responseRecord.socket.writable) writeLine(responseRecord.socket, { ...message, id: responseRecord.clientId })
         if (settingChanged && sessionResult) publish({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sessionResult.sessionId, update: { sessionUpdate: "config_option_update", configOptions: sessionResult.configOptions || [] } } })
+        if (settingChanged) publish({ jsonrpc: "2.0", method: "_still/config_generation", params: { configGeneration } })
+        if (responseRecord.socket.writable) writeLine(responseRecord.socket, { ...message, id: responseRecord.clientId })
       }
     } else publish(message)
     if (historyResult) publish({ jsonrpc:"2.0",method:"_still/history_reverted",params:historyResult })
     if (sessionReady) rememberCapabilities()
     if (settingChanged) capabilitiesDirty = true
     if (capabilitiesDirty) refreshCapabilities()
-    if (continuity && settingChanged) publish({ jsonrpc: "2.0", method: "_still/config_generation", params: { configGeneration } })
+    if (continuity && settingChanged && !responseRecord?.socket) publish({ jsonrpc: "2.0", method: "_still/config_generation", params: { configGeneration } })
     if (sessionReady) for (const target of continuity ? subscribers : owner ? [owner] : []) replay(target)
   }
   const failure = message => publish({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sessionResult?.sessionId, update: { sessionUpdate: "session_error", message } } })
@@ -369,7 +374,7 @@ async function worker() {
   }
   const sessionMetadata = () => {
     const capabilities = capabilityReport()
-    return { ...(sessionResult?._meta || {}), persistent: true, continuity, configGeneration, busy, activePrompt, maxRequestId, executionId: config.executionId, todos: todoSnapshot(), ...(capabilities ? { capabilities } : {}) }
+    return { ...(sessionResult?._meta || {}), persistent: true, continuity, configGeneration, busy, configuring, activePrompt, maxRequestId, executionId: config.executionId, todos: todoSnapshot(), ...(capabilities ? { capabilities } : {}) }
   }
   const replay = socket => {
     for (const event of history) {
@@ -430,6 +435,101 @@ async function worker() {
     subagentRequests.set(requestKey, { socket, requestId: request.id })
     publish({ jsonrpc: "2.0", id: request.id, method: "_still/subagents_request", params: { requestId: request.id, input } })
     socket.once("close", () => { if (subagentRequests.get(requestKey)?.socket === socket) subagentRequests.delete(requestKey) })
+  }
+  const configureAndPrompt = async (socket, request) => {
+    const fail = (message, configurationFailure = false) => {
+      if (socket.writable) writeLine(socket, { jsonrpc: "2.0", id: request.id, error: { code: configurationFailure ? -32030 : -32000, message, ...(configurationFailure ? { data: { configurationFailure: true } } : {}) } })
+    }
+    const params = request.params || {}, meta = params._meta || {}
+    if (!continuity || !sessionResult) { fail("Send settings with a prompt only to an initialized continuity worker."); return }
+    if (params.sessionId !== sessionResult.sessionId) { fail("This settings batch belongs to a different provider session."); return }
+    if (configuring || busy || pending.size || inflight.size) { fail("The conversation is busy; settings were not applied and no prompt was sent."); return }
+    if (meta.expectedConfigGeneration !== configGeneration) { fail("Settings changed on another device. Refresh them before sending; no prompt was sent."); return }
+    const messageId = meta.messageId, source = meta.source || "user", prompt = params.prompt
+    if (typeof messageId !== "string" || !messageId || messageId.length > 300 || /\p{Cc}/u.test(messageId)
+      || !["user", "parentAgent"].includes(source) || !Array.isArray(prompt) || !prompt.length
+      || prompt.some(part => !part || part.type !== "text" || typeof part.text !== "string")
+      || !prompt.some(part => part.text.trim()) || Buffer.byteLength(JSON.stringify(prompt)) > 121000) {
+      fail("Invalid shared prompt or stable message identity; no prompt was sent."); return
+    }
+    const receipt = join(directory, `prompt-${createHash("sha256").update(messageId).digest("hex")}.json`)
+    const signature = createHash("sha256").update(JSON.stringify({ prompt, source, configGeneration: meta.expectedConfigGeneration })).digest("hex")
+    if (existsSync(receipt)) {
+      try {
+        const previous = JSON.parse(readFileSync(receipt, "utf8"))
+        const accepted = history.some(event => event.method === "_still/prompt_accepted" && event.params.messageId === messageId)
+        if (previous.signature === signature && accepted) writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { accepted: true, messageId, promptId: previous.id } })
+        else fail("This prompt identity was already used or its delivery is uncertain. Inspect the conversation before retrying.")
+      } catch { fail("The prompt receipt is unsafe or unreadable. No prompt was resent.") }
+      return
+    }
+    const rawSettings = params.settings
+    if (!Array.isArray(rawSettings) || rawSettings.length > 16) { fail("Choose at most 16 settings before sending."); return }
+    const ids = new Set()
+    const settings = []
+    for (const item of rawSettings) {
+      if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.configId !== "string" || !/^[^\p{Cc}]{1,160}$/u.test(item.configId)
+        || ids.has(item.configId) || !(typeof item.value === "boolean" || typeof item.value === "string" && item.value.length > 0 && item.value.length <= 4096 && !/\p{Cc}/u.test(item.value))) {
+        fail("A staged setting is invalid or duplicated. Refresh the settings and try again."); return
+      }
+      ids.add(item.configId); settings.push({ configId: item.configId, value: item.value })
+    }
+    const options = () => effectiveOptions(sessionResult)
+    const optionFor = id => options().find(option => option?.id === id)
+    const category = id => optionFor(id)?.category || (id === "still:model" ? "model" : id === "still:mode" ? "mode" : "")
+    const order = id => category(id) === "model" ? 0
+      : ["thought_level", "reasoning", "effort", "variant", "variants"].includes(category(id)) ? 1
+        : ["mode", "agent", "agent_mode"].includes(category(id)) ? 2 : 3
+    settings.sort((a, b) => order(a.configId) - order(b.configId))
+    const currentValue = id => {
+      const option = optionFor(id)
+      if (option) return option.currentValue
+      if (id === "still:model") return sessionResult.models?.currentModelId
+      if (id === "still:mode") return sessionResult.modes?.currentModeId
+      return undefined
+    }
+    const offered = (id, value) => {
+      const option = optionFor(id)
+      if (option?.type === "boolean") return typeof value === "boolean"
+      const choices = (option?.options || []).flatMap(item => Array.isArray(item?.options) ? item.options : [item])
+      if (choices.some(choice => choice?.value === value)) return true
+      const legacy = id === "still:model" ? sessionResult.models?.availableModels : id === "still:mode" ? sessionResult.modes?.availableModes : null
+      const key = id === "still:model" ? "modelId" : "id"
+      return Array.isArray(legacy) && legacy.some(item => item?.[key] === value)
+    }
+    const name = id => optionFor(id)?.name || id
+    configuring = true; remember()
+    try {
+      for (const setting of settings) {
+        if (!offered(setting.configId, setting.value)) throw new Error(`${name(setting.configId)} no longer offers that choice. Refresh settings; no prompt was sent.`)
+        if (currentValue(setting.configId) === setting.value) continue
+        const method = setting.configId === "still:model" ? "session/set_model" : setting.configId === "still:mode" ? "session/set_mode" : "session/set_config_option"
+        const settingParams = method === "session/set_model" ? { sessionId: sessionResult.sessionId, modelId: setting.value }
+          : method === "session/set_mode" ? { sessionId: sessionResult.sessionId, modeId: setting.value }
+            : { sessionId: sessionResult.sessionId, configId: setting.configId, value: setting.value }
+        const choices = (optionFor(setting.configId)?.options || []).flatMap(item => Array.isArray(item?.options) ? item.options : [item])
+        if (method === "session/set_config_option" && !optionFor(setting.configId)) throw new Error(`${name(setting.configId)} is no longer available. Refresh settings; no prompt was sent.`)
+        if (method === "session/set_config_option" && !optionFor(setting.configId)?.type?.includes("boolean") && !choices.length && typeof setting.value !== "boolean") throw new Error(`${name(setting.configId)} has no current choices. Refresh settings; no prompt was sent.`)
+        await new Promise((resolve, reject) => {
+          const providerId = ++providerRequestId
+          const key = JSON.stringify(providerId)
+          const batch = { resolve, reject }
+          inflight.set(key, { method, params: settingParams, configurationBatch: batch })
+          try { sendToChild({ jsonrpc: "2.0", id: providerId, method, params: settingParams }) }
+          catch (error) { inflight.delete(key); reject(error) }
+        }).catch(error => { throw new Error(`Could not apply ${name(setting.configId)}: ${errors(error)}. No prompt was sent.`) })
+        if (currentValue(setting.configId) !== setting.value) throw new Error(`The provider did not confirm ${name(setting.configId)}. No prompt was sent.`)
+      }
+      if (!socket.writable) throw new Error("The connection closed while settings were being applied. No prompt was sent; reconnect and review the selected settings.")
+      // Drop the lock and forward the prompt synchronously in the same JS turn;
+      // another device cannot interleave between final setting confirmation and send.
+      configuring = false
+      remember()
+      handle(socket, { ...request, method: "session/prompt", params: { sessionId: sessionResult.sessionId, prompt, _meta: { messageId, source, expectedConfigGeneration: configGeneration } } })
+    } catch (error) {
+      configuring = false; remember()
+      fail(errors(error), true)
+    }
   }
   const handle = (socket, request) => {
     if (request.method === "_still/subagents") { requestSubagents(socket, request); return }
@@ -502,7 +602,7 @@ async function worker() {
     if (continuity && sessionResult && ["session/prompt", "session/cancel", "session/set_config_option", "session/set_mode", "session/set_model", "_still/session/revert"].includes(request.method)
       && request.params?.sessionId !== sessionResult.sessionId) { reject(socket, request, "This command belongs to a different provider session"); return }
     if (continuity && (closed || childEnded) && !["initialize", "session/new", "session/load", "_still/shutdown"].includes(request.method)) { reject(socket, request, "The provider has ended; its shared history is read-only"); return }
-    if (continuity && request.method && !["initialize", "session/new", "session/load", "session/prompt", "session/cancel", "session/set_config_option", "session/set_mode", "session/set_model", "_still/session/revert", "_still/status", "_still/prompt_receipt", "_still/shutdown"].includes(request.method)) {
+    if (continuity && request.method && !["initialize", "session/new", "session/load", "session/prompt", "_still/configure_and_prompt", "session/cancel", "session/set_config_option", "session/set_mode", "session/set_model", "_still/session/revert", "_still/status", "_still/prompt_receipt", "_still/shutdown"].includes(request.method)) {
       reject(socket, request, "This shared-session operation is not supported"); return
     }
     if (typeof request.id === "number" && Number.isSafeInteger(request.id)) maxRequestId = Math.max(maxRequestId, request.id)
@@ -511,7 +611,7 @@ async function worker() {
         writeLine(socket, { jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
         socket.end(); return
       }
-      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, activePrompt, ...(continuity ? { configGeneration } : {}) } })
+      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, configuring, activePrompt, ...(continuity ? { configGeneration } : {}) } })
       return
     }
     if (continuity && request.method === "_still/prompt_receipt") {
@@ -525,7 +625,7 @@ async function worker() {
       return
     }
     if (request.method === "_still/shutdown") {
-      if (continuity && (busy || pending.size || inflight.size)) { reject(socket, request, "The conversation is busy; shutdown was not accepted"); return }
+      if (continuity && (busy || configuring || pending.size || inflight.size)) { reject(socket, request, "The conversation is busy; shutdown was not accepted"); return }
       closing = true; closed = true; remember()
       const done = () => { writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { closed: true } }); socket.end(); for (const client of clients) if (client !== socket) client.end(); server.close() }
       if (!child || childEnded) { retireTodoOwner(); done(); return }
@@ -539,6 +639,7 @@ async function worker() {
       if (initializeOperation !== null) return
       initializeOperation = request.id
     }
+    if (request.method === "_still/configure_and_prompt") { void configureAndPrompt(socket, request); return }
     if (["session/new", "session/load"].includes(request.method)) {
       if (sessionResult) {
         writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { ...sessionResult, _meta: sessionMetadata() } })
@@ -603,7 +704,7 @@ async function worker() {
         }
         reject(socket, request, "This prompt was already submitted. Reattach to inspect its result."); return
       }
-      if (busy || pending.size || continuity && inflight.size) { reject(socket, request, "The agent is busy or needs your answer"); return }
+      if (busy || configuring || pending.size || continuity && inflight.size) { reject(socket, request, "The agent is busy or needs your answer"); return }
       if (continuity && request.params?._meta?.expectedConfigGeneration !== configGeneration) { reject(socket, request, "Settings changed. Refresh before sending your draft."); return }
       if (continuity && (!Array.isArray(originalPrompt) || originalPrompt.some(part => !part || part.type !== "text" || typeof part.text !== "string") || !originalPrompt.some(part => part.text.trim()) || Buffer.byteLength(JSON.stringify(originalPrompt)) > 121000 || !["user", "parentAgent"].includes(source))) { reject(socket, request, "Invalid shared prompt"); return }
       if (sharedLibrary && config.parentConversationId) {
@@ -645,7 +746,7 @@ async function worker() {
     }
     if (continuity && ["session/set_config_option", "session/set_mode", "session/set_model", "_still/session/revert"].includes(request.method)) {
       if (request.method === "_still/session/revert") { reject(socket, request, "Shared-session rewind is not enabled yet"); return }
-      if (busy || pending.size || inflight.size) { reject(socket, request, "The conversation is busy"); return }
+      if (busy || configuring || pending.size || inflight.size) { reject(socket, request, "The conversation is busy"); return }
       if (request.params?._meta?.expectedConfigGeneration !== configGeneration) { reject(socket, request, "Settings changed. Refresh before changing them."); return }
       if (request.method === "session/set_config_option") {
         const option = (sessionResult.configOptions || []).find(option => option.id === request.params?.configId)

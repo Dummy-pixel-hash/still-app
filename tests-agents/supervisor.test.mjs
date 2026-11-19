@@ -10,15 +10,26 @@ const source = fileURLToPath(new URL("../src-tauri/agent-host/supervisor.mjs", i
 const peer = `
 import readline from 'node:readline';
 import { createConnection } from 'node:net';
+import { appendFileSync } from 'node:fs';
 const write = frame => process.stdout.write(JSON.stringify(frame)+'\\n');
+let model='a',effort='medium',mode='ask',settings=[];
+const record=(method,value)=>appendFileSync(process.env.STILL_CONFIG_LOG,JSON.stringify({method,value})+'\\n');
+const configOptions=()=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:[{value:'a',name:'A'},{value:'b',name:'B'}]},{id:'effort',name:'Reasoning',category:'thought_level',type:'select',currentValue:effort,options:(model==='a'?['low','medium','high']:['high','ultra']).map(value=>({value,name:value}))},{id:'mode',name:'Agent',category:'mode',type:'select',currentValue:mode,options:['ask','code'].map(value=>({value,name:value}))}];
 function todoRequest(id,method,params){return new Promise((resolve,reject)=>{const socket=createConnection(process.env.STILL_TODO_SOCKET);let buffer='';socket.once('connect',()=>socket.write(JSON.stringify({jsonrpc:'2.0',id,method,params:{token:process.env.STILL_TODO_TOKEN,...params}})+'\\n'));socket.on('data',chunk=>{buffer+=chunk;let end;while((end=buffer.indexOf('\\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line)continue;const frame=JSON.parse(line);if(frame.id===id){socket.end();resolve(frame)}}});socket.once('error',reject);});}
 const input = readline.createInterface({input:process.stdin});
 input.on('line',line=>{
  const m=JSON.parse(line);
  if(m.method==='initialize')write({jsonrpc:'2.0',id:m.id,result:{protocolVersion:1,agentInfo:{name:'Fixture agent'}}});
-   else if(['session/new','session/load'].includes(m.method))write({jsonrpc:'2.0',id:m.id,result:{sessionId:m.params?.sessionId||'server-session',resumed:m.method==='session/load',configOptions:[{id:'model',name:'Model',type:'select',currentValue:'a',options:[{value:'a',name:'A'},{value:'b',name:'B'}]}],receivedMcpServers:m.params?.mcpServers||[],fixtureTodoRoute:{socket:process.env.STILL_TODO_SOCKET,token:process.env.STILL_TODO_TOKEN}}});
- else if(m.method==='session/set_config_option')write({jsonrpc:'2.0',id:m.id,result:{configOptions:[{id:'model',name:'Model',type:'select',currentValue:m.params.value,options:[{value:'a',name:'A'},{value:'b',name:'B'}]}]}});
- else if(m.method==='session/prompt'){
+    else if(['session/new','session/load'].includes(m.method))write({jsonrpc:'2.0',id:m.id,result:{sessionId:m.params?.sessionId||'server-session',resumed:m.method==='session/load',configOptions:configOptions(),receivedMcpServers:m.params?.mcpServers||[],fixtureTodoRoute:{socket:process.env.STILL_TODO_SOCKET,token:process.env.STILL_TODO_TOKEN}}});
+  else if(m.method==='session/set_config_option'){
+    settings.push({configId:m.params.configId,value:m.params.value});
+    record('setting',{configId:m.params.configId,value:m.params.value});
+    if(m.params.configId==='model')model=m.params.value;else if(m.params.configId==='effort')effort=m.params.value;else if(m.params.configId==='mode')mode=m.params.value;
+    setTimeout(()=>write({jsonrpc:'2.0',id:m.id,result:{configOptions:configOptions()}}),m.params.configId==='model'?45:0);
+  }
+  else if(m.method==='session/set_mode'){mode=m.params.modeId;settings.push({configId:'mode',value:mode});write({jsonrpc:'2.0',id:m.id,result:{}});}
+  else if(m.method==='session/prompt'){
+   record('prompt',m.params.prompt[0].text);
   write({jsonrpc:'2.0',method:'session/update',params:{sessionId:'server-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Started'}}}});
    if(m.params.prompt[0].text==='question')write({jsonrpc:'2.0',id:'question-1',method:'elicitation/create',params:{sessionId:'server-session',mode:'form',message:'Choose a branch',requestedSchema:{properties:{answer:{type:'string'}}}}});
    else if(m.params.prompt[0].text==='approval')write({jsonrpc:'2.0',id:'approval-1',method:'session/request_permission',params:{sessionId:'server-session',toolCall:{title:'Run checks'},options:[{optionId:'yes',name:'Allow once',kind:'allow_once'},{optionId:'no',name:'Reject',kind:'reject_once'}]}});
@@ -59,7 +70,7 @@ input.on('close',()=>process.exit(0));
 `
 
 function attach(config, mode = "attach") {
-  const process = spawn(globalThis.process.execPath, [source,mode,Buffer.from(JSON.stringify(config)).toString("base64")], { stdio:["pipe","pipe","pipe"], env:{...globalThis.process.env,...(config.todoHome?{HOME:config.todoHome}:{})} })
+  const process = spawn(globalThis.process.execPath, [source,mode,Buffer.from(JSON.stringify(config)).toString("base64")], { stdio:["pipe","pipe","pipe"], env:{...globalThis.process.env,...(config.todoHome?{HOME:config.todoHome}:{}),...(config.configLog?{STILL_CONFIG_LOG:config.configLog}:{})} })
   const frames = [], waiters = []
   let buffer = "", stderr = ""
   process.stderr.on("data",chunk=>{ stderr += chunk })
@@ -85,7 +96,7 @@ async function initialize(client, resumeSessionId) {
 async function fixture(fn) {
   const directory=await mkdtemp("/tmp/opencode/still-worker-")
   const todoHome=directory+"/home";await mkdir(todoHome,{recursive:true})
-  const config={directory,executionId:"agent-fixture",cwd:directory,command:[process.execPath,"--input-type=module","-e",peer],create:true,todoHome}
+  const config={directory,executionId:"agent-fixture",cwd:directory,command:[process.execPath,"--input-type=module","-e",peer],create:true,todoHome,configLog:join(directory,"provider-config.jsonl")}
   const clients=[], workers=new Map([[directory,config]])
   const make=(extra={})=>{const value={...config,...extra};workers.set(value.directory,value);const client=attach(value);clients.push(client);return client}
   try{await fn({config,make,directory})}
@@ -118,7 +129,7 @@ test("remote worker survives transport death and replays offline output without 
   const started=await first.wait(frame=>frame.params?.update?.content?.text==="Started")
   first.send({jsonrpc:"2.0",id:102,method:"_still/status",params:{}})
   const active=await first.wait(frame=>frame.id===102)
-  assert.deepEqual(active.result,{busy:true,activePrompt:101})
+  assert.deepEqual(active.result,{busy:true,configuring:false,activePrompt:101})
   const original=JSON.parse(await readFile(directory+"/state.json","utf8"))
   await first.close()
   // No client exists while the provider finishes: equivalent to the local app
@@ -132,7 +143,7 @@ test("remote worker survives transport death and replays offline output without 
   assert.ok(finished._still.index>started._still.index)
   await second.wait(frame=>frame.id===101&&frame.result?.stopReason==="end_turn")
   second.send({jsonrpc:"2.0",id:103,method:"_still/status",params:{}})
-  assert.deepEqual((await second.wait(frame=>frame.id===103)).result,{busy:false,activePrompt:null})
+  assert.deepEqual((await second.wait(frame=>frame.id===103)).result,{busy:false,configuring:false,activePrompt:null})
   const current=JSON.parse(await readFile(directory+"/state.json","utf8"))
   assert.equal(current.pid,original.pid);assert.equal(current.childPid,original.childPid)
   second.send({jsonrpc:"2.0",id:102,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"build"}],_meta:{messageId:"message-1"}}})
@@ -215,6 +226,44 @@ test("continuity model changes fan out and stale configuration generations canno
   desktop.send({jsonrpc:"2.0",id:101,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"stale prompt"}],_meta:{messageId:"stale-config",expectedConfigGeneration:0}}})
   assert.match((await desktop.wait(frame=>frame.id===101&&frame.error)).error.message,/Settings changed/)
   assert.equal(desktop.frames.some(frame=>frame.method==="_still/prompt_accepted"),false)
+}))
+
+test("settings batch applies model, dependent effort and mode before one prompt while other devices wait", {timeout:15000}, () => fixture(async({make,directory,config}) => {
+  config.configLog=join(directory,"batch-provider.jsonl")
+  const desktop=make({continuity:true});await initialize(desktop)
+  const phone=make({continuity:true,create:false});await initialize(phone)
+  const waitFor=(client,predicate,label)=>client.wait(predicate).catch(error=>{throw new Error(`${label}: ${error.message}; frames=${JSON.stringify(client.frames.slice(-10))}; stderr=${client.stderr}`)})
+  desktop.send({jsonrpc:"2.0",id:101,method:"_still/configure_and_prompt",params:{sessionId:"server-session",settings:[{configId:"model",value:"b"},{configId:"effort",value:"high"},{configId:"mode",value:"code"}],prompt:[{type:"text",text:"Run with chosen settings"}],_meta:{messageId:"configured-prompt",source:"user",expectedConfigGeneration:0}}})
+  desktop.send({jsonrpc:"2.0",id:103,method:"_still/status",params:{}})
+  assert.equal((await waitFor(desktop,frame=>frame.id===103,"batch lock status")).result.configuring,true)
+  phone.send({jsonrpc:"2.0",id:102,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"Competing prompt"}],_meta:{messageId:"competing-prompt",expectedConfigGeneration:0}}})
+  const blocked=await waitFor(phone,frame=>frame.id===102&&frame.error,"competing send rejection")
+  assert.match(blocked.error.message,/busy/)
+  const accepted=await waitFor(desktop,frame=>frame.id===101&&frame.result?.accepted,"batch prompt acceptance")
+  assert.equal(accepted.result.messageId,"configured-prompt")
+  await waitFor(desktop,frame=>frame.method==="_still/turn_finished","provider turn completion")
+  const log=(await readFile(config.configLog,"utf8")).trim().split("\n").map(line=>JSON.parse(line))
+  assert.deepEqual(log,[
+    {method:"setting",value:{configId:"model",value:"b"}},
+    {method:"setting",value:{configId:"effort",value:"high"}},
+    {method:"setting",value:{configId:"mode",value:"code"}},
+    {method:"prompt",value:"Run with chosen settings"},
+  ])
+  for(let generation=1;generation<=3;generation++) await waitFor(phone,frame=>frame.method==="_still/config_generation"&&frame.params.configGeneration===generation,`config generation ${generation}`)
+}))
+
+test("a model-dependent setting rejection leaves the prompt unsubmitted and releases the batch", {timeout:15000}, () => fixture(async({make,directory,config}) => {
+  config.configLog=join(directory,"failed-batch-provider.jsonl")
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"_still/configure_and_prompt",params:{sessionId:"server-session",settings:[{configId:"model",value:"b"},{configId:"effort",value:"medium"}],prompt:[{type:"text",text:"Do not submit this"}],_meta:{messageId:"rejected-config-prompt",source:"user",expectedConfigGeneration:0}}})
+  const failure=await desktop.wait(frame=>frame.id===101&&frame.error)
+  assert.equal(failure.error.data.configurationFailure,true)
+  assert.match(failure.error.message,/Reasoning no longer offers that choice/)
+  assert.equal(desktop.frames.some(frame=>frame.method==="_still/prompt_accepted"),false)
+  const log=(await readFile(config.configLog,"utf8")).trim().split("\n").map(line=>JSON.parse(line))
+  assert.deepEqual(log,[{method:"setting",value:{configId:"model",value:"b"}}])
+  desktop.send({jsonrpc:"2.0",id:102,method:"_still/status",params:{}})
+  assert.equal((await desktop.wait(frame=>frame.id===102)).result.configuring,false)
 }))
 
 test("stale request boundaries and unoffered approvals cannot reach the provider", {timeout:15000}, () => fixture(async({make}) => {

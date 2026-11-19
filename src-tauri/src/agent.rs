@@ -318,6 +318,7 @@ struct Thread {
     capability_remote_cursor: u64,
     subagent_requests: HashMap<String, Instant>,
     prompt_delivery: Option<(u64, oneshot::Sender<Result<(), String>>)>,
+    config_batch_active: bool,
     cancel_delivery: Option<(u64, oneshot::Sender<Result<(), String>>)>,
 }
 struct PendingHistory {
@@ -371,13 +372,21 @@ pub struct AttachArgs {
     execution_id: String,
     conversation_id: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendArgs {
     execution_id: String,
     message: String,
     message_id: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    config: Vec<ConfigUpdate>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigUpdate {
+    config_id: String,
+    value: Value,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1721,6 +1730,7 @@ pub async fn still_agent_start(
         capability_remote_cursor: 0,
         subagent_requests: HashMap::new(),
         prompt_delivery: None,
+        config_batch_active: false,
         cancel_delivery: None,
     }));
     registry().lock().await.insert(execution_id, row.clone());
@@ -2346,6 +2356,15 @@ async fn handle(
             }
             if thread.prompt_delivery.as_ref().is_some_and(|pending| id.as_u64() == Some(pending.0)) {
                 let (_, reply) = thread.prompt_delivery.take().unwrap();
+                if error.pointer("/data/configurationFailure").and_then(Value::as_bool) == Some(true) {
+                    thread.snapshot.recovery_required = false;
+                    thread.snapshot.pending_message_id = None;
+                    thread.recovering_uncertain = false;
+                    thread.snapshot.last_error = Some(message.to_owned());
+                    let mut event = Event::new("threadError"); event.state = Some(thread.snapshot.state.clone()); event.text = Some(message.to_owned()); emit(&mut thread, event).await;
+                    let _ = reply.send(Err(format!("CONFIGURATION_REJECTED:{message}")));
+                    return Ok(());
+                }
                 let uncertain = message.contains("delivery is uncertain");
                 thread.snapshot.recovery_required = uncertain;
                 thread.recovering_uncertain = uncertain;
@@ -3132,24 +3151,100 @@ async fn await_request_delivery(response: oneshot::Receiver<Result<(), String>>)
 }
 
 #[tauri::command]
-pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
+pub async fn still_agent_send(mut args: SendArgs) -> Result<(), StillError> {
     if args.message.trim().is_empty() || args.message.len() > 120_000 {
         return Err(StillError::friendly(
             "agent_prompt",
             "Message must be non-empty and under 120,000 bytes.",
         ));
     }
-    let row = find_thread(&args.execution_id).await?;
-    let mut thread = row.lock().await;
     let source = args.source.as_deref().unwrap_or("user");
     if !["user", "parentAgent"].contains(&source) {
         return Err(StillError::friendly("agent_prompt_source", "Invalid message source."));
     }
-    let message_id = args.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let message_id = args.message_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if message_id.is_empty() || message_id.len() > 300 || message_id.chars().any(char::is_control) {
         return Err(StillError::friendly("agent_prompt_identity", "Invalid prompt identity."));
     }
-    if let Some(existing) = thread.messages.iter().find(|event| event.message_id.as_deref() == Some(message_id.as_str())) {
+    args.message_id = Some(message_id.clone());
+    if args.config.len() > 16 {
+        return Err(StillError::friendly("agent_config_invalid", "Choose at most 16 settings before sending."));
+    }
+    let mut config_ids = std::collections::HashSet::new();
+    for setting in &args.config {
+        if setting.config_id.is_empty() || setting.config_id.len() > 160 || setting.config_id.chars().any(char::is_control)
+            || !config_ids.insert(setting.config_id.as_str())
+            || !(setting.value.is_boolean() || setting.value.as_str().is_some_and(|value| !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control))) {
+            return Err(StillError::friendly("agent_config_invalid", "A staged setting is invalid or duplicated. Refresh the settings and try again."));
+        }
+    }
+    let row = find_thread(&args.execution_id).await?;
+    if args.config.is_empty() { return send_agent_message(&row, args, false).await; }
+    {
+        let mut thread = row.lock().await;
+        if let Some(existing) = thread.messages.iter().find(|event| event.message_id.as_deref() == Some(message_id.as_str())) {
+            if existing.text.as_deref() == Some(args.message.as_str()) && existing.source.as_deref().unwrap_or("user") == source { return Ok(()); }
+            return Err(StillError::friendly("agent_prompt_identity", "This prompt identity was already used for different content."));
+        }
+        if thread.config_batch_active || thread.snapshot.turn_active || thread.prompt.is_some() || thread.prompt_delivery.is_some()
+            || thread.snapshot.pending_permission.is_some() || thread.snapshot.pending_input.is_some() || !thread.config_requests.is_empty()
+            || thread.history_request.is_some() || thread.snapshot.recovery_reason.is_some() || thread.snapshot.recovery_required
+            || !matches!(thread.snapshot.state.as_str(), "working" | "complete" | "cancelled" | "error") {
+            return Err(StillError::friendly("agent_not_ready", "The conversation is busy or awaiting approval. Your settings and draft are unchanged."));
+        }
+        thread.config_batch_active = true;
+    }
+    let result = async {
+        if !row.lock().await.snapshot.continuity {
+            // Compatibility path for a single-owner v3 worker. Current shared
+            // workers use the atomic server-side configure-and-prompt request.
+            let mut settings = args.config.clone();
+            let options = row.lock().await.snapshot.config_options.clone();
+            settings.sort_by_key(|setting| config_setting_rank(&options, &setting.config_id));
+            for setting in &settings {
+                apply_agent_config(&row, SetConfigArgs { execution_id: args.execution_id.clone(), config_id: setting.config_id.clone(), value: setting.value.clone() }, true).await?;
+            }
+            let mut prompt = args.clone(); prompt.config.clear();
+            return send_agent_message(&row, prompt, true).await;
+        }
+        match send_agent_message(&row, args.clone(), true).await {
+            Err(error) if error.code == "agent_prompt_rejected" && error.message.contains("This shared-session operation is not supported") => {
+                // A previously deployed v4 worker can share sessions but predates
+                // the atomic batch method. Its generation fences still prevent a
+                // prompt from being sent under stale settings.
+                let mut settings = args.config.clone();
+                let options = row.lock().await.snapshot.config_options.clone();
+                settings.sort_by_key(|setting| config_setting_rank(&options, &setting.config_id));
+                for setting in &settings {
+                    apply_agent_config(&row, SetConfigArgs { execution_id: args.execution_id.clone(), config_id: setting.config_id.clone(), value: setting.value.clone() }, true).await?;
+                }
+                let mut prompt = args; prompt.config.clear();
+                send_agent_message(&row, prompt, true).await
+            }
+            result => result,
+        }
+    }.await;
+    row.lock().await.config_batch_active = false;
+    result
+}
+
+fn config_setting_rank(options: &[Value], id: &str) -> u8 {
+    let category = options.iter().find(|option| option.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|option| option.get("category")).and_then(Value::as_str).unwrap_or("");
+    if category == "model" || id == "still:model" { 0 }
+    else if matches!(category, "thought_level" | "reasoning" | "effort" | "variant" | "variants") { 1 }
+    else if matches!(category, "mode" | "agent" | "agent_mode") || id == "still:mode" { 2 }
+    else { 3 }
+}
+
+async fn send_agent_message(row: &Arc<Mutex<Thread>>, args: SendArgs, batch_owner: bool) -> Result<(), StillError> {
+    let mut thread = row.lock().await;
+    if thread.config_batch_active != batch_owner {
+        return Err(StillError::friendly("agent_config_busy", "Settings are being applied for another send."));
+    }
+    let source = args.source.as_deref().unwrap_or("user");
+    let message_id = args.message_id.as_deref().unwrap_or_default();
+    if let Some(existing) = thread.messages.iter().find(|event| event.message_id.as_deref() == Some(message_id)) {
         if existing.text.as_deref() == Some(args.message.as_str()) && existing.source.as_deref().unwrap_or("user") == source { return Ok(()); }
         return Err(StillError::friendly("agent_prompt_identity", "This prompt identity was already used for different content."));
     }
@@ -3181,22 +3276,30 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
         // Persist uncertain intent before the SSH write. A process restart cannot
         // turn an unacknowledged send into a fresh, automatically retried prompt.
         thread.snapshot.recovery_required = true;
-        thread.snapshot.pending_message_id = Some(message_id.clone());
+        thread.snapshot.pending_message_id = Some(message_id.to_owned());
         let mut pending = Event::new("threadState"); pending.state = Some(thread.snapshot.state.clone());
         emit(&mut thread, pending).await;
         if let Err(error) = flush_history(&mut thread).await {
             thread.prompt_delivery = None;
+            thread.snapshot.recovery_required = false;
+            thread.snapshot.pending_message_id = None;
             return Err(error);
         }
-        let request = json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id,"source":source,"expectedConfigGeneration":generation}}});
+        let (method, params) = if batch_owner && !args.config.is_empty() {
+            ("_still/configure_and_prompt", json!({"sessionId":sid,"settings":args.config.iter().map(|item| json!({"configId":item.config_id,"value":item.value})).collect::<Vec<_>>(),"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id,"source":source,"expectedConfigGeneration":generation}}))
+        } else {
+            ("session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id,"source":source,"expectedConfigGeneration":generation}}))
+        };
+        let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         if thread.outbound.send(request).is_err() {
             thread.prompt_delivery = None; thread.snapshot.recovery_required = false; thread.snapshot.pending_message_id = None;
             let mut event = Event::new("threadState"); event.state = Some(thread.snapshot.state.clone()); emit(&mut thread, event).await;
             return Err(StillError::friendly("agent_prompt_rejected", "The connection closed before this prompt was sent."));
         }
         drop(thread);
-        return match tokio::time::timeout(Duration::from_secs(20), receive).await {
+        return match tokio::time::timeout(Duration::from_secs(80), receive).await {
             Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(message))) if message.starts_with("CONFIGURATION_REJECTED:") => Err(StillError::friendly("agent_config_failed", message.trim_start_matches("CONFIGURATION_REJECTED:"))),
             Ok(Ok(Err(message))) => Err(StillError::friendly(if message.starts_with("Prompt delivery could not") || message.contains("delivery is uncertain") { "agent_submission_unknown" } else { "agent_prompt_rejected" }, message)),
             _ => Err(StillError::friendly("agent_submission_unknown", "Prompt acceptance was not confirmed. Reconnect and check history before retrying.")),
         };
@@ -3208,7 +3311,7 @@ pub async fn still_agent_send(args: SendArgs) -> Result<(), StillError> {
     thread.snapshot.last_error = None;
     let mut event = Event::new("userMessage");
     event.text = Some(args.message.clone());
-    event.message_id = Some(message_id.clone());
+    event.message_id = Some(message_id.to_owned());
     event.source = Some(source.to_owned());
     emit(&mut thread, event).await;
     if thread.outbound.send(json!({"jsonrpc":"2.0","id":id,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":args.message}],"_meta":{"messageId":message_id}}})).is_err() {
@@ -3273,7 +3376,14 @@ pub struct SetConfigArgs {
 #[tauri::command]
 pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillError> {
     let row = find_thread(&args.execution_id).await?;
+    apply_agent_config(&row, args, false).await
+}
+
+async fn apply_agent_config(row: &Arc<Mutex<Thread>>, args: SetConfigArgs, batch_owner: bool) -> Result<(), StillError> {
     let mut thread = row.lock().await;
+    if thread.config_batch_active != batch_owner {
+        return Err(StillError::friendly("agent_config_busy", "Settings are being applied before another prompt."));
+    }
     let session = thread.snapshot.agent_session_id.clone().ok_or_else(|| {
         StillError::friendly("agent_not_ready", "ACP session is still initializing.")
     })?;
@@ -3283,6 +3393,7 @@ pub async fn still_agent_set_config(args: SetConfigArgs) -> Result<(), StillErro
             "working" | "complete" | "cancelled" | "error"
         )
         || thread.prompt.is_some()
+        || thread.prompt_delivery.is_some() && !batch_owner
         || !thread.config_requests.is_empty()
         || thread.history_request.is_some()
     {
@@ -3429,7 +3540,7 @@ pub async fn still_agent_attach(app: AppHandle, state: State<'_, AppState>, args
             transport_active: true, transport_epoch: 1, recovering_uncertain, resume_session_id: None, early_updates: Vec::new(), cleanup_error: None,
             unsaved: VecDeque::new(), history_lease: Some(lease), messages, history_request: None, reconcile_request: None,
             load_session: false, capability_notice: None,
-            awaiting_catch_up: true, capability_remote_cursor, subagent_requests: HashMap::new(), prompt_delivery: None, cancel_delivery: None,
+            awaiting_catch_up: true, capability_remote_cursor, subagent_requests: HashMap::new(), prompt_delivery: None, config_batch_active: false, cancel_delivery: None,
         }));
         if stale_changed {
             let mut thread = row.lock().await;
@@ -4155,7 +4266,7 @@ else if(m.method==='session/prompt'){const racing=m.params.prompt[0].text==='clo
             }).await.unwrap();
             let library=still_agent_remote_library(handle.clone(),state.clone(),RemoteLibraryArgs{native_session_id:connected.session_id.clone(),after:None}).await.unwrap();
             assert!(library["rows"].as_array().unwrap().iter().any(|row|row["conversationId"]==id));
-            still_agent_send(SendArgs{execution_id:start.execution_id.clone(),message:"Reply from native client".into(),message_id:Some("native-message".into()),source:None}).await.unwrap();
+            still_agent_send(SendArgs{execution_id:start.execution_id.clone(),message:"Reply from native client".into(),message_id:Some("native-message".into()),source:None,config:Vec::new()}).await.unwrap();
             tokio::time::timeout(Duration::from_secs(10),async {
                 while !receive_until(&mut buffer,"native-message") {
                     if let Some(ChannelMsg::Data{data})=other.wait().await {buffer.extend_from_slice(&data)}

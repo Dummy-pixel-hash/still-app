@@ -54,6 +54,7 @@ const h = {
   trimSnapshot: (count: number) => { const row = snapshots.get(h.current)!; row.transcript = row.transcript.slice(-count) },
   rejectConfig: false, rejectSend: false, rejectResponse: false, deferResponse: false, deferConfig: false, unknownResponse: false, failSnapshot: false,
   releaseResponse: () => {}, releaseConfig: () => {},
+  order: [] as Array<{ type: "config" | "prompt"; value: unknown }>,
   reasoningByModel: {} as Record<string, AgentConfigOption | null>,
   configOptions: () => structuredClone(snapshots.get(h.current)!.configOptions),
   closed: false, resumable: false, persistent: false, workerUnavailable: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
@@ -137,6 +138,20 @@ const h = {
     h.emit(id, { type: "commands", commands: projectCommands })
     h.finish()
   },
+}
+function applyFixtureConfig(id: string, configId: string, value: string | boolean) {
+  const row = snapshots.get(id)!
+  h.configs.push({ configId, value })
+  h.order.push({ type: "config", value: { configId, value } })
+  const option = row.configOptions.find(item => item.id === configId)
+  if (!option) throw new Error("The setting is no longer available")
+  option.currentValue = value
+  if (configId === "model" && Object.prototype.hasOwnProperty.call(h.reasoningByModel, String(value))) {
+    row.configOptions = row.configOptions.filter(item => item.category !== "thought_level")
+    const reasoning = h.reasoningByModel[String(value)]
+    if (reasoning) row.configOptions.push(structuredClone(reasoning))
+  }
+  h.emit(id, { type: "configOptions", configOptions: structuredClone(row.configOptions) })
 }
 Object.assign(window, { agentFixture: h })
 registerNativeBridge({
@@ -237,10 +252,13 @@ registerNativeBridge({
   agentReconcile: async id => { h.reconciles.push(id); if (h.reconcileFail) throw new Error("Remote status check failed"); const row = snapshots.get(id); if (!row) throw new Error("Agent execution unavailable"); h.reconcile() },
   agentAttach: async (_native, id) => { h.attaches.push(id); const row = snapshots.get(id) || library().rows.find((item: AgentThreadSnapshot) => item.executionId === id); if (!row?.persistent) throw new Error("Persistent worker unavailable"); snapshots.set(id, row); if (h.workerUnavailable) h.emit(id, { type: "threadError", state: "error", recoveryReason: "workerUnavailable", text: "The server-side worker is no longer available. Resume the saved provider session; no prompt has been resent." }); else { if (row.todos) row.todoSync = { state: "current" }; h.emit(id,{ type:"threadState",state:row.pendingInput || row.pendingPermission ? "inputRequired" : "working" }) } return structuredClone(row) },
   subscribeToAgent: async (id, callback) => { sinks.set(id, callback); return () => { sinks.delete(id) } },
-   agentSend: async (id, message, options) => {
-    if (h.rejectSend && !h.completeBeforeReject) throw new Error("SSH disconnected. Submission is uncertain.")
-    const row = snapshots.get(id)!
-    h.sends.push(message)
+    agentSend: async (id, message, options) => {
+     if (h.rejectSend && !h.completeBeforeReject) throw new Error("SSH disconnected. Submission is uncertain.")
+     const row = snapshots.get(id)!
+     if (options?.config?.length && h.rejectConfig) throw Object.assign(new Error("The agent rejected the staged settings. No prompt was sent."), { code: "agent_config_failed" })
+     for (const setting of options?.config || []) applyFixtureConfig(id, setting.configId, setting.value)
+     h.order.push({ type: "prompt", value: message })
+     h.sends.push(message)
     h.sentConfigs.push({ agent: row.agentId, model: row.configOptions.find(option => option.category === "model")?.currentValue })
      const messageId = options?.messageId || `${id}:message:${row.lastSequence + 1}`
      h.emit(id, { type: "userMessage", text: message, messageId, source: options?.source })
@@ -270,19 +288,11 @@ registerNativeBridge({
     h.emit(id, { type: "historyReverted", messageId, text: message.text })
     return structuredClone(row)
   },
-  agentSetConfig: async (id, configId, value) => {
+   agentSetConfig: async (id, configId, value) => {
     if (h.rejectConfig) throw new Error("The agent rejected that setting.")
-    h.configs.push({ configId, value })
     if (h.deferConfig) await new Promise<void>(resolve => { h.releaseConfig = resolve })
-    const row = snapshots.get(id)!
-    row.configOptions.find(option => option.id === configId)!.currentValue = value
-    if (configId === "model" && Object.prototype.hasOwnProperty.call(h.reasoningByModel, String(value))) {
-      row.configOptions = row.configOptions.filter(option => option.category !== "thought_level")
-      const reasoning = h.reasoningByModel[String(value)]
-      if (reasoning) row.configOptions.push(structuredClone(reasoning))
-    }
-    h.emit(id, { type: "configOptions", configOptions: structuredClone(row.configOptions) })
-  },
+    applyFixtureConfig(id, configId, value)
+   },
   agentRespondPermission: async (id, requestId, optionId) => {
     const row = snapshots.get(id)!, request = row.pendingPermission, option = request?.options.find(value => value.optionId === optionId)
     if (!request || request.requestId !== requestId || !option) throw new Error("This permission is no longer pending")

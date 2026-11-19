@@ -184,7 +184,7 @@ test("parent agent prepares a child, selects model effort and mode, then sends t
   expect(spawned.reply.settings).toMatchObject({ model: { current: "b" }, effort: { current: "high" }, mode: { current: "code" } })
 })
 
-test("model selection is minimal and independent of reasoning and mode", async ({ page }) => {
+test("model, effort and mode stage instantly and are applied together before Send", async ({ page }) => {
   await connect(page)
   const modelTrigger = page.getByRole("button", { name: "Model: Model A", exact: true })
   await expect(modelTrigger).toHaveCSS("border-radius", "10px")
@@ -194,8 +194,11 @@ test("model selection is minimal and independent of reasoning and mode", async (
   await page.getByLabel("Search models").fill("Model B")
   await page.getByRole("option", { name: "Model B" }).click()
   await expect(page.getByRole("dialog", { name: "Models", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Model: Model B", exact: true })).toBeVisible()
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   await page.getByRole("button", { name: "Reasoning effort: Medium", exact: true }).click()
   await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toBeVisible()
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   const modeTrigger = page.getByRole("button", { name: "Agent: Ask", exact: true })
   await expect(modeTrigger).toHaveCSS("border-radius", "9px")
   await modeTrigger.click()
@@ -205,12 +208,28 @@ test("model selection is minimal and independent of reasoning and mode", async (
   await expect(page.getByRole("option", { name: /Code/ })).toBeFocused()
   await page.keyboard.press("Enter")
   await expect(page.getByRole("button", { name: "Agent: Code", exact: true })).toBeVisible()
+  await expect(page.locator(".agent-composer-status")).toContainText("3 settings on next send")
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   await page.evaluate(() => { (window as any).agentFixture.rejectConfig = true })
-  await page.getByRole("button", { name: "Model: Model B", exact: true }).click()
-  await page.getByLabel("Search models").fill("Model A")
-  await page.getByRole("option", { name: "Model A" }).click()
-  await expect(page.getByRole("alert")).toContainText("The agent rejected that setting")
   await expect(page.getByRole("button", { name: "Model: Model B", exact: true })).toBeVisible()
+  const previousSends = await page.evaluate(() => (window as any).agentFixture.sends.length)
+  await page.getByLabel("Message agent").fill("Keep my settings if the provider rejects them")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("The agent rejected the staged settings")
+  expect(await page.evaluate(() => (window as any).agentFixture.sends.length)).toBe(previousSends)
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
+  await expect(page.getByLabel("Message agent")).toHaveValue("Keep my settings if the provider rejects them")
+
+  await page.evaluate(() => { (window as any).agentFixture.rejectConfig = false })
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText("Keep my settings if the provider rejects them")
+  expect(await page.evaluate(() => (window as any).agentFixture.order.slice(-4))).toEqual([
+    { type: "config", value: { configId: "model", value: "b" } },
+    { type: "config", value: { configId: "effort", value: "high" } },
+    { type: "config", value: { configId: "mode", value: "code" } },
+    { type: "prompt", value: "Keep my settings if the provider rejects them" },
+  ])
+  await expect(page.locator(".agent-composer-status")).toHaveCount(0)
 })
 
 test("reasoning bars are a separate direct control for every available effort level", async ({ page }) => {
@@ -224,7 +243,7 @@ test("reasoning bars are a separate direct control for every available effort le
   await expect(reasoning).toHaveAccessibleName("Reasoning effort: Medium")
   await middle.click()
   await expect(reasoning).toHaveAccessibleName("Reasoning effort: High")
-  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([{ configId: "effort", value: "high" }])
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   await expect(reasoning.locator('[data-reasoning-label="Ultra"]')).toHaveCount(0)
 })
 
@@ -239,10 +258,10 @@ test("each advertised reasoning option gets its own bar without merging medium a
   await expect(reasoning).toHaveAccessibleName("Reasoning effort: Medium")
   await lowest.click()
   await expect(reasoning).toHaveAccessibleName("Reasoning effort: High")
-  expect((await page.evaluate(() => (window as any).agentFixture.configs)).at(-1)).toEqual({ configId: "effort", value: "high" })
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   await middle.click()
   await expect(reasoning).toHaveAccessibleName("Reasoning effort: Low")
-  expect((await page.evaluate(() => (window as any).agentFixture.configs)).at(-1)).toEqual({ configId: "effort", value: "low" })
+  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
   await expect(reasoning.locator('[data-reasoning-label="High"]')).toBeVisible()
   await expect(reasoning.locator('[data-reasoning-label="Max"], [data-reasoning-label="Ultra"]')).toHaveCount(0)
 })
