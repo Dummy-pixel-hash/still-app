@@ -246,6 +246,43 @@ test("model, effort and mode stage instantly and are applied together before Sen
   await expect(page.locator(".agent-composer-status")).toHaveCount(0)
 })
 
+test("model changes retain the selected reasoning across refresh and send", async ({ page }) => {
+  await connect(page)
+  await page.getByRole("button", { name: "Reasoning effort: Medium", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Model: Model A", exact: true }).click()
+  await page.getByRole("option", { name: "Model B", exact: true }).click()
+  await page.evaluate(async () => { const fixture = (window as any).agentFixture; await fixture.refreshThread(fixture.current) })
+  await expect(page.getByRole("button", { name: "Model: Model B", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toBeVisible()
+  await page.evaluate(() => { (window as any).agentFixture.reasoningByModel.b = { id: "effort", category: "thought_level", name: "Reasoning", type: "select", currentValue: "medium", options: [{ value: "medium", name: "Medium" }, { value: "high", name: "High" }] } })
+  await page.getByLabel("Message agent").fill("Use the selected model and reasoning")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText("Use the selected model and reasoning")
+  expect(await page.evaluate(() => (window as any).agentFixture.order.slice(-3))).toEqual([
+    { type: "config", value: { configId: "model", value: "b" } },
+    { type: "config", value: { configId: "effort", value: "high" } },
+    { type: "prompt", value: "Use the selected model and reasoning" },
+  ])
+  await expect(page.getByRole("button", { name: "Model: Model B", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Reasoning effort: High", exact: true })).toBeVisible()
+})
+
+test("model change reapplies the previous reasoning even when it matches the old model default", async ({ page }) => {
+  await connect(page)
+  await page.getByRole("button", { name: "Model: Model A", exact: true }).click()
+  await page.getByRole("option", { name: "Model B", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Reasoning effort: Medium", exact: true })).toBeVisible()
+  await page.getByLabel("Message agent").fill("Keep medium reasoning")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText("Keep medium reasoning")
+  expect(await page.evaluate(() => (window as any).agentFixture.order.slice(-3))).toEqual([
+    { type: "config", value: { configId: "model", value: "b" } },
+    { type: "config", value: { configId: "effort", value: "medium" } },
+    { type: "prompt", value: "Keep medium reasoning" },
+  ])
+})
+
 test("reasoning bars are a separate direct control for every available effort level", async ({ page }) => {
   await connect(page)
   const modelTrigger = page.getByRole("button", { name: "Model: Model A", exact: true })

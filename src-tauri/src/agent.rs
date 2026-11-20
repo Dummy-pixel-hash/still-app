@@ -3189,7 +3189,7 @@ pub async fn still_agent_send(mut args: SendArgs) -> Result<(), StillError> {
     for setting in &args.config {
         if setting.config_id.is_empty() || setting.config_id.len() > 160 || setting.config_id.chars().any(char::is_control)
             || !config_ids.insert(setting.config_id.as_str())
-            || !(setting.value.is_boolean() || setting.value.as_str().is_some_and(|value| !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control))) {
+            || !(setting.value.is_boolean() || setting.value.as_str().is_some_and(|value| value.len() <= 4096 && !value.chars().any(char::is_control))) {
             return Err(StillError::friendly("agent_config_invalid", "A staged setting is invalid or duplicated. Refresh the settings and try again."));
         }
     }
@@ -3219,6 +3219,7 @@ pub async fn still_agent_send(mut args: SendArgs) -> Result<(), StillError> {
             for setting in &settings {
                 apply_agent_config(&row, SetConfigArgs { execution_id: args.execution_id.clone(), config_id: setting.config_id.clone(), value: setting.value.clone() }, true).await?;
             }
+            verify_config_batch(&row.lock().await.snapshot.config_options, &settings)?;
             let mut prompt = args.clone(); prompt.config.clear();
             return send_agent_message(&row, prompt, true).await;
         }
@@ -3233,6 +3234,7 @@ pub async fn still_agent_send(mut args: SendArgs) -> Result<(), StillError> {
                 for setting in &settings {
                     apply_agent_config(&row, SetConfigArgs { execution_id: args.execution_id.clone(), config_id: setting.config_id.clone(), value: setting.value.clone() }, true).await?;
                 }
+                verify_config_batch(&row.lock().await.snapshot.config_options, &settings)?;
                 let mut prompt = args; prompt.config.clear();
                 send_agent_message(&row, prompt, true).await
             }
@@ -3241,6 +3243,17 @@ pub async fn still_agent_send(mut args: SendArgs) -> Result<(), StillError> {
     }.await;
     row.lock().await.config_batch_active = false;
     result
+}
+
+fn verify_config_batch(options: &[Value], settings: &[ConfigUpdate]) -> Result<(), StillError> {
+    for setting in settings {
+        let option = options.iter().find(|option| option.get("id").and_then(Value::as_str) == Some(setting.config_id.as_str()));
+        if option.and_then(|option| option.get("currentValue")) != Some(&setting.value)
+            || !config_value_is_advertised(&Value::Array(options.to_vec()), &setting.config_id, &setting.value) {
+            return Err(StillError::friendly("agent_config_failed", format!("{} changed while applying settings. Review the available choices; no prompt was sent.", setting.config_id)));
+        }
+    }
+    Ok(())
 }
 
 fn config_setting_rank(options: &[Value], id: &str) -> u8 {

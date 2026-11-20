@@ -469,7 +469,7 @@ async function worker() {
     const settings = []
     for (const item of rawSettings) {
       if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.configId !== "string" || !/^[^\p{Cc}]{1,160}$/u.test(item.configId)
-        || ids.has(item.configId) || !(typeof item.value === "boolean" || typeof item.value === "string" && item.value.length > 0 && item.value.length <= 4096 && !/\p{Cc}/u.test(item.value))) {
+        || ids.has(item.configId) || !(typeof item.value === "boolean" || typeof item.value === "string" && item.value.length <= 4096 && !/\p{Cc}/u.test(item.value))) {
         fail("A staged setting is invalid or duplicated. Refresh the settings and try again."); return
       }
       ids.add(item.configId); settings.push({ configId: item.configId, value: item.value })
@@ -519,6 +519,13 @@ async function worker() {
           catch (error) { inflight.delete(key); reject(error) }
         }).catch(error => { throw new Error(`Could not apply ${name(setting.configId)}: ${errors(error)}. No prompt was sent.`) })
         if (currentValue(setting.configId) !== setting.value) throw new Error(`The provider did not confirm ${name(setting.configId)}. No prompt was sent.`)
+      }
+      // A later model/mode change can reset an earlier dependent setting.
+      // Verify the full requested combination immediately before submission.
+      for (const setting of settings) {
+        if (!offered(setting.configId, setting.value) || currentValue(setting.configId) !== setting.value) {
+          throw new Error(`${name(setting.configId)} changed while applying settings. Review the available choices; no prompt was sent.`)
+        }
       }
       if (!socket.writable) throw new Error("The connection closed while settings were being applied. No prompt was sent; reconnect and review the selected settings.")
       // Drop the lock and forward the prompt synchronously in the same JS turn;

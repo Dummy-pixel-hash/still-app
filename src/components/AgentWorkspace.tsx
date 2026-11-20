@@ -877,7 +877,18 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     const valid = option && (option.type === "boolean" ? typeof value === "boolean" : configValues(option).some(item => item.value === value))
     if (!valid) { setConfigError(`That ${option?.name || "setting"} choice is no longer available. Refresh the agent settings before sending.`); return }
     const next = { ...activeAgent.meta.pendingConfig }
-    if (option.currentValue === value) delete next[id]
+    const model = activeAgent.configOptions.find(item => item.category === "model")
+    const reasoning = reasoningOption(activeAgent.configOptions)
+    const changingModel = id === model?.id && value !== model.currentValue
+    if (changingModel && reasoning && !Object.prototype.hasOwnProperty.call(next, reasoning.id)
+      && typeof reasoning.currentValue === "string" && reasoning.currentValue !== "") {
+      // Model changes can reset the provider's effort even when the user did
+      // not touch the bars. Reapply the exact value only after the new model
+      // has advertised its dependent choices; the worker rejects incompatibility.
+      next[reasoning.id] = reasoning.currentValue
+    }
+    const stagedModel = model && id !== model.id && Object.prototype.hasOwnProperty.call(next, model.id)
+    if (option.currentValue === value && !stagedModel) delete next[id]
     else next[id] = value
     updateThreadMeta(activeAgent.executionId, { pendingConfig: Object.keys(next).length ? next : undefined })
     setConfigError("")

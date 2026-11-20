@@ -14,7 +14,7 @@ import { appendFileSync } from 'node:fs';
 const write = frame => process.stdout.write(JSON.stringify(frame)+'\\n');
 let model='a',effort='medium',mode='ask',settings=[];
 const record=(method,value)=>appendFileSync(process.env.STILL_CONFIG_LOG,JSON.stringify({method,value})+'\\n');
-const configOptions=()=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:[{value:'a',name:'A'},{value:'b',name:'B'}]},{id:'effort',name:'Reasoning',category:'thought_level',type:'select',currentValue:effort,options:(model==='a'?['low','medium','high']:['high','ultra']).map(value=>({value,name:value}))},{id:'mode',name:'Agent',category:'mode',type:'select',currentValue:mode,options:['ask','code'].map(value=>({value,name:value}))}];
+const configOptions=()=>[{id:'model',name:'Model',category:'model',type:'select',currentValue:model,options:[{value:'a',name:'A'},{value:'b',name:'B'}]},{id:'effort',name:'Reasoning',category:'thought_level',type:'select',currentValue:effort,options:(model==='a'?['low','medium','high']:['','high','ultra']).map(value=>({value,name:value||'Default'}))},{id:'mode',name:'Agent',category:'mode',type:'select',currentValue:mode,options:['ask','code'].map(value=>({value,name:value}))}];
 function todoRequest(id,method,params){return new Promise((resolve,reject)=>{const socket=createConnection(process.env.STILL_TODO_SOCKET);let buffer='';socket.once('connect',()=>socket.write(JSON.stringify({jsonrpc:'2.0',id,method,params:{token:process.env.STILL_TODO_TOKEN,...params}})+'\\n'));socket.on('data',chunk=>{buffer+=chunk;let end;while((end=buffer.indexOf('\\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line)continue;const frame=JSON.parse(line);if(frame.id===id){socket.end();resolve(frame)}}});socket.once('error',reject);});}
 const input = readline.createInterface({input:process.stdin});
 input.on('line',line=>{
@@ -24,7 +24,7 @@ input.on('line',line=>{
   else if(m.method==='session/set_config_option'){
     settings.push({configId:m.params.configId,value:m.params.value});
     record('setting',{configId:m.params.configId,value:m.params.value});
-    if(m.params.configId==='model')model=m.params.value;else if(m.params.configId==='effort')effort=m.params.value;else if(m.params.configId==='mode')mode=m.params.value;
+    if(m.params.configId==='model')model=m.params.value;else if(m.params.configId==='effort')effort=m.params.value;else if(m.params.configId==='mode'){mode=m.params.value;if(process.env.STILL_RESET_EFFORT_ON_MODE==='1')effort='';}
     setTimeout(()=>write({jsonrpc:'2.0',id:m.id,result:{configOptions:configOptions()}}),m.params.configId==='model'?45:0);
   }
   else if(m.method==='session/set_mode'){mode=m.params.modeId;settings.push({configId:'mode',value:mode});write({jsonrpc:'2.0',id:m.id,result:{}});}
@@ -70,7 +70,7 @@ input.on('close',()=>process.exit(0));
 `
 
 function attach(config, mode = "attach") {
-  const process = spawn(globalThis.process.execPath, [source,mode,Buffer.from(JSON.stringify(config)).toString("base64")], { stdio:["pipe","pipe","pipe"], env:{...globalThis.process.env,...(config.todoHome?{HOME:config.todoHome}:{}),...(config.configLog?{STILL_CONFIG_LOG:config.configLog}:{})} })
+  const process = spawn(globalThis.process.execPath, [source,mode,Buffer.from(JSON.stringify(config)).toString("base64")], { stdio:["pipe","pipe","pipe"], env:{...globalThis.process.env,...(config.todoHome?{HOME:config.todoHome}:{}),...(config.configLog?{STILL_CONFIG_LOG:config.configLog}:{}),...(config.resetEffortOnMode?{STILL_RESET_EFFORT_ON_MODE:'1'}:{})} })
   const frames = [], waiters = []
   let buffer = "", stderr = ""
   process.stderr.on("data",chunk=>{ stderr += chunk })
@@ -264,6 +264,26 @@ test("a model-dependent setting rejection leaves the prompt unsubmitted and rele
   assert.deepEqual(log,[{method:"setting",value:{configId:"model",value:"b"}}])
   desktop.send({jsonrpc:"2.0",id:102,method:"_still/status",params:{}})
   assert.equal((await desktop.wait(frame=>frame.id===102)).result.configuring,false)
+}))
+
+test("an advertised empty default reasoning value can be selected and sent", {timeout:15000}, () => fixture(async({make,directory,config}) => {
+  config.configLog=join(directory,"default-effort.jsonl")
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"_still/configure_and_prompt",params:{sessionId:"server-session",settings:[{configId:"model",value:"b"},{configId:"effort",value:""}],prompt:[{type:"text",text:"Use default"}],_meta:{messageId:"default-reasoning",source:"user",expectedConfigGeneration:0}}})
+  await desktop.wait(frame=>frame.id===101&&frame.result?.accepted)
+  const log=(await readFile(config.configLog,"utf8")).trim().split("\n").map(line=>JSON.parse(line))
+  assert.deepEqual(log,[{method:"setting",value:{configId:"model",value:"b"}},{method:"setting",value:{configId:"effort",value:""}},{method:"prompt",value:"Use default"}])
+}))
+
+test("mode resetting a confirmed effort never silently sends with the wrong reasoning", {timeout:15000}, () => fixture(async({make,directory,config}) => {
+  config.configLog=join(directory,"reset-effort.jsonl");config.resetEffortOnMode=true
+  const desktop=make({continuity:true});await initialize(desktop)
+  desktop.send({jsonrpc:"2.0",id:101,method:"_still/configure_and_prompt",params:{sessionId:"server-session",settings:[{configId:"model",value:"b"},{configId:"effort",value:"high"},{configId:"mode",value:"code"}],prompt:[{type:"text",text:"Do not run at default"}],_meta:{messageId:"reset-reasoning",source:"user",expectedConfigGeneration:0}}})
+  const response=await desktop.wait(frame=>frame.id===101&&frame.error)
+  assert.equal(response.error.data.configurationFailure,true)
+  assert.match(response.error.message,/Reasoning changed while applying settings/)
+  const log=(await readFile(config.configLog,"utf8")).trim().split("\n").map(line=>JSON.parse(line))
+  assert.equal(log.some(entry=>entry.method==='prompt'),false)
 }))
 
 test("stale request boundaries and unoffered approvals cannot reach the provider", {timeout:15000}, () => fixture(async({make}) => {
