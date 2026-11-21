@@ -1015,17 +1015,20 @@ export async function changeAgentHistory(id: string, messageId: string, retry: b
   if (!row || !canChangeAgentHistory(row, messageId, retry)) throw new Error("Restore this conversation and wait until it is idle before changing its messages.")
   const message = row.transcript.find(event => event.type === "userMessage" && event.messageId === messageId)!
   const existingDraft = row.meta.draft
+  const stagedConfig = { ...(row.meta.pendingConfig || {}) }
   historyOperations.add(id)
   const sequence = row.lastSequence
+  const configGeneration = row.configGeneration || 0
   row.state = "rewinding"; emit()
   try {
-    await nativeBridge.agentRevert(id, messageId, sequence)
+    await nativeBridge.agentRevert(id, messageId, sequence, configGeneration)
     await refreshAgentThread(id)
     const current = rows.get(id)
     const restoredDraft = current && !existingDraft.trim() && !current.meta.draft.trim()
     if (restoredDraft) updateThreadMeta(id, { draft: message.text || "" })
     if (retry) {
-      await sendAgentMessage(id, message.text || "", true)
+      const config = Object.entries(stagedConfig).map(([configId, value]) => ({ configId, value }))
+      await sendAgentMessage(id, message.text || "", true, config.length ? { config } : undefined)
       if (restoredDraft) clearAgentDraft(id, message.text || "")
     }
   } catch (error) {

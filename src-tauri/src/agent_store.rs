@@ -293,8 +293,11 @@ fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> 
                 append(&path, &Record::Update { fields: fields(&snapshot) })?;
                 Ok(Some(snapshot))
             } else {
-                if refresh_remote_resume_identity(&mut saved, &snapshot)? {
-                    append(&path, &Record::Update { fields: json!({"agentSessionId":saved.agent_session_id,"resumable":saved.resumable}) })?;
+                let identity_changed = refresh_remote_resume_identity(&mut saved, &snapshot)?;
+                if saved.history_capabilities != snapshot.history_capabilities || identity_changed {
+                    let mut fields = json!({"agentSessionId":saved.agent_session_id,"resumable":saved.resumable});
+                    if saved.history_capabilities != snapshot.history_capabilities { fields["historyCapabilities"] = snapshot.history_capabilities.clone(); saved.history_capabilities = snapshot.history_capabilities.clone(); }
+                    append(&path, &Record::Update { fields })?;
                 }
                 Ok(Some(saved))
             }

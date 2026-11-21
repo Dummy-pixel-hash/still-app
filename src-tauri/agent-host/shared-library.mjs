@@ -124,6 +124,8 @@ function workerRecord(home, executionId) {
     replacesExecutionId: state.replacesExecutionId,
     replacesAgentSessionId: state.replacesAgentSessionId,
     titleSource: state.titleSource === "agent" ? "agent" : "prompt",
+    historyCapabilities: state.historyCapabilities && typeof state.historyCapabilities === "object" && !Array.isArray(state.historyCapabilities)
+      ? { revert: state.historyCapabilities.revert === true, retry: state.historyCapabilities.retry === true } : undefined,
     resumable: state.sessionResult?._meta?.resumable === true
       || state.agentId === "gemini" && state.sessionResult?._meta?.resumable === undefined
         && state.initializeResult?.agentCapabilities?.loadSession === true && !!state.sessionResult?.sessionId }
@@ -325,6 +327,38 @@ export function recordSharedWorker(home, executionId, signal) {
     if (row.deleted) return { deleted: true }
     const queued = signal ? queueNotification(home, state, row, incoming, signal) : false
     return { ...shared(state, row), ...(queued ? { notificationQueued: true } : {}) }
+  })
+}
+
+/** A provider rewind creates a new shared generation. Prior field/read/receipt
+ * revisions must not silently apply to the new history boundary. */
+export function recordSharedHistoryRevert(home, executionId, messageId, sessionId) {
+  if (typeof messageId !== "string" || !messageId || messageId.length > 300 || /\p{Cc}/u.test(messageId)) throw new Error("Invalid rewind message identity")
+  if (typeof sessionId !== "string" || !sessionId || sessionId.length > 300 || /\p{Cc}/u.test(sessionId)) throw new Error("Invalid rewind provider session")
+  const incoming = workerRecord(home, executionId)
+  if (!safeId(incoming.conversationId)) throw new Error("Invalid rewind conversation identity")
+  if (incoming.agentSessionId !== sessionId) throw new Error("Rewind provider session does not match the worker")
+  const operationId = `revert-${digest(stable({ executionId, messageId, sessionId }))}`
+  return transaction(home, state => {
+    state.receipts ||= []
+    state.receiptFloor ??= 0
+    const receipt = state.receipts.find(item => item.id === operationId)
+    if (receipt) return structuredClone(receipt.result)
+    registerWithPredecessors(home, state, incoming)
+    const row = state.conversations[incoming.conversationId]
+    if (!row || row.deleted || row.executionId !== executionId) return { ok: false, reason: "conversationUnavailable" }
+    row.generation++
+    row.executionOffset = row.conversationSeq
+    row.readThroughSeq = row.conversationSeq
+    row.activityAt = incoming.activityAt
+    row.executions[executionId] = { ...incoming, generation: row.generation }
+    state.revision++; row.revision = state.revision
+    const result = { ok: true, conversationId: row.conversationId, generation: row.generation, sessionId }
+    state.receipts ||= []
+    state.receiptFloor ??= 0
+    state.receipts.push({ id: operationId, fingerprint: digest(stable({ executionId, messageId, sessionId })), result: structuredClone(result), revision: state.revision })
+    if (state.receipts.length > 256) state.receiptFloor = Math.max(state.receiptFloor, state.receipts.shift().revision)
+    return result
   })
 }
 
@@ -606,7 +640,7 @@ if (invocation) {
       if (bytes.length > 1024 * 1024) throw new Error("Shared library request exceeded 1 MiB")
     }
     const request = JSON.parse(bytes.toString("utf8"))
-    const result = request.method === "list" ? sharedLibrary(process.env.HOME, request.options) : request.method === "mutate" ? mutateSharedLibrary(process.env.HOME, request.input) : request.method === "project.register" ? registerSharedProject(process.env.HOME, request.cwd) : (() => { throw new Error("Unsupported shared library request") })()
+    const result = request.method === "list" ? sharedLibrary(process.env.HOME, request.options) : request.method === "mutate" ? mutateSharedLibrary(process.env.HOME, request.input) : request.method === "project.register" ? registerSharedProject(process.env.HOME, request.cwd) : request.method === "recordHistoryRevert" ? recordSharedHistoryRevert(process.env.HOME, request.executionId, request.messageId, request.sessionId) : (() => { throw new Error("Unsupported shared library request") })()
     console.log("STILL_SHARED:" + JSON.stringify(result))
   } catch (error) {
     const message = error instanceof SyntaxError ? "A private catalog or request record is invalid. The original data was preserved." : error.message

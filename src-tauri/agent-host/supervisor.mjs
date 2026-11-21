@@ -104,7 +104,7 @@ async function worker() {
   const subscribers = new Set()
   let providerRequestId = 1000
   const subagentRequests = new Map()
-  let initializeResult = null, sessionResult = null, busy = false, configuring = false, activePrompt = null, closing = false, maxRequestId = 3
+  let initializeResult = null, sessionResult = null, busy = false, configuring = false, rewinding = false, activePrompt = null, closing = false, maxRequestId = 3
   const titlePromptPath = join(directory, "chat-title-prompted")
   let initializeOperation = null, sessionOperation = null
   const todoRoot = join(process.env.HOME, ".local", "state", "still", "agent-todos")
@@ -148,7 +148,7 @@ async function worker() {
   const bootId = workerBootId()
   const remember = () => {
     const tmp = `${statePath}.tmp`
-    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, conversationId: conversation, cwd: config.cwd, agentId: config.agentId, customAgent: config.customAgent, parentConversationId: config.parentConversationId, title: sharedTitle, titleSource: sharedTitleSource, titleRevision: sharedTitleRevision, hasAcceptedPrompt, replacesExecutionId: config.recoverFrom?.executionId, replacesAgentSessionId: config.recoverFrom?.agentSessionId, bootId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, configuring, activePrompt, closed, ended: childEnded, initializeResult, sessionResult }), { mode: 0o600 })
+    writeFileSync(tmp, JSON.stringify({ version, executionId: config.executionId, conversationId: conversation, cwd: config.cwd, agentId: config.agentId, customAgent: config.customAgent, parentConversationId: config.parentConversationId, title: sharedTitle, titleSource: sharedTitleSource, titleRevision: sharedTitleRevision, hasAcceptedPrompt, replacesExecutionId: config.recoverFrom?.executionId, replacesAgentSessionId: config.recoverFrom?.agentSessionId, bootId, pid: process.pid, childPid: child?.pid, sequence, eventIndex, maxRequestId, busy, configuring, rewinding, activePrompt, closed, ended: childEnded, historyCapabilities: historyCapabilities(), initializeResult, sessionResult }), { mode: 0o600 })
     renameSync(tmp, statePath)
   }
   const publish = message => {
@@ -303,6 +303,7 @@ async function worker() {
         settingChanged = noteConfig(effectiveOptions(sessionResult)) || settingChanged
       }
       if (record?.method === "session/prompt") { busy = false; activePrompt = null }
+      if (record?.method === "_still/session/revert") rewinding = false
       if (record?.method === "_still/session/revert" && message.result?.reverted === true && message.result?.sessionId && sessionResult) {
         if (Array.isArray(message.result.configOptions)) {
           sessionResult.configOptions = message.result.configOptions
@@ -332,7 +333,13 @@ async function worker() {
         if (responseRecord.socket.writable) writeLine(responseRecord.socket, { ...message, id: responseRecord.clientId })
       }
     } else publish(message)
-    if (historyResult) publish({ jsonrpc:"2.0",method:"_still/history_reverted",params:historyResult })
+    if (historyResult) {
+      publish({ jsonrpc:"2.0",method:"_still/history_reverted",params:historyResult })
+      if (sharedLibrary) {
+        try { sharedLibrary.recordSharedHistoryRevert(process.env.HOME, config.executionId, historyResult.messageId, historyResult.sessionId) }
+        catch (error) { process.stderr.write(`Shared catalog history update needs retry: ${errors(error)}\n`) }
+      }
+    }
     if (sessionReady) rememberCapabilities()
     if (settingChanged) capabilitiesDirty = true
     if (capabilitiesDirty) refreshCapabilities()
@@ -372,9 +379,11 @@ async function worker() {
     if (!child?.stdin.writable || childEnded || closed) throw new Error("The persistent agent process has ended")
     writeLine(child.stdin, frame)
   }
+  const historyCapabilities = () => sessionResult?._meta?.historyCapabilities && typeof sessionResult._meta.historyCapabilities === "object" && !Array.isArray(sessionResult._meta.historyCapabilities)
+    ? { revert: sessionResult._meta.historyCapabilities.revert === true, retry: sessionResult._meta.historyCapabilities.retry === true } : { revert: false, retry: false }
   const sessionMetadata = () => {
     const capabilities = capabilityReport()
-    return { ...(sessionResult?._meta || {}), persistent: true, continuity, configGeneration, busy, configuring, activePrompt, maxRequestId, executionId: config.executionId, todos: todoSnapshot(), ...(capabilities ? { capabilities } : {}) }
+    return { ...(sessionResult?._meta || {}), persistent: true, continuity, configGeneration, busy, configuring, rewinding, activePrompt, maxRequestId, executionId: config.executionId, todos: todoSnapshot(), historyCapabilities: historyCapabilities(), ...(capabilities ? { capabilities } : {}) }
   }
   const replay = socket => {
     for (const event of history) {
@@ -618,7 +627,7 @@ async function worker() {
         writeLine(socket, { jsonrpc: "2.0", method: "_still/unavailable", params: { executionId: config.executionId, reason: "workerUnavailable" } })
         socket.end(); return
       }
-      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, configuring, activePrompt, ...(continuity ? { configGeneration } : {}) } })
+      writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { busy, configuring, rewinding, activePrompt, ...(continuity ? { configGeneration } : {}) } })
       return
     }
     if (continuity && request.method === "_still/prompt_receipt") {
@@ -632,7 +641,7 @@ async function worker() {
       return
     }
     if (request.method === "_still/shutdown") {
-      if (continuity && (busy || configuring || pending.size || inflight.size)) { reject(socket, request, "The conversation is busy; shutdown was not accepted"); return }
+      if (continuity && (busy || configuring || rewinding || pending.size || inflight.size)) { reject(socket, request, "The conversation is busy; shutdown was not accepted"); return }
       closing = true; closed = true; remember()
       const done = () => { writeLine(socket, { jsonrpc: "2.0", id: request.id, result: { closed: true } }); socket.end(); for (const client of clients) if (client !== socket) client.end(); server.close() }
       if (!child || childEnded) { retireTodoOwner(); done(); return }
@@ -751,9 +760,17 @@ async function worker() {
         return
       }
     }
-    if (continuity && ["session/set_config_option", "session/set_mode", "session/set_model", "_still/session/revert"].includes(request.method)) {
-      if (request.method === "_still/session/revert") { reject(socket, request, "Shared-session rewind is not enabled yet"); return }
-      if (busy || configuring || pending.size || inflight.size) { reject(socket, request, "The conversation is busy"); return }
+    if (continuity && request.method === "_still/session/revert") {
+      if (busy || configuring || rewinding || pending.size || inflight.size) { reject(socket, request, "The conversation is busy; wait before changing shared history"); return }
+      if (request.params?._meta?.expectedConfigGeneration !== configGeneration) { reject(socket, request, "Settings changed on another device. Refresh before changing history."); return }
+      const checkpoint = request.params?.checkpoint
+      if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) || !Object.keys(checkpoint).length) { reject(socket, request, "This message has no current provider checkpoint"); return }
+      const clientId = request.id
+      rewinding = true; remember()
+      request = { ...request, id: ++providerRequestId }
+      inflight.set(JSON.stringify(request.id), { method: request.method, socket, clientId, messageId: request.params?._meta?.messageId, params: request.params })
+    } else if (continuity && ["session/set_config_option", "session/set_mode", "session/set_model"].includes(request.method)) {
+      if (busy || configuring || rewinding || pending.size || inflight.size) { reject(socket, request, "The conversation is busy"); return }
       if (request.params?._meta?.expectedConfigGeneration !== configGeneration) { reject(socket, request, "Settings changed. Refresh before changing them."); return }
       if (request.method === "session/set_config_option") {
         const option = (sessionResult.configOptions || []).find(option => option.id === request.params?.configId)
@@ -775,7 +792,10 @@ async function worker() {
       if (continuity && record?.method === "session/prompt") {
         busy = false; activePrompt = null
         publish({ jsonrpc: "2.0", method: "_still/turn_finished", params: { promptId: request.id, error: `Provider delivery failed: ${errors(error)}` } })
-      } else reject(socket, { ...request, id: record?.clientId ?? request.id }, errors(error))
+      } else {
+        if (record?.method === "_still/session/revert") { rewinding = false; remember() }
+        reject(socket, { ...request, id: record?.clientId ?? request.id }, errors(error))
+      }
     }
   }
   const server = createServer(socket => {

@@ -129,7 +129,7 @@ test("remote worker survives transport death and replays offline output without 
   const started=await first.wait(frame=>frame.params?.update?.content?.text==="Started")
   first.send({jsonrpc:"2.0",id:102,method:"_still/status",params:{}})
   const active=await first.wait(frame=>frame.id===102)
-  assert.deepEqual(active.result,{busy:true,configuring:false,activePrompt:101})
+  assert.deepEqual(active.result,{busy:true,configuring:false,rewinding:false,activePrompt:101})
   const original=JSON.parse(await readFile(directory+"/state.json","utf8"))
   await first.close()
   // No client exists while the provider finishes: equivalent to the local app
@@ -143,7 +143,7 @@ test("remote worker survives transport death and replays offline output without 
   assert.ok(finished._still.index>started._still.index)
   await second.wait(frame=>frame.id===101&&frame.result?.stopReason==="end_turn")
   second.send({jsonrpc:"2.0",id:103,method:"_still/status",params:{}})
-  assert.deepEqual((await second.wait(frame=>frame.id===103)).result,{busy:false,configuring:false,activePrompt:null})
+  assert.deepEqual((await second.wait(frame=>frame.id===103)).result,{busy:false,configuring:false,rewinding:false,activePrompt:null})
   const current=JSON.parse(await readFile(directory+"/state.json","utf8"))
   assert.equal(current.pid,original.pid);assert.equal(current.childPid,original.childPid)
   second.send({jsonrpc:"2.0",id:102,method:"session/prompt",params:{sessionId:"server-session",prompt:[{type:"text",text:"build"}],_meta:{messageId:"message-1"}}})

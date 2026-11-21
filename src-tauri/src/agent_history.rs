@@ -272,7 +272,7 @@ impl<'de> DeserializeSeed<'de> for EventSeed<'_, '_> {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
                 let mut event = serde_json::Map::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if matches!(key.as_str(), "type" | "sequence" | "endSequence" | "attemptId" | "messageId" | "checkpoint" | "source") { event.insert(key, map.next_value()?); }
+                    if matches!(key.as_str(), "type" | "sequence" | "endSequence" | "attemptId" | "messageId" | "checkpoint" | "source" | "historyCapabilities") { event.insert(key, map.next_value()?); }
                     else { map.next_value::<IgnoredAny>()?; }
                 }
                 Ok(Value::Object(event))

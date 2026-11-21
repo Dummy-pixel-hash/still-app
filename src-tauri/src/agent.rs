@@ -394,6 +394,8 @@ pub struct RevertArgs {
     execution_id: String,
     message_id: String,
     expected_sequence: u64,
+    #[serde(default)]
+    expected_config_generation: u64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1380,7 +1382,7 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
             "cwd":remote["cwd"],"state":"saved","transcript":[],"pendingPermission":null,"pendingInput":null,
             "lastError":null,"lastSequence":0,"turnActive":false,"configOptions":[],"commands":[],
             "persistent":true,"continuity":remote["protocolVersion"]==4,"remoteImported":true,"configGeneration":0,"remoteCursor":0,
-            "resumable":remote["resumable"],"historyCapabilities":{"revert":false,"retry":false}
+            "resumable":remote["resumable"],"historyCapabilities":remote["historyCapabilities"].is_object().then_some(remote["historyCapabilities"].clone()).unwrap_or_else(|| json!({"revert":false,"retry":false}))
         })).map_err(|e| StillError::friendly("agent_library_remote", e.to_string()))?;
         let previous = remote["replacesExecutionId"].as_str().map(str::to_owned);
         let retired = if let Some(previous) = previous.as_ref() { registry().lock().await.get(previous).cloned() } else { None };
@@ -2163,14 +2165,17 @@ async fn handle(
         if method == "_still/history_reverted" {
             let params = &value["params"];
             let message_id = params["messageId"].as_str().ok_or("Missing history boundary")?;
+            let next_session_id = params["sessionId"].as_str().ok_or("Missing rewind provider session")?;
             let mut thread = row.lock().await;
             if thread.messages.iter().any(|message| message.message_id.as_deref() == Some(message_id)) {
-                let next_session_id = params["sessionId"].as_str().map(str::to_owned);
-                let session_changed = thread.snapshot.agent_session_id != next_session_id;
-                thread.snapshot.agent_session_id = next_session_id;
+                let previous_session = thread.snapshot.agent_session_id.clone();
+                let session_changed = previous_session.as_deref() != Some(next_session_id);
+                thread.snapshot.agent_session_id = Some(next_session_id.to_owned());
                 *session_id = thread.snapshot.agent_session_id.clone();
-                if session_changed && mark_capabilities_stale(&mut thread.snapshot) {
-                    emit_capabilities(&mut thread).await;
+                if session_changed {
+                    thread.snapshot.config_generation = thread.snapshot.config_generation.saturating_add(1);
+                    invalidate_for_provider_session(&mut thread.snapshot, Some(next_session_id));
+                    if mark_capabilities_stale(&mut thread.snapshot) { emit_capabilities(&mut thread).await; }
                 }
                 thread.snapshot.state = "working".into(); thread.snapshot.last_error = None;
                 thread.recovering_uncertain = false;
@@ -2525,7 +2530,10 @@ async fn handle(
         let reported_resumable = result.pointer("/_meta/resumable").and_then(Value::as_bool);
         t.snapshot.resumable = provider_resumable(&t.snapshot.agent_id, reported_resumable, t.load_session, &sid);
         let capabilities = result.pointer("/_meta/historyCapabilities");
-        t.snapshot.history_capabilities = if t.snapshot.continuity { json!({"revert":false,"retry":false}) } else { json!({"revert":capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),"retry":capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false)}) };
+        t.snapshot.history_capabilities = json!({
+            "revert": capabilities.and_then(|value| value["revert"].as_bool()).unwrap_or(false),
+            "retry": capabilities.and_then(|value| value["retry"].as_bool()).unwrap_or(false),
+        });
         let mut capability_event = Event::new("historyCapabilities");
         capability_event.history_capabilities = Some(t.snapshot.history_capabilities.clone());
         emit(&mut t, capability_event).await;
@@ -3354,16 +3362,21 @@ async fn send_agent_message(row: &Arc<Mutex<Thread>>, args: SendArgs, batch_owne
 pub async fn still_agent_revert(args: RevertArgs) -> Result<Snapshot, StillError> {
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
-    if thread.snapshot.continuity { return Err(StillError::friendly("agent_history_unsupported", "Shared-session rewind is not enabled yet. Its history remains intact.")); }
     if thread.snapshot.history_capabilities["revert"] != true { return Err(StillError::friendly("agent_history_unsupported", "This agent does not support reverting conversation messages.")); }
     if thread.snapshot.last_sequence != args.expected_sequence || thread.snapshot.turn_active || thread.prompt.is_some() || thread.permission.is_some() || thread.pending_input_id.is_some() || !thread.config_requests.is_empty() || thread.history_request.is_some() || !matches!(thread.snapshot.state.as_str(), "working" | "complete" | "cancelled" | "error") {
         return Err(StillError::friendly("agent_history_busy", "The conversation changed or is busy. Wait until it is idle before reverting."));
+    }
+    if thread.snapshot.continuity && (thread.awaiting_catch_up || !thread.transport_active || thread.prompt_delivery.is_some() || thread.cancel_delivery.is_some() || thread.config_batch_active || thread.snapshot.recovery_required) {
+        return Err(StillError::friendly("agent_history_busy", "Catch up and finish pending operations before changing shared history."));
+    }
+    if thread.snapshot.continuity && args.expected_config_generation != thread.snapshot.config_generation {
+        return Err(StillError::friendly("agent_history_stale", "Settings changed on another device. Refresh before changing history."));
     }
     if thread.outbound.is_closed() { return Err(StillError::friendly("agent_process_lost", "Resume this conversation before changing its history.")); }
     let message = thread.messages.iter().find(|message| message.message_id.as_deref() == Some(args.message_id.as_str()) && message.checkpoint.is_some()).cloned().ok_or_else(|| StillError::friendly("agent_history_stale", "This message has no current provider checkpoint."))?;
     flush_history(&mut thread).await?;
     let request_id = next_request_id();
-    let request = json!({"jsonrpc":"2.0","id":request_id,"method":"_still/session/revert","params":{"sessionId":thread.snapshot.agent_session_id,"checkpoint":message.checkpoint},"_meta":{"messageId":args.message_id}});
+    let request = json!({"jsonrpc":"2.0","id":request_id,"method":"_still/session/revert","params":{"sessionId":thread.snapshot.agent_session_id,"checkpoint":message.checkpoint},"_meta":{"messageId":args.message_id,"expectedConfigGeneration":thread.snapshot.config_generation}});
     let (reply, response) = oneshot::channel();
     let previous_state = thread.snapshot.state.clone();
     thread.snapshot.state = "rewinding".into();
