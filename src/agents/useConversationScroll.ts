@@ -4,7 +4,7 @@ type Position = { id?: string; offset: number; top: number; mode: "following" | 
 const positions = new Map<string, Position>()
 
 /** Keep a reader's stable message + offset, rather than guessing intent from new tokens. */
-export function useConversationScroll(key: string, revision: unknown) {
+export function useConversationScroll(key: string, revision: unknown, enabled = true) {
   const viewport = useRef<HTMLDivElement>(null), content = useRef<HTMLDivElement>(null)
   const position = useRef<Position>({ offset: 0, top: 0, mode: "following" })
   const frame = useRef(0), written = useRef<number | null>(null)
@@ -40,14 +40,15 @@ export function useConversationScroll(key: string, revision: unknown) {
   }, [capture])
   const schedule = useCallback(() => { if (!frame.current) frame.current = requestAnimationFrame(() => { frame.current = 0; correct() }) }, [correct])
   useLayoutEffect(() => {
+    if (!enabled) return
     position.current = { ...(positions.get(key) || { offset: 0, top: 0, mode: "following" }) }
     correct()
     const observer = new ResizeObserver(schedule)
     if (viewport.current) observer.observe(viewport.current)
     if (content.current) observer.observe(content.current)
     return () => { positions.set(key, { ...position.current }); observer.disconnect(); cancelAnimationFrame(frame.current); frame.current = 0; cancelAnimationFrame(turnFrame.current) }
-  }, [key, capture, correct, schedule])
-  useLayoutEffect(schedule, [revision, schedule])
+  }, [key, enabled, capture, correct, schedule])
+  useLayoutEffect(() => { if (enabled) schedule() }, [revision, enabled, schedule])
   const onScroll = () => {
     const el = viewport.current
     if (!el) return

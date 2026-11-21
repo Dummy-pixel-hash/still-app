@@ -84,7 +84,7 @@ test("the floating input and model menu keep their own CSS blur while the wrappe
   })
   await page.addStyleTag({ content: `
     .agent-aurora { visibility: hidden; }
-    .agent-composer textarea, .agent-composer-footnote, .agent-composer-provider, .agent-composer-actions { visibility: hidden !important; }
+    .agent-composer textarea, .agent-compose-prompt, .agent-composer-footnote, .agent-composer-provider, .agent-composer-actions { visibility: hidden !important; }
     .agent-composer .agent-model-trigger { opacity: 0 !important; pointer-events: none !important; }
     .agent-model-menu { visibility: visible !important; }
     .agent-model-menu > * { opacity: 0 !important; pointer-events: none !important; }

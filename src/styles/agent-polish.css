@@ -1,0 +1,241 @@
+/* Agents: a quieter reading plane, with material reserved for navigation and writing. */
+.agent-workspace:not(.agent-workspace--mobile) {
+  --ag-polish-muted: #b8adb3;
+  --ag-polish-line: rgba(241, 220, 229, .1);
+}
+
+.agent-workspace:not(.agent-workspace--mobile) .agent-sidebar-new {
+  min-height: 46px;
+  background: rgba(148, 58, 75, .17);
+  box-shadow: inset 0 1px 0 rgba(255, 232, 238, .09);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-sidebar-new:hover {
+  background: rgba(168, 68, 86, .25);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-folder-heading { min-height: 38px; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-thread { margin-block: 2px; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-thread.is-selected {
+  background: rgba(163, 66, 82, .19);
+  box-shadow: inset 0 0 0 1px rgba(232, 153, 166, .16);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-thread-time { font-variant-numeric: tabular-nums; }
+
+/* Keep the launch action prominent while recents read as an index, not a card grid. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-chat.is-launch.has-recents .agent-recents {
+  border-color: rgba(255, 255, 255, .065);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-recents .agent-section-label > span {
+  color: #ded4d9;
+  font-weight: 550;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-recent {
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-recent:hover { border-bottom-color: rgba(225, 166, 181, .35); }
+.agent-workspace:not(.agent-workspace--mobile) .agent-recent time { font-variant-numeric: tabular-nums; }
+
+/* Paragraphs stay readable on wide displays; code and tables retain the full rail. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-conversation--hierarchy {
+  background-color: rgba(5, 5, 5, .5);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-message-assistant .agent-prose > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6) {
+  max-width: 72ch;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-message-user {
+  max-width: min(88%, 72ch);
+  padding: 16px 19px;
+  border-color: rgba(255, 255, 255, .09);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-message-author { letter-spacing: .005em; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-message-list > .agent-change-summary {
+  width: fit-content;
+  max-width: 100%;
+  margin: 28px 0 10px;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-latest-activity {
+  position: absolute;
+  z-index: 6;
+  right: 24px;
+  bottom: calc(var(--ag-composer-height, 0px) + 18px);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 999px;
+  background: rgba(28, 25, 28, .96);
+  color: #eee6eb;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-latest-activity:hover { background: #30282d; border-color: rgba(226, 159, 177, .4); }
+.agent-workspace:not(.agent-workspace--mobile) .agent-latest-activity > svg { transform: rotate(180deg); }
+.agent-workspace:not(.agent-workspace--mobile) .agent-activity-summary:hover { color: #eee4e9; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-code-header button {
+  min-width: 64px;
+  justify-content: flex-end;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-copy-glyph { display: inline-flex; animation: agent-polish-glyph-in 180ms ease-out both; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-card:focus-within {
+  border-color: rgba(230, 190, 139, .62);
+  box-shadow: 0 0 0 2px rgba(230, 190, 139, .08);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-card.agent-request-question:focus-within {
+  border-color: rgba(226, 159, 177, .6);
+  box-shadow: 0 0 0 2px rgba(226, 159, 177, .08);
+}
+
+/* A resting conversation still has an unmistakable, keyboard-reachable writing target. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed {
+  padding: 7px 9px 7px 12px;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-toolbar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-compose-prompt {
+  min-width: 0;
+  min-height: 38px;
+  overflow: hidden;
+  padding: 0 4px;
+  background: transparent;
+  color: #b8aeb4;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-compose-prompt:hover { color: #f0e7ec; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-composer textarea::placeholder { color: #b4aab1; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-send > svg { animation: agent-polish-glyph-in 180ms ease-out both; }
+@keyframes agent-polish-glyph-in {
+  from { opacity: .35; transform: scale(.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Review keeps a clear path, with selected files and diff gutters carrying the hierarchy. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-file-picker.is-open { flex-basis: 252px; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-gutter { background: rgba(255, 255, 255, .015); }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-patch .diff-hunk { color: #c0afb9; }
+
+/* Review is an index and a reading desk: selection is visible without coloring the diff. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-heading > svg {
+  width: 36px;
+  height: 36px;
+  padding: 9px;
+  border: 1px solid rgba(226, 159, 177, .13);
+  border-radius: 10px;
+  background: rgba(163, 66, 82, .1);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-heading p { color: #bcb1b8; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-views > button {
+  transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-views > button[aria-selected="true"] {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), inset 0 -2px 0 rgba(221, 159, 176, .48);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-file-trigger > span { letter-spacing: .01em; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-file-search {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .055);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-file-search:focus-within {
+  box-shadow: inset 0 0 0 1px rgba(198, 143, 159, .65);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review :is(.agent-repository-files, .agent-review-files) > button {
+  position: relative;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review :is(.agent-repository-files, .agent-review-files) > button.is-selected::before {
+  content: "";
+  position: absolute;
+  inset: 11px auto 11px 0;
+  width: 2px;
+  border-radius: 2px;
+  background: #d99cad;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review :is(.agent-repository-file-path, .agent-review-file-path) > strong {
+  font-weight: 550;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-file-header { border-bottom-color: rgba(255, 255, 255, .1); }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-selected-path { letter-spacing: .01em; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-patch .diff-hunk {
+  border-bottom: 1px solid rgba(255, 255, 255, .035);
+  background: rgba(255, 255, 255, .018);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review-patch .agent-line-number { font-variant-numeric: tabular-nums; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-raw-patch > summary {
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-raw-patch > summary:hover {
+  background: rgba(255, 255, 255, .045);
+  color: #f0e7ec;
+}
+
+/* Attention uses a warm rail, while choices and their descriptions remain the focus. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-card.is-active .agent-request-heading {
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  margin-bottom: 4px;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-card.is-active .agent-request-heading h2 { letter-spacing: -.012em; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-card.is-active .agent-request-mark {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-command {
+  border-left: 2px solid rgba(218, 182, 127, .5);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-question-choice {
+  border-radius: 7px;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-question-choice.is-selected {
+  box-shadow: inset 2px 0 0 rgba(225, 158, 178, .7);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-question-choice:focus-within {
+  outline: 2px solid rgba(226, 159, 177, .65);
+  outline-offset: -2px;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-jump > svg {
+  transition: transform 150ms var(--ag-ease);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-request-jump:hover > svg { transform: translateX(3px); }
+
+/* The picker stays compact; the active item and keyboard focus are unmistakable. */
+.agent-workspace:not(.agent-workspace--mobile) .agent-model-menu-heading strong {
+  color: #e6dce2;
+  font-weight: 600;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-model-group-label { letter-spacing: .01em; }
+.agent-workspace:not(.agent-workspace--mobile) .agent-model-group button {
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-model-group button[aria-selected="true"] {
+  box-shadow: inset 2px 0 0 rgba(226, 159, 177, .7);
+}
+.agent-workspace:not(.agent-workspace--mobile) .agent-model-group button:focus-visible {
+  outline: 2px solid rgba(226, 159, 177, .7);
+  outline-offset: -2px;
+}
+
+@media (max-width: 900px) {
+  .agent-workspace:not(.agent-workspace--mobile) .agent-review .agent-review-file-picker.is-compact.is-open { flex: 1; }
+}
+@media (max-width: 620px) {
+  .agent-workspace:not(.agent-workspace--mobile) .agent-compose-prompt { font-size: 12px; }
+}
+@media (max-width: 520px) {
+  .agent-workspace:not(.agent-workspace--mobile) .agent-subagents-topbar span { display: none; }
+  .agent-workspace:not(.agent-workspace--mobile) .agent-subagents-topbar { padding-inline: 7px; }
+  .agent-workspace:not(.agent-workspace--mobile) .agent-topbar--compact .agent-status.is-attention { max-width: none; flex-shrink: 0; }
+}
+@media (max-width: 360px) {
+  .agent-workspace:not(.agent-workspace--mobile) .agent-topbar--compact .agent-topbar-actions { gap: 2px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-workspace:not(.agent-workspace--mobile) :is(.agent-send > svg, .agent-copy-glyph) { animation: none; }
+  .agent-workspace:not(.agent-workspace--mobile) :is(.agent-recent, .agent-starters button, .agent-review-views > button, .agent-repository-files > button, .agent-review-files > button, .agent-raw-patch > summary, .agent-question-choice, .agent-request-jump > svg, .agent-model-group button) { transition: none; }
+  .agent-workspace:not(.agent-workspace--mobile) .agent-request-jump:hover > svg { transform: none; }
+}

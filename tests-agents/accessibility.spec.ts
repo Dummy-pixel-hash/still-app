@@ -163,8 +163,8 @@ test("failed conversations retain an explicit sidebar state on compact screens",
   await page.setViewportSize({ width: 620, height: 700 })
   await page.getByRole("button", { name: "Toggle projects", exact: true }).click()
   await expect(page.locator(".agent-thread-indicator.error")).toBeVisible()
-  await expect(page.locator(".agent-attention-label.is-error")).toHaveText("Failed")
-  await expect(page.locator(".agent-thread-open")).toHaveAccessibleName(/Failed/)
+  await expect(page.locator(".agent-attention-label.is-error")).toHaveText("Turn failed")
+  await expect(page.locator(".agent-thread-open")).toHaveAccessibleName(/Turn failed/)
 })
 
 test("returning users see all featured recents and a route to the full library", async ({ page }) => {
