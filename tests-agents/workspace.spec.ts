@@ -425,6 +425,26 @@ test("conversations group by folder and rename, pin, archive, restore, delete su
   await expect(page.locator(".agent-thread-open")).not.toContainText("Reconnect fix")
 })
 
+test("archive notification stays visible while either action has keyboard focus", async ({ page }) => {
+  await connect(page)
+  await page.clock.install()
+  await page.getByRole("button", { name: "Actions for New OpenCode conversation" }).click()
+  await page.getByRole("menuitem", { name: "Archive", exact: true }).click()
+
+  const undo = page.getByRole("button", { name: "Undo", exact: true })
+  const dismiss = page.getByRole("button", { name: "Dismiss notification" })
+  await undo.focus()
+  await page.clock.fastForward(8100)
+  await expect(undo).toBeFocused()
+  await page.keyboard.press("Tab")
+  await page.clock.fastForward(8100)
+  await expect(dismiss).toBeFocused()
+
+  await page.getByRole("button", { name: "New conversation", exact: true }).focus()
+  await page.clock.fastForward(8100)
+  await expect(undo).toBeHidden()
+})
+
 test("drafts persist across switching and uncertain submissions cannot be resent", async ({ page }) => {
   await connect(page)
   await page.getByLabel("Message agent").fill("Keep this draft")

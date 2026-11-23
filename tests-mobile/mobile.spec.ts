@@ -20,6 +20,16 @@ test("all root destinations use the floating mobile dock", async ({ page }) => {
   await expect(page.locator(".mobile-navigation")).toHaveCSS("border-radius", "36px")
 })
 
+test("Escape does not close thread search during IME composition", async ({ page }) => {
+  await page.getByRole("button", { name: "Search threads" }).click()
+  const search = page.getByRole("searchbox", { name: "Find a thread" })
+  await expect(search).toBeFocused()
+  await search.dispatchEvent("keydown", { key: "Escape", isComposing: true, bubbles: true, cancelable: true })
+  await expect(search).toBeFocused()
+  await search.press("Escape")
+  await expect(search).toBeHidden()
+})
+
 test("mobile creation and Enter preserve an unsent draft", async ({ page }) => {
   await page.getByRole("button", { name: "New task", exact: true }).click()
   await expect(page.locator(".agent-workspace--mobile")).toBeVisible()

@@ -63,7 +63,10 @@ export default function MobileApp() {
       return false
     }
     window.__stillMobileBack = back
-    const keyboard = (event: KeyboardEvent) => { if (event.key === "Escape" && !event.defaultPrevented && !event.target?.toString().includes("HTMLTextArea")) { if (back()) event.preventDefault() } }
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || event.target instanceof HTMLTextAreaElement) return
+      if (back()) event.preventDefault()
+    }
     window.addEventListener("keydown", keyboard)
     return () => { delete window.__stillMobileBack; window.removeEventListener("keydown", keyboard) }
   }, [entry, projectsOpen, searchOpen, destination])

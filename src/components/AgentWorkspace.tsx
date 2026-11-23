@@ -133,6 +133,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const resumeAttempt = useRef("")
   const [timelineOpen, setTimelineOpen] = useState(false), [timelineQuery, setTimelineQuery] = useState("")
   const [feedback, setFeedback] = useState("")
+  const toast = useRef<HTMLDivElement>(null)
   const [review, setReview] = useState(false)
   const [reviewMode, setReviewMode] = useState<"repository" | "conversation">("repository")
   const [gitRefreshEpoch, setGitRefreshEpoch] = useState(0)
@@ -521,9 +522,25 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     previousRequest.current = activeRequestItem || null
   }, [activeRequestItem, current?.executionId, items])
   useEffect(() => {
-    if (!feedback && !undo) return
-    const timer = setTimeout(() => { setUndo(null); setFeedback("") }, undo ? 8000 : 5000)
-    return () => clearTimeout(timer)
+    const element = toast.current
+    if (!element) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const pause = () => clearTimeout(timer)
+    const resume = () => {
+      pause()
+      timer = setTimeout(() => { setUndo(null); setFeedback("") }, undo ? 8000 : 5000)
+    }
+    const onFocusOut = (event: FocusEvent) => {
+      if (!(event.relatedTarget instanceof Node && element.contains(event.relatedTarget))) resume()
+    }
+    if (!element.contains(document.activeElement)) resume()
+    element.addEventListener("focusin", pause)
+    element.addEventListener("focusout", onFocusOut)
+    return () => {
+      pause()
+      element.removeEventListener("focusin", pause)
+      element.removeEventListener("focusout", onFocusOut)
+    }
   }, [feedback, undo])
   const savedStatus = !hydrated ? "Opening history…" : storage.error ? "Changes need saving" : storage.pending ? "Saving locally…" : "Saved on this device"
   useEffect(() => {
@@ -1222,7 +1239,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       </div>
       {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} conversationId={current.meta.id} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} />}
       </div>
-      {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
+      {(undo || feedback) && <div ref={toast} className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
     {todosDialog && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-todos-modal" role="dialog" aria-modal="true" aria-label="Conversation Todos"><AgentTodos id="agent-todos-dialog-full" todos={current.todos} sync={current.todoSync} expanded expand={() => setTodosOpen(true)} collapse={() => setTodosOpen(false)} /></section></div>}
     {expandedItem && <div className="agent-confirm-backdrop agent-request-backdrop"><AgentRequest key={expandedItem.id} item={expandedItem} actions={requestActions} expanded /></div>}
