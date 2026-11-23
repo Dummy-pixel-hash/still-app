@@ -425,6 +425,26 @@ test("conversations group by folder and rename, pin, archive, restore, delete su
   await expect(page.locator(".agent-thread-open")).not.toContainText("Reconnect fix")
 })
 
+test("archive notification stays visible while either action has keyboard focus", async ({ page }) => {
+  await connect(page)
+  await page.clock.install()
+  await page.getByRole("button", { name: "Actions for New OpenCode conversation" }).click()
+  await page.getByRole("menuitem", { name: "Archive", exact: true }).click()
+
+  const undo = page.getByRole("button", { name: "Undo", exact: true })
+  const dismiss = page.getByRole("button", { name: "Dismiss notification" })
+  await undo.focus()
+  await page.clock.fastForward(8100)
+  await expect(undo).toBeFocused()
+  await page.keyboard.press("Tab")
+  await page.clock.fastForward(8100)
+  await expect(dismiss).toBeFocused()
+
+  await page.getByRole("button", { name: "New conversation", exact: true }).focus()
+  await page.clock.fastForward(8100)
+  await expect(undo).toBeHidden()
+})
+
 test("drafts persist across switching and uncertain submissions cannot be resent", async ({ page }) => {
   await connect(page)
   await page.getByLabel("Message agent").fill("Keep this draft")
@@ -970,11 +990,10 @@ test("reader position and selected text survive streaming, disclosure, and conve
   await page.evaluate(() => { const h = (window as any).agentFixture; h.emit(h.current, { type: "assistantChunk", text: "More streamed output. ".repeat(30) }) })
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   expect(await page.evaluate(() => getSelection()?.toString())).toBe("Question 12")
-  const tools = page.locator(".agent-work-group")
-  await tools.evaluate(node => { (node as HTMLDetailsElement).open = true })
-  await page.locator(".agent-work-group .agent-tool").waitFor({ state: "attached" })
+  await page.locator(".agent-activity-rail").first().evaluate(node => (node as HTMLElement).click()) // no scroll-into-view: the reader must not move
+  const tool = page.locator("details.agent-tool").first()
+  await tool.waitFor({ state: "attached" })
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-  const tool = tools.locator(".agent-tool").first()
   await tool.evaluate(node => { (node as HTMLDetailsElement).open = true })
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
