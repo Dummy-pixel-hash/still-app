@@ -515,6 +515,11 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     }
     previousRequest.current = activeRequestItem || null
   }, [activeRequestItem, current?.executionId, items])
+  useEffect(() => {
+    if (!feedback && !undo) return
+    const timer = setTimeout(() => { setUndo(null); setFeedback("") }, undo ? 8000 : 5000)
+    return () => clearTimeout(timer)
+  }, [feedback, undo])
   const savedStatus = !hydrated ? "Opening history…" : storage.error ? "Changes need saving" : storage.pending ? "Saving locally…" : "Saved on this device"
   useEffect(() => {
     const media = matchMedia("(max-width: 800px)")
@@ -807,7 +812,11 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     await run(async () => {
       const row = current || start()
       if (!idle(row)) return
-      if (!current && submittedAttachments.length) updateThreadMeta(row.executionId, { draftAttachments: submittedAttachments })
+      if (!current && submittedAttachments.length) {
+        // The staged files now belong to the started conversation, not the project's next draft.
+        updateThreadMeta(row.executionId, { draftAttachments: submittedAttachments })
+        setPrefs(old => ({ ...old, draftAttachments: { ...old.draftAttachments, [draftKey]: [] } }))
+      }
       const sent: AgentDraftAttachment[] = []
       for (const attachment of submittedAttachments) {
         if (attachment.remotePath) { sent.push(attachment); continue }
@@ -826,8 +835,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
           const complete = { ...attachment, remotePath: uploaded.remotePath }
           sent.push(complete)
           const saved = submittedAttachments.map(item => sent.find(done => done.id === item.id) || item)
-          if (current) updateThreadMeta(row.executionId, { draftAttachments: saved })
-          else setPrefs(old => ({ ...old, draftAttachments: { ...old.draftAttachments, [draftKey]: saved } }))
+          updateThreadMeta(row.executionId, { draftAttachments: saved })
           setAttachmentProgress(old => ({ ...old, [attachment.id]: "Uploaded" }))
         } catch (failure) {
           setAttachmentProgress(old => ({ ...old, [attachment.id]: "Upload failed" }))
@@ -837,12 +845,9 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       const attachmentContext = sent.length ? `\n\nAttached files uploaded to this server (remote paths; image understanding depends on the selected agent):\n${sent.map(file => `- ${markdownCode(file.name.replace(/[\r\n]/g, " "))}: ${markdownCode(file.remotePath || "")}`).join("\n")}` : ""
       const message = `${text}${attachmentContext}`.trim() || `Please inspect the attached file${sent.length === 1 ? "" : "s"}.${attachmentContext}`
       await sendAgentMessage(row.executionId, message)
-       const rowCleared = clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
-       const workspaceCleared = !!current || (prefsRef.current.drafts[draftKey] || "").trim() === text.trim() && (prefsRef.current.draftAttachments?.[draftKey] || []).map(file => file.id).join("|") === submittedAttachments.map(file => file.id).join("|")
-       if (!current && workspaceCleared) {
-         setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" }, draftAttachments: { ...old.draftAttachments, [draftKey]: [] } }))
-       }
-       if (rowCleared && workspaceCleared) await Promise.all(submittedAttachments.map(file => removeAttachmentFile(file.id).catch(() => {})))
+      // A new conversation's draft text and staged files were already moved onto its row by start().
+      const rowCleared = clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
+      if (rowCleared) await Promise.all(submittedAttachments.map(file => removeAttachmentFile(file.id).catch(() => {})))
       setAttachmentProgress({}); setAttachmentError("")
       if (mounted.current && navigation.current === revision) scroll.anchorTurn(row.meta.id)
     })
@@ -997,7 +1002,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
         if (matchMedia("(max-width: 800px)").matches && !sidebar) revealProjects()
         else toggleProjects()
       }
-      if (e.key === "Escape") { e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (customSetup) setCustomSetup(null); else if (removingCustom) setRemovingCustom(null); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) closeReview(); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else onClose() }
+      if (e.key === "Escape") { if (e.nativeEvent.isComposing) return; e.preventDefault(); if (expandedRequest) setExpandedRequest(null); else if (todosDialog) setTodosOpen(false); else if (agentDetailsOpen) setAgentDetailsOpen(false); else if (extraControl) setExtraControl(null); else if (modelMenu) setModelMenu(null); else if (historyAction) { if (!busy) setHistoryAction(null) } else if (deleting) setDeleting(null); else if (timelineOpen) setTimelineOpen(false); else if (customSetup) setCustomSetup(null); else if (removingCustom) setRemovingCustom(null); else if (folderOpen) closeFolder(); else if (rename) setRename(null); else if (projectChoices) setProjectChoices(false); else if (commandOpen) setCommandOpen(false); else if (menu) setMenu(null); else if (review) closeReview(); else if (sidebar) setSidebar(false); else if (view === "settings") home(); else if ((e.target as HTMLElement).matches?.("textarea,input,select")) (e.target as HTMLElement).blur(); else onClose() }
       if (e.key === "Tab") {
         const root = surface.current?.querySelector(".agent-modal") || (sidebarOverlay ? surface.current?.querySelector(".agent-thread-menu") || navigationPanel.current : null) || surface.current?.querySelector('.agent-review[aria-modal="true"]') || (projectChoices ? projectPopover.current : null) || surface.current
         const elements = [...(root?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),summary,a[href],[tabindex="0"]') || [])].filter(el => el.getClientRects().length && !el.closest("[inert]"))
@@ -1102,7 +1107,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
         <div ref={scroll.viewport} className={`agent-conversation${current ? " agent-conversation--hierarchy" : ""}${mobile ? " agent-conversation--mobile" : ""}`} tabIndex={0} aria-label="Conversation" onScroll={onConversationScroll} onWheel={onConversationWheel}>
           <div ref={scroll.content} className="agent-message-list">
             {current ? <><AgentTimeline items={items} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}</>
-                : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
+                : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" data-agent-popover-trigger title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
             {!mobile && current && !current.turnActive && !current.pendingInput && !current.pendingPermission && changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}
           </div>
