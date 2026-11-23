@@ -21,6 +21,9 @@
   z-index: 65;
   display: flex;
   overflow: hidden;
+  /* `clip` cannot be scrolled programmatically. The aurora is wider than the viewport, so a
+     focus() call would otherwise shift the whole workspace sideways. */
+  overflow: clip;
   background: var(--ag-bg);
   color: var(--ag-text);
   font: 14px/1.5 var(--font-sans);

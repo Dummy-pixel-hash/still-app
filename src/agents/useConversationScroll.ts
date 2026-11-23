@@ -43,12 +43,16 @@ export function useConversationScroll(key: string, revision: unknown, enabled = 
     if (!enabled) return
     position.current = { ...(positions.get(key) || { offset: 0, top: 0, mode: "following" }) }
     correct()
-    const observer = new ResizeObserver(schedule)
+    // Correct inside the observer callback: it runs after layout and before paint, so no frame shows
+    // the shift and no scroll event can re-baseline the shifted layout before it is compensated.
+    const observer = new ResizeObserver(() => { cancelAnimationFrame(frame.current); frame.current = 0; correct() })
     if (viewport.current) observer.observe(viewport.current)
     if (content.current) observer.observe(content.current)
     return () => { positions.set(key, { ...position.current }); observer.disconnect(); cancelAnimationFrame(frame.current); frame.current = 0; cancelAnimationFrame(turnFrame.current) }
   }, [key, enabled, capture, correct, schedule])
-  useLayoutEffect(() => { if (enabled) schedule() }, [revision, enabled, schedule])
+  // A transcript change can move content above the reader while leaving the total height unchanged
+  // (one block grows as another shrinks), which a ResizeObserver never reports. Compensate before paint.
+  useLayoutEffect(() => { if (enabled) { correct(); schedule() } }, [revision, enabled, correct, schedule])
   const onScroll = () => {
     const el = viewport.current
     if (!el) return
