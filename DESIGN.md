@@ -88,6 +88,29 @@ Native persistence owns metadata and drafts independently of provider executions
 - **Orb action:** click/Enter/Space returns to Still; dragging must not trigger activation. A small status symbol supplements colour, and the menu exposes readable status labels.
 - **Session menu:** metadata only, with session activation, motion, reset, and hide. No synthetic session data in the live interface.
 
+## Android phone library
+
+The phone keeps its approved flat black/rose identity (`#080809`, `#eee9ed`,
+`#b5a9b8`, `#f0b0c5`), Source Sans 3 body text, Bricolage Grotesque headings and
+floating navigation. Do not bring desktop window controls or sidebar framing into
+this shell.
+
+Threads form flat, collapsible project sections identified by exact server/account
+and remote folder, never just a folder basename. Native project and sort pickers
+offer All projects, recent project activity and natural A–Z ordering. Each section
+shows its name, server/path, thread count and attention count; pinned conversations
+lead, then newest activity. Search, a selected project and Needs you expose matching
+rows even if their All projects section was collapsed. Sync is one compact action,
+with account choices disclosed only when needed.
+
+Project selection, sort and collapsed sections are device-owned preferences; they
+do not reorder shared metadata or start providers. All projects keeps New task
+unassigned; an explicitly selected active project becomes the new task's visible
+context. Accessible native pickers have at least 48px touch targets. Empty states
+explain the current scope and offer a return to All projects. Existing titles,
+history, drafts, unread state, provider identities and terminal navigation survive
+view changes.
+
 ## Do's and Don'ts
 
 - Do match the selected glass study at actual desktop size over both dark and light backgrounds.

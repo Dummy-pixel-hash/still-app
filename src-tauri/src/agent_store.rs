@@ -248,7 +248,7 @@ fn fields(snapshot: &Snapshot) -> Value {
         "agentSessionId": snapshot.agent_session_id, "resumable": snapshot.resumable,
         "cwd": snapshot.cwd, "state": snapshot.state, "turnActive": snapshot.turn_active,
         "lastError": snapshot.last_error, "lastSequence": snapshot.last_sequence, "historyCapabilities": snapshot.history_capabilities,
-        "persistent":snapshot.persistent,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required,"todos":snapshot.todos,"todoSync":snapshot.todo_sync,"capabilities":snapshot.capabilities})
+        "persistent":snapshot.persistent,"continuity":snapshot.continuity,"remoteImported":snapshot.remote_imported,"configGeneration":snapshot.config_generation,"pendingMessageId":snapshot.pending_message_id,"remoteCursor":snapshot.remote_cursor,"promptId":snapshot.prompt_id,"recoveryRequired":snapshot.recovery_required,"todos":snapshot.todos,"todoSync":snapshot.todo_sync,"capabilities":snapshot.capabilities})
 }
 
 pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, StillError> {
@@ -260,6 +260,157 @@ pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, Stil
     crate::agent::restore_capabilities(&mut snapshot);
     crate::agent::restore_todos(&mut snapshot);
     Ok(snapshot)
+}
+
+/// Missing, deleted and damaged caches are different outcomes. Discovery must
+/// never replace a damaged journal or resurrect a device-local tombstone.
+pub async fn import_remote_snapshot(app: &AppHandle, snapshot: Snapshot, remote: Value) -> Result<Option<Snapshot>, StillError> {
+    disk(app, move |root| {
+        let id = &snapshot.conversation_id;
+        if file(root, id, "deleted")?.exists() { return Ok(None); }
+        let path = file(root, id, "jsonl")?;
+        if path.exists() {
+            let row = summary(&path, &mut Vec::new())?;
+            let cached_meta = row["meta"].clone();
+            let mut saved: Snapshot = serde_json::from_value(row).map_err(|e| e.to_string())?;
+            if saved.host_key != snapshot.host_key || saved.cwd != snapshot.cwd || saved.agent_id != snapshot.agent_id {
+                return Err("Discovered conversation conflicts with the saved account, project or provider".into());
+            }
+            if saved.execution_id != snapshot.execution_id {
+                if remote["replacesExecutionId"] != saved.execution_id || snapshot.agent_session_id != saved.agent_session_id
+                    || remote["shared"]["generation"].as_u64().unwrap_or(0) <= cached_meta["shared"]["generation"].as_u64().unwrap_or(0)
+                    || saved.pending_message_id.is_some() || saved.recovery_required || matches!(saved.state.as_str(), "submissionUnknown" | "rewinding") {
+                    return Err("Execution migration needs explicit recovery or reconciliation. The original cache and drafts were kept".into());
+                }
+                if cached_meta["shared"]["serverAccountId"].is_string() && cached_meta["shared"]["serverAccountId"] != remote["shared"]["serverAccountId"] {
+                    return Err("Execution migration belongs to a different remote account".into());
+                }
+                // The header advances, while the complete original journal,
+                // prior-attempt transcript, local drafts and metadata remain.
+                append(&path, &Record::Update { fields: fields(&snapshot) })?;
+                Ok(Some(snapshot))
+            } else {
+                if refresh_remote_resume_identity(&mut saved, &snapshot)? {
+                    append(&path, &Record::Update { fields: json!({"agentSessionId":saved.agent_session_id,"resumable":saved.resumable}) })?;
+                }
+                Ok(Some(saved))
+            }
+        } else {
+            let now = timestamp();
+            let mut row = serde_json::to_value(&snapshot).map_err(|e| e.to_string())?;
+            row["meta"] = json!({"id":id,"hostKey":snapshot.host_key,"folder":snapshot.cwd,"title":"", "pinned":false,"createdAt":now,"activityAt":now,"order":now,"draft":""});
+            row["touchedAt"] = json!(now);
+            append(&path, &Record::Create { row })?;
+            Ok(Some(snapshot))
+        }
+    }).await
+}
+
+fn refresh_remote_resume_identity(saved: &mut Snapshot, incoming: &Snapshot) -> Result<bool, String> {
+    if saved.execution_id != incoming.execution_id || saved.conversation_id != incoming.conversation_id
+        || saved.host_key != incoming.host_key || saved.cwd != incoming.cwd || saved.agent_id != incoming.agent_id {
+        return Err("Resume metadata belongs to a different conversation, execution or account".into());
+    }
+    let Some(session) = incoming.agent_session_id.as_ref().filter(|id| !id.is_empty()) else { return Ok(false); };
+    if saved.agent_session_id.as_ref().is_some_and(|previous| previous != session) {
+        return Err("The provider session identity changed. The saved history and draft were kept".into());
+    }
+    let changed = saved.agent_session_id.as_ref() != Some(session) || !saved.resumable && incoming.resumable;
+    saved.agent_session_id = Some(session.clone());
+    // Missing legacy evidence must not revoke an earlier provider confirmation.
+    saved.resumable |= incoming.resumable;
+    Ok(changed)
+}
+
+/// Server-owned fields are projected independently from drafts, attachments and
+/// other device-owned metadata. A stale WebView must not roll this binding back.
+pub async fn apply_shared_metadata(app: &AppHandle, id: String, host_key: String, shared: Value) -> Result<(), StillError> {
+    disk(app, move |root| {
+        let path = file(root, &id, "jsonl")?;
+        if !path.exists() || file(root, &id, "deleted")?.exists() { return Ok(()); }
+        let row = summary(&path, &mut Vec::new())?;
+        if let Some(meta) = project_shared_metadata(&row, &id, &host_key, shared)? {
+            append(&path, &Record::Metadata { meta })?;
+        }
+        Ok(())
+    }).await
+}
+
+fn project_shared_metadata(row: &Value, id: &str, host_key: &str, shared: Value) -> Result<Option<Value>, String> {
+        if row["hostKey"] != host_key || shared["conversationId"] != id || shared["executionId"] != row["executionId"]
+            || shared["serverAccountId"].as_str().and_then(|id| uuid::Uuid::parse_str(id).ok()).is_none()
+            || !shared["revision"].is_u64() || !shared["generation"].is_u64() || !shared["fields"].is_object() || !shared["values"].is_object()
+            || !["title", "pinned", "archivedAt", "order"].iter().all(|key| shared["fields"][*key].is_u64())
+            || shared["values"]["title"].as_str().is_none_or(|title| title.len() > 640 || title.chars().any(char::is_control))
+            || !shared["values"]["pinned"].is_boolean() || !shared["values"]["order"].is_u64() {
+            return Err("Shared metadata did not match this account/conversation/execution".into());
+        }
+        let mut meta = row["meta"].clone();
+        if let Some(previous) = meta.get("shared").filter(|value| value.is_object()) {
+            if previous["serverAccountId"] != shared["serverAccountId"] { return Err("The server's account identity changed; the saved binding was kept".into()); }
+            if previous["revision"].as_u64().unwrap_or(0) > shared["revision"].as_u64().unwrap_or(0) { return Ok(None); }
+        }
+        if !meta["shared"].is_object() && !row["remoteImported"].as_bool().unwrap_or(false) {
+            let mut local = json!({});
+            if meta["titleSource"] == "user" && meta["title"] != shared["values"]["title"] { local["title"] = meta["title"].clone(); }
+            if meta["pinned"] == true && shared["values"]["pinned"] != true { local["pinned"] = json!(true); }
+            if meta["archivedAt"].as_u64().is_some_and(|value| value > 0) && meta["archivedAt"] != shared["values"]["archivedAt"] { local["archivedAt"] = meta["archivedAt"].clone(); }
+            if local.as_object().is_some_and(|value| !value.is_empty()) {
+                meta["sharedLocalChanges"] = local;
+                meta["sharedConflict"] = json!(true);
+                meta["sharedSyncError"] = json!("Existing organization remains saved on this device. Choose Apply my saved changes to share it with this account.");
+            }
+        }
+        for key in ["title", "titleSource", "pinned", "archivedAt", "order"] {
+            if matches!(key, "title" | "titleSource") && shared["values"]["titleSource"] != "user"
+                && shared["values"]["title"].as_str().is_some_and(|title| title.trim().is_empty()) { continue; }
+            let field = if key == "titleSource" { "title" } else { key };
+            let pending = meta["sharedPending"].as_array().is_some_and(|items| items.iter().any(|item| item["patch"].get(field).is_some()));
+            if !pending && meta["sharedLocalChanges"].get(field).is_none() {
+                if let Some(value) = shared["values"].get(key) { meta[key] = value.clone(); }
+            }
+        }
+        meta["shared"] = shared;
+        if row["parentConversationId"].is_string() && meta["shared"]["prepared"].is_boolean() { meta["subagentPrepared"] = meta["shared"]["prepared"].clone(); }
+        if meta["shared"]["deleted"] == true { meta["sharedDeleted"] = json!(true); }
+        Ok(Some(meta))
+}
+
+pub async fn apply_shared_tombstones(app: &AppHandle, host: String, account: String, ids: Vec<String>) -> Result<(), StillError> {
+    disk(app, move |root| {
+        for id in ids {
+            let path = file(root, &id, "jsonl")?;
+            if !path.exists() || file(root, &id, "deleted")?.exists() { continue; }
+            let row = summary(&path, &mut Vec::new())?;
+            if row["hostKey"] != host || row["meta"]["shared"]["serverAccountId"] != account || row["meta"]["sharedDeleted"] == true { continue; }
+            let mut meta = row["meta"].clone();
+            meta["sharedDeleted"] = json!(true);
+            append(&path, &Record::Metadata { meta })?;
+        }
+        Ok(())
+    }).await
+}
+
+/// Even an empty device library has an account binding. A rebuilt SSH endpoint
+/// must not silently merge a different account's projects with the old cache.
+pub async fn bind_shared_account(app: &AppHandle, host: String, account: String, revision: Value, projects: Value) -> Result<(), StillError> {
+    disk(app, move |root| {
+        let key = format!("shared-account:{host}");
+        let path = root.join("workspace.jsonl");
+        let mut existing = None;
+        if path.exists() {
+            for record in records(&path, &mut Vec::new())? {
+                if let Record::Workspace { key: saved_key, value } = record {
+                    if saved_key == key { existing = Some(value); }
+                }
+            }
+        }
+        if let Some(existing) = existing {
+            if existing["serverAccountId"] != account { return Err("This SSH endpoint now reports a different account identity. Existing projects and drafts were preserved; explicit account adoption is required".into()); }
+            return Ok(());
+        }
+        append(&path, &Record::Workspace { key, value: json!({"serverAccountId":account,"revision":revision,"projects":projects}) })
+    }).await
 }
 
 async fn disk<T: Send + 'static>(app: &AppHandle, operation: impl FnOnce(&Path) -> Result<T, String> + Send + 'static) -> Result<T, StillError> {
@@ -397,14 +548,46 @@ pub async fn still_agent_library(app: AppHandle) -> Result<Value, StillError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoryArgs { conversation_id: String, before: Option<usize> }
+pub struct HistoryArgs { conversation_id: String, before: Option<usize>, after: Option<usize> }
 
 #[tauri::command]
 pub async fn still_agent_history(app: AppHandle, args: HistoryArgs) -> Result<Value, StillError> {
     disk(&app, move |root| {
+        if args.before.is_some() && args.after.is_some() { return Err("Choose a history cursor in one direction".into()); }
         if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
-        let row = agent_history::page(&file(root, &args.conversation_id, "jsonl")?, args.before, &mut Vec::new())?;
-        Ok(json!({"executionId":row["executionId"],"lastSequence":row["lastSequence"],"transcript":row["transcript"],"before":row["historyBefore"],"total":row["historyTotal"],"latest":row["historyLatest"]}))
+        let row = agent_history::window(&file(root, &args.conversation_id, "jsonl")?, args.before, args.after, &mut Vec::new())?;
+        Ok(json!({"executionId":row["executionId"],"lastSequence":row["lastSequence"],"transcript":row["transcript"],"before":row["historyBefore"],"after":row["historyAfter"],"total":row["historyTotal"],"latest":row["historyLatest"]}))
+    }).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeHistoryArgs { conversation_id: String }
+
+#[tauri::command]
+pub async fn still_agent_change_history(app: AppHandle, args: ChangeHistoryArgs) -> Result<Value, StillError> {
+    disk(&app, move |root| {
+        if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let path = file(root, &args.conversation_id, "jsonl")?;
+        let index = agent_history::index(&path, &mut Vec::new())?;
+        let changes = agent_history::change_summaries(&path)?;
+        Ok(json!({"executionId":index.row["executionId"],"changes":changes}))
+    }).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDetailsArgs { conversation_id: String, path: String }
+
+#[tauri::command]
+pub async fn still_agent_change_details(app: AppHandle, args: ChangeDetailsArgs) -> Result<Value, StillError> {
+    disk(&app, move |root| {
+        if args.path.is_empty() || args.path.len() > 4096 || args.path.chars().any(char::is_control) { return Err("Invalid changed-file identity".into()); }
+        if file(root, &args.conversation_id, "deleted")?.exists() { return Err("This conversation was deleted from this device".into()); }
+        let path = file(root, &args.conversation_id, "jsonl")?;
+        let index = agent_history::index(&path, &mut Vec::new())?;
+        let events = agent_history::change_details(&path, &args.path)?;
+        Ok(json!({"executionId":index.row["executionId"],"path":args.path,"events":events}))
     }).await
 }
 
@@ -432,7 +615,26 @@ pub async fn still_agent_save_metadata(app: AppHandle, args: MetadataArgs) -> Re
         validate_meta(&args.conversation_id, &args.meta)?;
         let path = file(root, &args.conversation_id, "jsonl")?;
         if !path.exists() || file(root, &args.conversation_id, "deleted")?.exists() { return Err("Conversation is no longer in the local library".into()); }
-        append(&path, &Record::Metadata { meta: args.meta })
+        let mut meta = args.meta;
+        let previous = summary(&path, &mut Vec::new())?;
+        if previous["meta"]["shared"].is_object() {
+            meta["shared"] = previous["meta"]["shared"].clone();
+            if previous["meta"]["sharedLocalChanges"].is_object() && meta["sharedAdoptionResolved"] != true {
+                meta["sharedLocalChanges"] = previous["meta"]["sharedLocalChanges"].clone();
+                meta["sharedConflict"] = json!(true);
+                meta["sharedSyncError"] = previous["meta"]["sharedSyncError"].clone();
+            }
+            for key in ["title", "titleSource", "pinned", "archivedAt", "order"] {
+                if matches!(key, "title" | "titleSource") && meta["shared"]["values"]["titleSource"] != "user"
+                    && meta["shared"]["values"]["title"].as_str().is_some_and(|title| title.trim().is_empty()) { continue; }
+                let field = if key == "titleSource" { "title" } else { key };
+                let pending = meta["sharedPending"].as_array().is_some_and(|items| items.iter().any(|item| item["patch"].get(field).is_some()));
+                if !pending && meta["sharedLocalChanges"].get(field).is_none() {
+                    if let Some(value) = meta["shared"]["values"].get(key).cloned() { meta[key] = value; }
+                }
+            }
+        }
+        append(&path, &Record::Metadata { meta })
     }).await
 }
 
@@ -571,6 +773,145 @@ mod tests {
         assert!(is_activity_event("userMessage"));
         assert!(!is_activity_event("capabilities"));
         assert!(!is_activity_event("todos"));
+    }
+    fn shared_fixture() -> (Value, Value) {
+        (json!({"hostKey":"host","executionId":"execution","remoteImported":true,
+            "meta":{"id":"conversation","title":"Local","titleSource":"agent","pinned":false,"draft":"Never upload this draft","draftAttachments":[{"id":"private-file"}]}}),
+         json!({"serverAccountId":"00000000-0000-4000-8000-000000000001","conversationId":"conversation","executionId":"execution",
+            "generation":1,"revision":2,"fields":{"title":1,"pinned":0,"archivedAt":0,"order":0},
+            "values":{"title":"Remote title","titleSource":"agent","pinned":true,"archivedAt":null,"order":5}}))
+    }
+    #[test]
+    fn shared_projection_preserves_device_drafts_and_attachments() {
+        let (row, shared) = shared_fixture();
+        let meta = project_shared_metadata(&row, "conversation", "host", shared).unwrap().unwrap();
+        assert_eq!(meta["title"], "Remote title");
+        assert_eq!(meta["draft"], "Never upload this draft");
+        assert_eq!(meta["draftAttachments"][0]["id"], "private-file");
+        assert_eq!(row["meta"]["title"], "Local", "projection does not mutate its original recovery input");
+    }
+    #[test]
+    fn an_unindexed_catalog_title_preserves_known_titles_but_user_clearing_is_explicit() {
+        let (row, mut shared) = shared_fixture();
+        shared["values"]["title"] = json!("");
+        shared["values"]["titleSource"] = json!("prompt");
+        let meta = project_shared_metadata(&row, "conversation", "host", shared.clone()).unwrap().unwrap();
+        assert_eq!(meta["title"], "Local");
+        assert_eq!(meta["titleSource"], "agent");
+        assert_eq!(meta["draft"], row["meta"]["draft"]);
+        shared["values"]["titleSource"] = json!("user");
+        let cleared = project_shared_metadata(&row, "conversation", "host", shared).unwrap().unwrap();
+        assert_eq!(cleared["title"], "");
+        assert_eq!(cleared["titleSource"], "user");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_projection_accepts_real_remote_filesystem_timestamps() {
+        let root = root();
+        let script = format!("{}\n{}", include_str!("../agent-host/shared-library.mjs"), r#"
+            import { utimesSync } from 'node:fs';
+            const fixtureHome = process.argv[1];
+            const fixtureDirectory = join(fixtureHome, '.local/state/still/agents/execution');
+            mkdirSync(fixtureDirectory, { recursive: true, mode: 0o700 });
+            const fixtureFile = join(fixtureDirectory, 'state.json');
+            writeFileSync(fixtureFile, JSON.stringify({ version: 4, executionId: 'execution', conversationId: 'conversation',
+                cwd: '/srv/project', agentId: 'opencode', eventIndex: 2 }), { mode: 0o600 });
+            utimesSync(fixtureFile, 1730000000.123456, 1730000000.123456);
+            console.log(JSON.stringify(sharedLibrary(fixtureHome).rows[0].shared));
+        "#);
+        let output = std::process::Command::new("node").args(["--input-type=module", "-e", &script]).arg(&root).output().expect("Node.js is required for the remote metadata contract test");
+        fs::remove_dir_all(root).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let shared: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let (row, _) = shared_fixture();
+        let meta = project_shared_metadata(&row, "conversation", "host", shared).unwrap().unwrap();
+        assert_eq!(meta["shared"]["values"]["order"].as_u64(), Some(1_730_000_000_123));
+        assert_eq!(meta["draft"], row["meta"]["draft"]);
+        assert_eq!(meta["draftAttachments"], row["meta"]["draftAttachments"]);
+    }
+    #[test]
+    fn shared_projection_retains_a_conflicting_local_organization_for_explicit_adoption() {
+        let (mut row, shared) = shared_fixture();
+        row["remoteImported"] = json!(false);
+        row["meta"]["titleSource"] = json!("user");
+        let meta = project_shared_metadata(&row, "conversation", "host", shared).unwrap().unwrap();
+        assert_eq!(meta["title"], "Local");
+        assert_eq!(meta["titleSource"], "user");
+        assert_eq!(meta["sharedLocalChanges"]["title"], "Local");
+        assert_eq!(meta["sharedConflict"], true);
+    }
+    #[test]
+    fn shared_projection_rejects_scope_changes_and_ignores_old_server_revisions() {
+        let (mut row, mut shared) = shared_fixture();
+        assert!(project_shared_metadata(&row, "conversation", "foreign-host", shared.clone()).is_err());
+        row["meta"]["shared"] = shared.clone();
+        shared["revision"] = json!(1);
+        assert!(project_shared_metadata(&row, "conversation", "host", shared.clone()).unwrap().is_none());
+        shared["serverAccountId"] = json!("00000000-0000-4000-8000-000000000002");
+        assert!(project_shared_metadata(&row, "conversation", "host", shared).is_err());
+    }
+    #[test]
+    fn discovery_refreshes_confirmed_resume_identity_without_changing_execution_state() {
+        let mut saved: Snapshot = serde_json::from_value(json!({"conversationId":"conversation","hostKey":"host","executionId":"execution",
+            "localSessionId":"local","agentId":"opencode","agentName":"OpenCode","agentSessionId":null,"cwd":"/srv/project",
+            "state":"error","transcript":[],"pendingPermission":null,"lastError":"Kept recovery reason","lastSequence":4,
+            "turnActive":false,"configOptions":[],"commands":[],"pendingInput":null,"resumable":false})).unwrap();
+        let mut incoming = saved.clone();
+        incoming.agent_session_id = Some("confirmed-session".into()); incoming.resumable = true;
+        assert!(refresh_remote_resume_identity(&mut saved, &incoming).unwrap());
+        assert_eq!(saved.agent_session_id.as_deref(), Some("confirmed-session"));
+        assert!(saved.resumable);
+        assert_eq!(saved.state, "error");
+        assert_eq!(saved.last_sequence, 4);
+        incoming.resumable = false;
+        assert!(!refresh_remote_resume_identity(&mut saved, &incoming).unwrap(), "missing legacy evidence cannot revoke confirmed support");
+        incoming.agent_session_id = Some("another-session".into());
+        assert!(refresh_remote_resume_identity(&mut saved, &incoming).is_err());
+        assert_eq!(saved.agent_session_id.as_deref(), Some("confirmed-session"));
+        incoming.agent_session_id = Some("confirmed-session".into()); incoming.host_key = "another-host".into();
+        assert!(refresh_remote_resume_identity(&mut saved, &incoming).is_err());
+    }
+    #[test]
+    fn windows_export_matches_real_native_journal_replay_without_modifying_the_source() {
+        let root = root();
+        let source = root.join("source"); fs::create_dir(&source).unwrap();
+        let id = "windows-export-contract";
+        let account = r#"["home-work.example.test",22,"Darsh"]"#;
+        let mut initial = legacy_row(id, "original-execution");
+        initial["hostKey"] = json!(account); initial["agentName"] = json!("OpenCode");
+        initial["agentSessionId"] = json!("provider-session"); initial["state"] = json!("complete"); initial["resumable"] = json!(true);
+        initial["meta"]["hostKey"] = json!(account); initial["meta"]["title"] = json!("Windows chat title");
+        initial["meta"]["titleSource"] = json!("user"); initial["meta"]["draft"] = json!("DEVICE_ONLY_DRAFT");
+        let path = file(&source, id, "jsonl").unwrap();
+        append(&path, &Record::Create { row: initial }).unwrap();
+        for (sequence, kind, text) in [(1, "userMessage", "Original user message"), (2, "assistantChunk", "First "), (3, "assistantChunk", "second")] {
+            let event: Event = serde_json::from_value(json!({"sequence":sequence,"attemptId":"original-execution","type":kind,"text":text})).unwrap();
+            append(&path, &Record::Event { fields: json!({"executionId":"original-execution","lastSequence":sequence}), event }).unwrap();
+        }
+        let before = fs::read(&path).unwrap();
+        let native = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        let exporter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/migration/export-windows-library.mjs");
+        let script = r#"
+            import { readFileSync } from 'node:fs';
+            import { pathToFileURL } from 'node:url';
+            const tool = await import(pathToFileURL(process.argv[2]).href);
+            const inventory = tool.inspectLibrary(process.argv[3]);
+            const result = tool.exportLibrary({ library: process.argv[3], account: inventory.accounts[0].accountId, output: process.argv[4], includeHistory: true });
+            process.stdout.write(readFileSync(result.exportFile));
+        "#;
+        let output = std::process::Command::new("node").args(["--input-type=module", "-e", script, "export-contract"])
+            .arg(exporter).arg(&source).arg(root.join("export")).output().expect("Node.js is required for the Windows export contract test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let exported: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let conversation = &exported["conversations"][0];
+        assert_eq!(conversation["conversationId"], native["meta"]["id"]);
+        assert_eq!(conversation["organization"]["title"], native["meta"]["title"]);
+        assert_eq!(conversation["history"]["events"][0]["text"], native["transcript"][0]["text"]);
+        assert_eq!(conversation["history"]["events"][1]["text"], native["transcript"][1]["text"]);
+        assert_eq!(conversation["history"]["events"][1]["endSequence"], native["transcript"][1]["endSequence"]);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("DEVICE_ONLY_DRAFT"));
+        assert_eq!(fs::read(path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn library_capabilities_are_scope_validated_and_always_stale() {

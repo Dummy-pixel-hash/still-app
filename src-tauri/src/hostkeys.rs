@@ -14,6 +14,37 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+// Trust writes share one temporary-file name, so serialize both update paths.
+static STORE_WRITER: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "android")]
+static ANDROID_STORE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(any(target_os = "android", test))]
+fn app_private_store_path(config_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if !config_dir.is_absolute() {
+        return Err(anyhow::anyhow!("app configuration directory must be absolute"));
+    }
+    Ok(config_dir.join("known_hosts.json"))
+}
+
+/// Android has no desktop HOME/XDG variables and no writable /tmp. Initialize
+/// this before exposing IPC, using Tauri's app-private native configuration path.
+#[cfg(target_os = "android")]
+pub fn initialize_android_store(config_dir: PathBuf) -> anyhow::Result<()> {
+    let path = app_private_store_path(&config_dir)?;
+    std::fs::create_dir_all(&config_dir)?;
+    if let Some(existing) = ANDROID_STORE_PATH.get() {
+        if *existing == path {
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!("Android host trust storage was already initialized"));
+    }
+    ANDROID_STORE_PATH.set(path)
+        .map_err(|_| anyhow::anyhow!("Android host trust storage could not initialize"))
+}
 
 /// Map key: `"<lowercased-host>:<port>"`.
 pub fn endpoint_key(host: &str, port: u16) -> String {
@@ -27,6 +58,14 @@ pub fn store_path() -> PathBuf {
     {
         return PathBuf::from(p);
     }
+    #[cfg(target_os = "android")]
+    {
+        return ANDROID_STORE_PATH.get()
+            .expect("Android host trust storage must initialize before SSH IPC")
+            .clone();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     // Windows: APPDATA (Roaming) is the canonical per-user config location.
     // Checked before the Unix chain because it is effectively never set on
     // non-Windows hosts, and HOME is frequently unset in GUI-launched
@@ -56,7 +95,8 @@ pub fn store_path() -> PathBuf {
                 .map(|h| PathBuf::from(h).join(".config"))
         })
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("still").join("known_hosts.json")
+        base.join("still").join("known_hosts.json")
+    }
 }
 
 /// Parse store bytes. `Err` on any malformed content (fail closed).
@@ -101,6 +141,8 @@ pub fn lookup_trusted(host: &str, port: u16) -> anyhow::Result<Option<String>> {
 /// Atomically store trust for an endpoint. Creates parent dirs as needed.
 /// Refuses empty keys.
 pub fn store_trusted(host: &str, port: u16, openssh_key: &str) -> anyhow::Result<()> {
+    let _writer = STORE_WRITER.lock()
+        .map_err(|_| anyhow::anyhow!("host trust storage lock is unavailable"))?;
     let openssh_key = openssh_key.trim();
     if openssh_key.is_empty() {
         return Err(anyhow::anyhow!("refusing to store empty host key"));
@@ -115,7 +157,7 @@ pub fn store_trusted(host: &str, port: u16, openssh_key: &str) -> anyhow::Result
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut map = read_store().unwrap_or_default();
+    let mut map = read_store()?;
     map.insert(endpoint_key(host, port), openssh_key.to_string());
     // Atomic write: tmp + rename so a crash never leaves half JSON.
     let tmp = path.with_extension("json.tmp");
@@ -140,6 +182,8 @@ pub fn was_ever_trusted(host: &str, port: u16) -> bool {
 
 /// Remove trust for an endpoint (best-effort).
 pub fn forget_trusted(host: &str, port: u16) -> anyhow::Result<()> {
+    let _writer = STORE_WRITER.lock()
+        .map_err(|_| anyhow::anyhow!("host trust storage lock is unavailable"))?;
     let path = store_path();
     let mut map = match std::fs::read(&path) {
         Ok(bytes) => parse_store(&bytes)?,
@@ -284,6 +328,33 @@ mod tests {
     fn empty_store_parses_empty() {
         assert!(parse_store(b"").unwrap().is_empty());
         assert!(parse_store(b"  \n ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_private_path_never_uses_the_desktop_tmp_fallback() {
+        let root = std::env::temp_dir().join("still-android-private-config-fixture");
+        assert_eq!(app_private_store_path(&root).unwrap(), root.join("known_hosts.json"));
+        assert!(app_private_store_path(std::path::Path::new("")).is_err());
+        assert!(app_private_store_path(std::path::Path::new("relative-config")).is_err());
+    }
+
+    #[test]
+    fn storing_trust_cannot_replace_a_malformed_store() {
+        let _g = test_serial();
+        let previous = std::env::var_os("STILL_KNOWN_HOSTS");
+        let directory = std::env::temp_dir().join(format!("still-hk-malformed-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("known_hosts.json");
+        std::fs::write(&path, b"{invalid").unwrap();
+        unsafe { std::env::set_var("STILL_KNOWN_HOSTS", &path); }
+        assert!(store_trusted("fixture.invalid", 22, "ssh-ed25519 AAAAfixture").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{invalid");
+        unsafe {
+            if let Some(value) = previous { std::env::set_var("STILL_KNOWN_HOSTS", value); }
+            else { std::env::remove_var("STILL_KNOWN_HOSTS"); }
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     /// Windows ARM64 validation gate: a GUI-launched Windows process

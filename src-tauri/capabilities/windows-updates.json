@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows-updates",
+  "description": "Signed Windows updates are available only to the main window.",
+  "platforms": ["windows"],
+  "windows": ["main"],
+  "permissions": ["updater:default"]
+}

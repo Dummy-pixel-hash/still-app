@@ -5,8 +5,9 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .still-mobile body { font-family: "Still Source", system-ui, sans-serif; }
 .mobile-app { --font-sans: "Still Source", system-ui, sans-serif; --font-serif: "Still Display", system-ui, sans-serif; --mobile-ink: #080809; --mobile-text: #eee9ed; --mobile-dim: #b5a9b8; --mobile-line: #ffffff10; --mobile-accent: #f0b0c5; position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; width: 100%; color: var(--mobile-text); background: var(--mobile-ink); font: 400 16px/1.45 var(--font-sans); color-scheme: dark; isolation: isolate; }
 .mobile-app *, .mobile-app *:before, .mobile-app *:after { box-sizing: border-box; }
-.mobile-root-content { display: flex; flex: 1; min-height: 0; flex-direction: column; height: 100%; }
-.mobile-app[data-detail="true"] > .mobile-root-content { visibility: hidden; }
+.mobile-root-content { display: flex; flex: 1; min-height: 0; flex-direction: column; height: 100%; opacity: 1; visibility: visible; transition: opacity 150ms ease-out, visibility 0s linear; }
+.mobile-page-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; animation: mobile-page-enter 150ms ease-out both; }
+.mobile-app[data-detail="true"] > .mobile-root-content { opacity: 0; visibility: hidden; transition-delay: 0s, 150ms; }
 .mobile-app button, .mobile-app input, .mobile-app select, .mobile-app textarea { font-family: inherit; -webkit-tap-highlight-color: transparent; }
 .mobile-app button { touch-action: manipulation; cursor: pointer; }
 .mobile-app button:disabled { opacity: .4; cursor: default; }
@@ -21,12 +22,45 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-icon-button:active { background: #ffffff0b; }
 .mobile-heading { flex-shrink: 0; display: flex; gap: 12px; align-items: center; padding: 12px 20px 16px; min-height: 75px; }
 .mobile-heading h1 { font: 650 38px/.98 "Still Display", sans-serif; letter-spacing: -.035em; margin: 0; flex: 1; }
-.mobile-project-chip { display: flex; align-items: center; gap: 6px; background: transparent; color: var(--mobile-dim); font-size: 12px; min-height: 48px; max-width: 42%; padding: 0; overflow: hidden; text-overflow: ellipsis; }
 .mobile-thread-filters { display: flex; gap: 24px; margin: 0 20px; border-bottom: 1px solid var(--mobile-line); flex-shrink: 0; }
 .mobile-thread-filters button { position: relative; min-height: 48px; border: 0; padding: 0 1px 11px; color: #b8acbb; background: transparent; font-size: 13px; font-weight: 500; }
 .mobile-thread-filters button span { margin-left: 7px; color: #d2afc3; font-size: 11px; }
 .mobile-thread-filters button[aria-pressed="true"] { color: #efd8e4; }
 .mobile-thread-filters button[aria-pressed="true"]:after { content: ""; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; background: #dfa5bd; border-radius: 2px; }
+.mobile-library-controls { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; margin-block: 12px 0; }
+.mobile-library-select { position: relative; min-width: 0; min-height: 50px; border: 1px solid var(--mobile-line); border-radius: 10px; color: var(--mobile-dim); }
+.mobile-library-select:focus-within { outline: 2px solid var(--mobile-accent); outline-offset: 2px; }
+.mobile-library-select[data-selected="true"] { color: var(--mobile-accent); }
+.mobile-library-select:has(select:disabled) { opacity: .5; }
+.mobile-library-select-copy { min-width: 0; min-height: 48px; padding: 0 12px; display: flex; align-items: center; gap: 8px; }
+.mobile-library-select-copy strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; }
+.mobile-library-select-copy > svg { flex-shrink: 0; }
+.mobile-library-select-copy > svg:last-child { transform: rotate(90deg); }
+.mobile-library-select select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; font-size: 16px; }
+.mobile-library-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; }
+.mobile-library-summary { margin: 0; color: var(--mobile-dim); font-size: 13px; line-height: 1.5; }
+.mobile-library-sync-trigger { display: inline-flex; align-items: center; flex-shrink: 0; gap: 7px; min-height: 48px; padding: 8px 0 8px 12px; background: transparent; color: var(--mobile-dim); font-size: 13px; border: 0; }
+.mobile-library-sync-trigger > svg:last-child:not(:first-child) { transform: rotate(90deg); }
+.mobile-library-sync-trigger[aria-expanded="true"] { color: var(--mobile-accent); }
+.mobile-sync-accounts .mobile-text-button { display: flex; justify-content: flex-start; min-height: 60px; width: 100%; text-align: left; }
+.mobile-sync-source-label { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.mobile-sync-source-label small { color: var(--mobile-dim); font-size: 12px; }
+.mobile-project-group { margin-top: 12px; min-width: 0; }
+.mobile-project-group + .mobile-project-group { margin-top: 28px; }
+.mobile-project-group > header { position: sticky; top: 0; z-index: 1; background: var(--mobile-ink); }
+.mobile-project-group h2 { margin: 0; font-family: var(--font-sans); }
+.mobile-project-group-heading { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 64px; padding: 10px 0; background: none; color: var(--mobile-dim); border: 0; text-align: left; }
+.mobile-project-group-heading:active { color: var(--mobile-accent); }
+.mobile-project-group-heading > svg { flex: 0 0 18px; }
+.mobile-project-group-copy { display: grid; flex: 1; min-width: 0; gap: 4px; }
+.mobile-project-group-copy > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mobile-text); font-size: 17px; font-weight: 600; line-height: 1.35; }
+.mobile-project-group-copy > small { display: grid; font-size: 12px; font-weight: 400; line-height: 1.4; }
+.mobile-project-account, .mobile-project-folder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-project-group-count { display: grid; gap: 4px; flex-shrink: 0; justify-items: end; font-size: 13px; font-weight: 400; line-height: 1.4; }
+.mobile-project-group-count > small { color: var(--mobile-accent); font-size: 11px; }
+.mobile-project-disclosure { display: inline-flex; flex-shrink: 0; transform: rotate(90deg); }
+.mobile-project-disclosure.is-collapsed { transform: none; }
+.mobile-thread-pin { display: inline-flex; margin-right: 6px; color: var(--mobile-accent); vertical-align: middle; }
 .mobile-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .mobile-scroll::-webkit-scrollbar { display: none; }
 .mobile-thread-list { padding: 0 20px 20px; }
@@ -57,10 +91,11 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-new-task { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 16px; font-size: 14px; font-weight: 550; border: 1px solid #c997b35e; border-radius: 999px; background: linear-gradient(180deg, #e7d0e61a, #bc87aa0e), #19131c; color: #efdbe9; box-shadow: inset 0 1px 0 #ffffff16, 0 4px 12px #0003; }
 .mobile-new-task svg { color: #efafc9; }
 .mobile-navigation { position: relative; flex-shrink: 0; display: flex; width: calc(100% - 54px); margin: 7px 27px 13px; padding: 6px; gap: 5px; border: 1px solid #e1cde63c; border-radius: 36px; background: linear-gradient(155deg, #f5dfef14, transparent 52%, #c0a9c40b), #1a161e73; backdrop-filter: blur(30px) saturate(160%); -webkit-backdrop-filter: blur(30px) saturate(160%); box-shadow: 0 13px 30px #0006, inset 0 1px 0 #f9eaf029, inset 0 -1px 0 #070509a6; }
-.mobile-navigation button { position: relative; flex: 1; min-width: 48px; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 28px; background: transparent; color: #c0b1c5; }
-.mobile-navigation button.is-active { flex: 1.8; background: linear-gradient(145deg, #d9b4ce2c, #ac789c15); color: #f4d6e4; box-shadow: inset 0 1px 0 #f5dbef36, 0 3px 9px #0003; }
+.mobile-navigation button { position: relative; flex: 1; min-width: 48px; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 0; padding: 0; border: 0; border-radius: 28px; background: transparent; color: #c0b1c5; transition: flex 180ms ease, gap 140ms ease, padding 140ms ease, color 140ms ease, background-color 180ms ease, box-shadow 180ms ease; }
+.mobile-navigation button.is-active { flex: 1.8; gap: 9px; padding: 0 10px; background: linear-gradient(145deg, #d9b4ce2c, #ac789c15); color: #f4d6e4; box-shadow: inset 0 1px 0 #f5dbef36, 0 3px 9px #0003; }
 .mobile-navigation button span { font-size: 13px; font-weight: 500; }
-.mobile-navigation button:not(.is-active) span { display: none; }
+.mobile-navigation button:not(.is-active) span { max-width: 0; overflow: hidden; opacity: 0; transform: translateX(-3px); white-space: nowrap; }
+.mobile-navigation button.is-active span { max-width: 90px; opacity: 1; transform: translateX(0); transition: max-width 180ms ease, opacity 140ms ease; }
 .mobile-navigation button i { position: absolute; top: 12px; left: calc(50% + 7px); width: 4px; height: 4px; border-radius: 50%; background: #ef9cba; }
 .mobile-detail-bar { flex-shrink: 0; display: flex; align-items: center; gap: 4px; min-height: 66px; padding: 5px 10px 5px 5px; background: #0b090c; border-bottom: 1px solid var(--mobile-line); }
 .mobile-detail-bar > div { flex: 1; min-width: 0; }
@@ -94,7 +129,12 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-project-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; padding: 12px 0; border: 0; border-bottom: 1px solid #ffffff0b; background: none; color: #dec7dc; text-align: left; font-size: 16px; }
 .mobile-project-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .mobile-project-row small { display: block; color: #bba1b7; font-size: 12px; margin-top: 5px; }
+.mobile-server-row { display: flex; align-items: center; gap: 3px; border-bottom: 1px solid #ffffff0b; }
+.mobile-server-row .mobile-project-row { flex: 1; min-width: 0; border-bottom: 0; }
+.mobile-server-actions { width: 48px; min-width: 48px; height: 48px; }
+.mobile-server-remove { color: #efb3bf; }
 .mobile-primary { width: 100%; min-height: 52px; border: 1px solid #e9b9cd; border-radius: 12px; padding: 10px 15px; background: #e9b9cd; color: #2b1827; font-size: 16px; font-weight: 600; }
+.mobile-danger { width: 100%; min-height: 52px; border: 1px solid #c9778b; border-radius: 12px; padding: 10px 15px; background: #6b293b; color: #ffe3e9; font-size: 16px; font-weight: 600; }
 .mobile-terminal { position: absolute; inset: 0; z-index: 15; display: flex; flex-direction: column; min-height: 0; background: #080809; }
 .mobile-terminal-canvas { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .mobile-terminal-keys { flex-shrink: 0; display: flex; gap: 3px; overflow-x: auto; scrollbar-width: none; padding: 5px 7px; background: #1b151e; border-top: 1px solid #5b40565e; }
@@ -106,6 +146,10 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-form label { display: grid; gap: 9px; color: #d2bbcd; font-size: 14px; margin-bottom: 22px; }
 .mobile-form input, .mobile-form select { width: 100%; min-height: 50px; padding: 12px; border: 1px solid #5b4355; border-radius: 10px; background: #1c141e; color: #eee2ed; font-size: 16px; }
 .mobile-form p { color: #bca4b9; font-size: 14px; line-height: 1.6; }
+.mobile-server-fields { display: grid; grid-template-columns: minmax(90px, .7fr) minmax(0, 1.3fr); gap: 12px; }
+.mobile-optional { color: #b5a5b8; font-size: 12px; }
+.mobile-form-hint { margin: 0 0 20px; }
+.mobile-sheet-section { margin: 22px 0 4px; padding-top: 8px; color: #c3afc3; font-size: 12px; font-weight: 500; border-top: 1px solid #ffffff10; }
 
 /* Shared conversation engine, with a real mobile presentation rather than the
    desktop shell. These selectors intentionally cannot change desktop styling. */
@@ -115,6 +159,7 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-app .agent-workspace--mobile .agent-chat { min-height: 0; padding: 0; display: flex; flex-direction: column; }
 .mobile-app .agent-workspace--mobile .agent-chat.is-launch { display: flex !important; grid-template: none; padding: 0; gap: 0; }
 .mobile-app .agent-workspace--mobile .agent-conversation { min-height: 0; padding: 18px 19px 24px; margin: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; backdrop-filter: none; }
+.mobile-app .agent-workspace--mobile .agent-conversation--mobile { padding: 20px 16px calc(var(--ag-composer-height, 0px) + 24px); }
 .mobile-app .agent-workspace--mobile .agent-chat.is-launch > .agent-conversation { flex: 0 0 auto; padding: 25px 20px 20px; }
 .mobile-app .agent-workspace--mobile .agent-welcome h1 { color: #ede2ed; font: 550 29px/1.15 "Still Display", sans-serif; letter-spacing: -.03em; text-align: left; margin: 0; }
 .mobile-app .agent-workspace--mobile .agent-welcome { width: 100%; padding: 0; text-align: left; }
@@ -124,9 +169,29 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-app .agent-workspace--mobile .agent-composer { width: 100%; min-width: 0; background: linear-gradient(145deg, #d6b1ce07, #21152230), #18121b; border: 1px solid #6a4b624f; border-radius: 17px; }
 .mobile-app .agent-workspace--mobile .agent-composer textarea { font: 400 16px/1.55 "Still Source", sans-serif; min-height: 80px; max-height: 160px; padding: 14px 14px 9px; }
 .mobile-app .agent-workspace--mobile .agent-composer.is-collapsed textarea { min-height: 48px; }
-.mobile-app .agent-workspace--mobile .agent-composer-toolbar { min-height: 55px; padding: 2px 6px 6px; gap: 2px; }
-.mobile-app .agent-workspace--mobile .agent-composer-controls { flex: 1; min-width: 0; gap: 2px; }
-.mobile-app .agent-workspace--mobile .agent-composer-actions { gap: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 44px minmax(92px, auto); grid-template-areas: "model model model" "mode effort actions"; align-items: center; min-height: 0; padding: 6px 10px 10px; gap: 8px 5px; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls { display: contents; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls > .agent-model-picker { grid-area: model; width: 100%; min-width: 0; margin: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls > .agent-mode-picker { grid-area: mode; width: 100%; min-width: 0; margin: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls > .agent-reasoning-control { grid-area: effort; min-width: 44px; min-height: 44px; display: flex; align-items: center; justify-content: center; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-control,
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-picker > button { width: 100%; max-width: none; min-width: 0; min-height: 44px; justify-content: flex-start; padding: 8px 10px; border: 1px solid #ffffff12; border-radius: 10px; background: #ffffff08; font-size: 13px !important; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-control > span,
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger-copy,
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger-copy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-composer-provider { flex: 0 0 auto; width: auto; gap: 6px; padding: 0; font-size: 12px; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-composer-provider::after { content: "·"; padding-inline: 2px; color: #b6a8bc; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-composer-provider .agent-sr-only { position: static !important; width: auto !important; height: auto !important; margin: 0 !important; overflow: visible !important; clip: auto !important; clip-path: none !important; white-space: nowrap !important; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-reasoning-trigger { width: 44px; min-width: 44px; min-height: 44px; justify-content: center; }
+.mobile-app .agent-workspace--mobile .agent-composer-actions { grid-area: actions; display: flex; align-items: center; justify-self: end; gap: 4px; }
+.mobile-app .agent-workspace--mobile .agent-composer-actions > .agent-icon-button { width: 44px; height: 44px; }
+.mobile-app .agent-workspace--mobile .agent-composer-actions .agent-send { width: 48px; height: 48px; margin: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger { gap: 8px; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-picker > .agent-model-trigger { min-height: 44px; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger-copy strong { font-size: 13px; font-weight: 550; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger:disabled,
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-mode-picker .agent-control:disabled { opacity: 1; color: #eee9ed; }
+.mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-trigger:disabled { background: #ffffff08; }
 .mobile-app .agent-workspace--mobile .agent-composer-footnote { margin: 8px 0 0; padding-inline: 2px; font-size: 12px; }
 .mobile-app .agent-workspace--mobile .agent-send { width: 48px; height: 48px; min-width: 48px; border-radius: 50%; }
 .mobile-app .agent-workspace--mobile .agent-attach-trigger { width: 48px; height: 48px; }
@@ -135,17 +200,66 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-app .agent-workspace--mobile .agent-button, .mobile-app .agent-workspace--mobile .agent-primary, .mobile-app .agent-workspace--mobile .agent-danger { min-height: 48px; font-size: 14px; }
 .mobile-app .agent-workspace--mobile .agent-choose-project { min-height: 48px; font-size: 14px; }
 .mobile-app .agent-workspace--mobile .agent-message-list { max-width: 100%; width: 100%; }
-.mobile-app .agent-workspace--mobile .agent-message-user { max-width: 100%; border-radius: 0; background: transparent; box-shadow: none; border: 0; border-left: 1px solid #ad879e; padding: 4px 0 4px 12px; margin: 0 0 20px; }
+.mobile-app .agent-workspace--mobile .agent-message-user { max-width: 100%; border: 1px solid rgba(255,255,255,.09); border-radius: 13px; background: rgba(18,18,21,.48); box-shadow: inset 0 1px 0 rgba(255,255,255,.025); padding: 14px 15px; margin: 0 0 26px; }
+.mobile-app .agent-workspace--mobile .agent-message-user .agent-message-author { margin-bottom: 7px; font-size: 11px; color: #b6aab5; }
 .mobile-app .agent-workspace--mobile .agent-message-author { font-size: 12px; color: #ccb9cb; }
 .mobile-app .agent-workspace--mobile .agent-user-text, .mobile-app .agent-workspace--mobile .agent-prose { font: 400 16px/1.65 "Still Source", sans-serif; }
+.mobile-app .agent-workspace--mobile .agent-message-assistant .agent-prose h1,
+.mobile-app .agent-workspace--mobile .agent-message-assistant .agent-prose h2,
+.mobile-app .agent-workspace--mobile .agent-message-assistant .agent-prose h3,
+.mobile-app .agent-workspace--mobile .agent-message-assistant .agent-prose h4 { margin: 0 0 13px; color: #f0e8ef; font: 625 20px/1.35 "Still Display", sans-serif; letter-spacing: -.02em; }
+.mobile-app .agent-workspace--mobile .agent-activity-layout { gap: 4px; margin: 0 0 24px; }
+.mobile-app .agent-workspace--mobile .agent-activity-block { grid-template-columns: 24px minmax(0,1fr); gap: 5px; }
+.mobile-app .agent-workspace--mobile .agent-activity-rail { min-width: 44px; min-height: 44px; margin-left: -10px; }
+.mobile-app .agent-workspace--mobile .agent-activity-rail > span { min-height: 44px; }
+.mobile-app .agent-workspace--mobile .agent-activity-content { grid-column: 2; }
+.mobile-app .agent-workspace--mobile .agent-activity-summary { min-height: 44px; padding: 7px 0; font-size: 13px !important; }
+.mobile-app .agent-workspace--mobile .agent-change-summary { margin: 20px 0 12px; border-radius: 12px; }
 .mobile-app .agent-workspace--mobile .agent-message-assistant { padding: 0; background: transparent; border: 0; box-shadow: none; }
 .mobile-app .agent-workspace--mobile .agent-confirm-backdrop { padding: 18px 10px; align-items: flex-end; }
 .mobile-app .agent-workspace--mobile .agent-modal { width: 100%; max-width: 100%; max-height: 100%; border-radius: 20px; padding: 20px 17px; }
 .mobile-app .agent-workspace--mobile .agent-modal h2 { font: 550 24px/1.2 "Still Display", sans-serif; letter-spacing: -.02em; }
+.mobile-app .agent-workspace--mobile .agent-confirm-backdrop:has(.agent-folder-picker) { padding: 0; align-items: stretch; background: #080809; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mobile-app .agent-workspace--mobile .agent-modal.agent-folder-picker { width: 100%; height: 100%; max-height: 100%; border: 0; border-radius: 0; padding: 22px 20px; background: #0d0a10; backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: none; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice { max-height: none; padding: 16px; margin: 15px 0; background: #211820; border: 1px solid #795263; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice code { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; color: #eee0e9; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice strong { font-size: 16px; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice p { font-size: 14px; line-height: 1.5; color: #d1bccc; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice .agent-inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice [role="alert"] { color: #ffd2df; padding-top: 8px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .mobile-app > .agent-workspace--mobile { animation: mobile-detail-enter 160ms ease-out both; }
+}
+
+@keyframes mobile-page-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mobile-detail-enter { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-navigation button, .mobile-navigation button span, .mobile-root-content { transition: none !important; }
+  .mobile-page-panel, .mobile-app > .agent-workspace--mobile { animation: none !important; }
+}
+
+@media (max-width: 380px) {
+  .mobile-app .agent-workspace--mobile .agent-composer-area.is-compact { padding-inline: 10px; }
+  .mobile-app .agent-workspace--mobile .agent-composer-toolbar { grid-template-columns: minmax(0, 1fr) 44px minmax(92px, auto); gap: 7px 4px; padding-inline: 7px; }
+  .mobile-app .agent-workspace--mobile .agent-composer-controls .agent-control,
+  .mobile-app .agent-workspace--mobile .agent-composer-controls .agent-model-picker > button { padding-inline: 7px; }
+}
 .mobile-app .agent-workspace--mobile .agent-setup { padding: 20px; overflow-y: auto; }
 .mobile-app .agent-workspace--mobile .agent-settings-heading h1 { font: 550 25px/1.2 "Still Display", sans-serif; }
 .mobile-app .agent-workspace--mobile .agent-status { display: inline-flex; font-size: 12px; }
-.mobile-app .agent-workspace--mobile .agent-topbar-status-label, .mobile-app .agent-workspace--mobile .agent-status .agent-sr-only { position: static; width: auto; height: auto; clip: auto; margin: 0; }
+.mobile-app .agent-workspace--mobile .agent-topbar-status-label { position: static; width: auto; height: auto; clip: auto; margin: 0; }
+.mobile-app .agent-workspace--mobile .mobile-agent-header { min-height: 54px; height: 54px; margin: 8px 10px 0; padding: 4px; gap: 2px; border: 1px solid var(--ag-chrome-edge); border-top-color: rgba(255,255,255,.12); border-radius: 12px; background: var(--ag-glass-sheen), rgba(18,18,21,.72); box-shadow: inset 0 1px 0 rgba(255,255,255,.025); backdrop-filter: blur(18px) saturate(110%); -webkit-backdrop-filter: blur(18px) saturate(110%); }
+.mobile-app .agent-workspace--mobile .mobile-agent-header > .mobile-icon-button { width: 44px; min-width: 44px; height: 44px; min-height: 44px; border-radius: 8px; color: #aaa; }
+.mobile-app .agent-workspace--mobile .mobile-agent-header > .mobile-icon-button:active { background: rgba(255,255,255,.06); }
+.mobile-app .agent-workspace--mobile .mobile-agent-heading { display: flex; flex: 1; min-width: 0; flex-direction: column; justify-content: center; gap: 0; }
+.mobile-app .agent-workspace--mobile .mobile-agent-title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-provider-mark { width: 16px; height: 16px; flex: 0 0 auto; }
+.mobile-app .agent-workspace--mobile .mobile-agent-title-row > h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: #e2dce5; font: 500 15px/1.3 var(--font-sans); letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-status { flex: 0 0 auto; max-width: 76px; margin: 0; gap: 5px; font-size: 10px; }
+.mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-status .agent-topbar-status-label { max-width: 58px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-app .agent-workspace--mobile .mobile-agent-heading > p { margin: 2px 0 0 23px; color: var(--ag-faint); font-size: 11px; line-height: 1.25; }
 .mobile-app .agent-workspace--mobile .agent-agent-material { display: none; }
 .mobile-app .agent-workspace--mobile .agent-review { border-radius: 0; margin: 0; }
 .mobile-app .agent-workspace--mobile .agent-review-file-header { min-height: 60px; }
@@ -164,6 +278,20 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
   .mobile-navigation button { gap: 6px; padding-inline: 7px; }
   .mobile-agent-header .mobile-icon-button { width: 44px; min-width: 44px; }
   .mobile-detail-bar h1 { font-size: 17px; }
+  .mobile-app .agent-workspace--mobile .mobile-agent-title-row { gap: 5px; }
+  .mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-provider-mark { display: none; }
+  .mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-status { max-width: 68px; }
+  .mobile-app .agent-workspace--mobile .mobile-agent-title-row > .agent-status .agent-topbar-status-label { max-width: 50px; }
+}
+@media (max-height: 650px) {
+  .mobile-root-content .mobile-app-bar { height: 56px; flex-basis: 56px; }
+  .mobile-page-panel > .mobile-heading { min-height: 56px; padding-block: 6px 10px; }
+  .mobile-page-panel > .mobile-heading h1 { font-size: 34px; }
+  .mobile-library-controls { margin-top: 8px; }
+  .mobile-project-group { margin-top: 4px; }
+  .mobile-project-group-heading { min-height: 56px; padding-block: 8px; }
+  .mobile-project-server-name { display: none; }
+  .mobile-project-group .mobile-thread-row { min-height: 72px; padding-block: 14px; }
 }
 @media (min-width: 700px) {
   .mobile-app-bar, .mobile-heading, .mobile-new-row, .mobile-scroll, .mobile-thread-filters { width: min(100% - 40px, 720px); margin-inline: auto; }
@@ -172,3 +300,39 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 @media (prefers-reduced-motion: reduce) { .mobile-app *, .mobile-app *:before, .mobile-app *:after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 @media (prefers-reduced-transparency: reduce) { .mobile-navigation { background: #241d29; backdrop-filter: none; -webkit-backdrop-filter: none; } }
 @supports not (backdrop-filter: blur(1px)) { .mobile-navigation { background: #241d29; } }
+
+/* Accepted mobile chat-pill layout: model identity first, lightweight controls
+   and actions aligned on the second line. The relaxed spacing is deliberate. */
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack { display: grid; grid-template-columns: minmax(0, 1fr) 44px 44px 48px; grid-template-areas: "model model model model" "mode effort command send"; align-items: center; gap: 9px; padding: 8px 8px 11px; min-height: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-controls,
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-actions { display: contents; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-provider-picker { grid-area: provider; width: 100%; min-width: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-provider-picker .agent-control { width: 100%; min-width: 0; min-height: 44px; justify-content: flex-start; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack[data-provider-picker="true"] { grid-template-areas: "provider provider provider provider" "model model model model" "mode effort command send"; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-model-picker { grid-area: model; width: 100%; min-width: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-model-trigger { width: 100%; min-width: 0; min-height: 44px; max-width: none; gap: 7px; padding-inline: 10px; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-provider { flex: 0 0 auto; width: auto; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-mode-picker { grid-area: mode; width: auto; min-width: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-mode-picker .agent-control { min-height: 44px; gap: 4px; padding-inline: 4px; border: 0; background: transparent; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-reasoning-control { grid-area: effort; display: flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-reasoning-trigger { width: 44px; min-width: 44px; min-height: 44px; justify-content: center; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-actions > .agent-icon-button { grid-area: command; width: 44px; height: 44px; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-actions .agent-send { grid-area: send; width: 48px; height: 48px; margin: 0; }
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-model-trigger:disabled,
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-mode-picker .agent-control:disabled,
+.mobile-app .agent-workspace--mobile .agent-composer-toolbar.mobile-chatpill--stack .agent-composer-actions .agent-send:disabled { opacity: 1; }
+
+/* Own both mobile states explicitly. The desktop capsule hides its provider and
+   changes shell dimensions; those rules must not leave empty mobile grid rows. */
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area { padding: 12px 16px max(10px, env(safe-area-inset-bottom)); }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer:not(.is-collapsed) { width: 100%; max-width: none; border-radius: 17px; padding: 12px 10px 8px; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer:not(.is-collapsed) textarea { position: relative; width: 100%; min-height: 64px; max-height: min(160px, 25dvh); margin: 0 0 8px; padding: 12px 42px 8px 8px; opacity: 1; transform: none; transition: none; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed { width: 100%; max-width: none; padding: 4px 6px; border-radius: 30px; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .mobile-chatpill--stack { grid-template-columns: minmax(0, 1fr) 44px; grid-template-areas: "model compose"; gap: 6px; min-height: 44px; padding: 0; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger { display: flex; width: 100%; min-width: 0; max-width: none; min-height: 44px; padding: 6px 8px; gap: 7px; border: 0; background: transparent; box-shadow: none; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-provider { display: inline-flex; flex: 0 0 auto; width: auto; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-model-trigger-copy strong { max-width: none; font-size: 13px; }
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-mode-picker,
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-reasoning-control,
+.mobile-app .agent-workspace--mobile .agent-chat:not(.is-launch) > .agent-composer-area > .agent-composer.is-collapsed .agent-composer-actions { display: none; }
+.mobile-app .agent-workspace--mobile .mobile-compose-trigger { grid-area: compose; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 0; border-radius: 50%; color: #eee9ed; background: #ffffff0a; }

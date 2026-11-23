@@ -230,6 +230,10 @@ export interface AgentThreadSnapshot {
   /** Full active message identities supplied by a live native snapshot. */
   activeMessageIds?: string[]
   persistent?: boolean
+  continuity?: boolean
+  remoteImported?: boolean
+  configGeneration?: number
+  pendingMessageId?: string
   remoteCursor?: number
   promptId?: string | number
   /** Confirmed worker loss, distinct from an SSH disconnection. */
@@ -253,8 +257,69 @@ export interface AgentHistoryPage {
   lastSequence: number
   transcript: AgentThreadEvent[]
   before: number | null
+  after: number | null
   total: number
   latest: boolean
+}
+
+export interface AgentChangeIndexItem {
+  id: string
+  path: string
+  toolCallId: string
+  outcome: "completed" | "failed" | "pending" | "unconfirmed"
+}
+export interface AgentChangeHistory { executionId: string; changes: AgentChangeIndexItem[] }
+export interface AgentChangeDetails { executionId: string; path: string; events: AgentThreadEvent[] }
+
+export interface SharedConversation {
+  serverAccountId: string
+  conversationId: string
+  executionId: string
+  generation: number
+  revision: number
+  catalogRevision: number
+  fields: Record<"title" | "pinned" | "archivedAt" | "order", number>
+  values: { title: string; titleSource: "prompt" | "agent" | "user"; pinned: boolean; archivedAt: number | null; order: number }
+  readThroughSeq: number
+  conversationSeq: number
+  executionOffset?: number
+  prepared?: boolean
+  projectId: string
+  deleted?: boolean
+}
+export interface SharedProject { id: string; cwd: string; name: string; order: number; revision: number; deleted?: boolean }
+export interface SharedOperation {
+  operationId: string
+  kind: "organization.patch" | "read.advance" | "project.patch" | "project.reorder" | "project.delete" | "conversation.delete"
+  serverAccountId: string
+  expectedCatalogRevision: number
+  conversationId?: string
+  executionId?: string
+  expectedGeneration?: number
+  cwd: string
+  patch?: Record<string, unknown>
+  expectedFields?: Partial<SharedConversation["fields"]>
+  expectedRevision?: number
+  readThroughSeq?: number
+  projectId?: string
+  order?: Array<{ id: string; revision: number }>
+}
+export interface SharedOperationResult { ok: boolean; code?: string; message?: string; current?: SharedConversation; project?: SharedProject; projects?: SharedProject[] }
+export interface LegacyAgentRecord { executionId: string; reason: string }
+export interface SharedLibraryPage {
+  protocolVersion: number
+  catalogVersion?: number
+  serverAccountId: string
+  revision?: number
+  hostKey?: string
+  projects?: SharedProject[]
+  tombstones?: string[]
+  rows: Array<{ conversationId: string; executionId: string; cwd: string; protocolVersion: number; shared?: SharedConversation; activityAt?: number }>
+  warnings: string[]
+  legacyRecords?: LegacyAgentRecord[]
+  /** Directories without a committed state record; not proof of worker death. */
+  incompleteExecutions?: string[]
+  next: string | null
 }
 
 export interface AgentCatalog { commands: AgentCommand[]; configOptions: AgentConfigOption[]; version?: string; warning?: string }

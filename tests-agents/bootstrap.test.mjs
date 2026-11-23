@@ -1,11 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readdir, writeFile, readFile, stat, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { todoStorePath } from "../src-tauri/agent-host/todos.mjs"
+import { discoverLibrary } from "../src-tauri/agent-host/library.mjs"
 
 const bootstrap = fileURLToPath(new URL("../src-tauri/agent-host/bootstrap.mjs", import.meta.url))
 
@@ -24,7 +25,7 @@ test("remote bootstrap receives bundled sources on stdin before forwarding ACP",
     child.stdout.on("data", check)
   })
   try {
-    const source = 'process.stdout.write("FIXTURE_ATTACHED\\n");process.stdin.once("data",data=>process.stdout.write(`FORWARDED:${data.toString().trim()}\\n`))'
+    const source = 'import {todoFixture} from "./todos.mjs";import {recoveryFixture} from "./recovery.mjs";if(!todoFixture||!recoveryFixture)throw new Error("Staged imports were not committed");process.stdout.write("FIXTURE_ATTACHED\\n");process.stdin.once("data",data=>process.stdout.write(`FORWARDED:${data.toString().trim()}\\n`))'
      const config = { executionId: "agent-bootstrap-test", conversationId: "test", agentId: "pi", cwd: home, create: true, after: 0, command: [], env: {}, source, todosSource: "export const todoFixture = true", todoPiSource: "export default function fixture() {}", recoverySource: "export const recoveryFixture = true" }
     child.stdin.write(`${Buffer.from(JSON.stringify(config)).toString("base64")}\n`)
     await waitFor("STILL_BOOTSTRAP_READY\n")
@@ -128,6 +129,11 @@ for (const live of [true, false]) test(`recovery bootstrap ${live ? "refuses a l
       assert.match(stdout, /STILL_BOOTSTRAP_ERROR:.*still running/)
       assert.equal(stdout.includes("STILL_BOOTSTRAP_READY"), false)
       assert.equal(stdout.includes("FIXTURE_LAUNCHED"), false)
+      const page = discoverLibrary(home)
+      assert.equal(page.incompleteExecutions.includes("new-execution"), false, "refused recovery must not materialize a discoverable execution directory")
+      assert.equal(page.warnings.some(warning => warning.startsWith("Execution new-execution:")), false)
+      await assert.rejects(stat(join(home, ".local/state/still/agents/new-execution")), { code: "ENOENT" })
+      assert.equal((await readdir(join(home, ".local/state/still/agents"))).some(name => name.startsWith(".bootstrap-")), false)
     } else {
       assert.equal(code, 0, stderr)
       assert.match(stdout, /STILL_BOOTSTRAP_READY/)
@@ -137,4 +143,39 @@ for (const live of [true, false]) test(`recovery bootstrap ${live ? "refuses a l
     if (child.exitCode === null) child.kill("SIGTERM")
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test("failed materialization is private and retryable, and existing execution files are never replaced", { timeout: 10000 }, async t => {
+  const home = await mkdtemp("/tmp/opencode/still-bootstrap-staging-")
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const root = join(home, ".local/state/still/agents")
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const run = async config => {
+    const child = spawn(process.execPath, [bootstrap], { env: { ...process.env, HOME: home }, stdio: ["pipe", "pipe", "pipe"] })
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM") })
+    let stdout = "", stderr = ""
+    child.stdout.on("data", bytes => { stdout += bytes }); child.stderr.on("data", bytes => { stderr += bytes })
+    const closed = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve) })
+    child.stdin.end(Buffer.from(JSON.stringify(config)).toString("base64") + "\n")
+    return { code: await closed, get stdout() { return stdout }, get stderr() { return stderr } }
+  }
+  const config = { executionId: "staged-execution", conversationId: "conversation", agentId: "pi", cwd: home, create: true,
+    command: [], env: {}, source: 'console.log("FIXTURE_LAUNCHED")', todoPiSource: "export default function() {}" }
+  const failed = await run(config)
+  assert.equal(failed.code, 1)
+  assert.equal(failed.stdout.includes("STILL_BOOTSTRAP_READY"), false)
+  await assert.rejects(stat(join(root, config.executionId)), { code: "ENOENT" })
+  assert.deepEqual(await readdir(root), [])
+  const retried = await run({ ...config, todosSource: "export const fixture = true" })
+  assert.equal(retried.code, 0, retried.stderr)
+  assert.match(retried.stdout, /STILL_BOOTSTRAP_READY/)
+  assert.match(retried.stdout, /FIXTURE_LAUNCHED/)
+  assert.equal((await readdir(root)).some(name => name.startsWith(".bootstrap-")), false)
+  const files = await readdir(join(root, config.executionId))
+  const original = await readFile(join(root, config.executionId, "transport.mjs"), "utf8")
+  const duplicate = await run({ ...config, todosSource: "export const fixture = false", source: 'console.log("MUST_NOT_REPLACE")' })
+  assert.equal(duplicate.code, 1)
+  assert.equal(duplicate.stdout.includes("STILL_BOOTSTRAP_READY"), false)
+  assert.equal(await readFile(join(root, config.executionId, "transport.mjs"), "utf8"), original)
+  assert.deepEqual(await readdir(join(root, config.executionId)), files)
 })

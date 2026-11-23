@@ -8,6 +8,7 @@ mod agent_history;
 mod agent_git;
 mod agent_store;
 mod commands;
+mod updates;
 mod credential_store;
 pub mod local_pty;
 mod orb;
@@ -98,8 +99,13 @@ pub fn run() {
         .on_window_event(orb::on_window_event)
         .setup(|_app| {
             #[cfg(target_os = "android")]
-            crate::credential_store::initialize()
-                .map_err(|error| std::io::Error::other(format!("Android secure credential storage could not initialize: {error}")))?;
+            {
+                use tauri::Manager;
+                crate::hostkeys::initialize_android_store(_app.path().app_config_dir()?)
+                    .map_err(|error| std::io::Error::other(format!("Android host trust storage could not initialize: {error}")))?;
+                crate::credential_store::initialize()
+                    .map_err(|error| std::io::Error::other(format!("Android secure credential storage could not initialize: {error}")))?;
+            }
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
@@ -109,15 +115,22 @@ pub fn run() {
             }
             Ok(())
         });
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(updates::init());
     #[cfg(desktop)]
     let builder = builder.on_menu_event(orb::on_menu_event);
     builder
         .invoke_handler(tauri::generate_handler![
             still_ping,
+            updates::still_android_update,
             agent::still_agent_start,
             agent::still_agent_attach,
             agent::still_agent_check,
             agent::still_agent_catalog,
+            agent::still_agent_remote_library,
+            agent::still_agent_shared_operation,
             agent::still_agent_resolve_folder,
             agent::still_agent_send,
             agent::still_agent_revert,
@@ -134,6 +147,8 @@ pub fn run() {
             agent_git::still_agent_git_diff,
             agent_store::still_agent_library,
             agent_store::still_agent_history,
+            agent_store::still_agent_change_history,
+            agent_store::still_agent_change_details,
             agent_store::still_agent_save_metadata,
             agent_store::still_agent_save_workspace,
             agent_store::still_agent_delete_saved,

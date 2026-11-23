@@ -1,7 +1,8 @@
 # AG-16 — Android phone application
 
-Updated: **2026-11-09**. Status: **TODO — MOB-01 native build spike started;
-ARM64 debug APK compiles; on-device runtime remains unverified**.
+Updated: **2026-11-11**. Status: **IN PROGRESS — initial S1/S2 continuity implemented;
+updated desktop/Android clients built; full two-device acceptance, shared
+organization and background alerts remain open**.
 
 Feature status and scheduling remain in the [Agents tracker](README.md). This
 document is the Android delivery specification for
@@ -11,6 +12,13 @@ cross-device history, or background notifications already work.
 The detailed, checkable work breakdown is in the
 [full Android implementation todo list](android-mobile-tasks.md). That checklist
 owns individual task progress; this specification owns scope and acceptance rules.
+
+**Continuity decisions (2026-11-11):** the user selected **act from either device**,
+shared projects/titles/pins/archives/read state, and a **user-hosted FCM relay first**.
+The [desktop ↔ Android continuity plan](android-continuity.md) specifies server
+authority, multi-client races and migration, and records current implementation
+evidence and remaining work. This supersedes the earlier per-device
+controller/Continue here proposal.
 
 ## 1. Outcome and first-release boundary
 
@@ -31,6 +39,12 @@ The phone is a first-class client of remote work, not a small remote desktop.
   locally on the user's desktop is outside this first release.
 - **Background alerts are required.** Notify when remote work needs an answer or
   has a confirmed outcome while the app is backgrounded or the screen is locked.
+- **No device takeover for conversation actions.** Both authorized devices can act;
+  the server orders commands and rejects stale/conflicting actions without losing drafts.
+- **Shared organization.** Projects, titles, pins, archives and read/unread state
+  follow the user. Drafts, reading position and appearance remain local initially.
+- **Self-hosted alerts first.** Operate the relay on the user's server with FCM;
+  choose actual deployment credentials/endpoint during the notification milestone.
 - Preserve the approved thread-focused, low-cognitive-load mobile direction below.
 
 The remote server and its agent processes must remain available. Keeping the desktop
@@ -42,7 +56,7 @@ limitations; do not advertise guaranteed delivery under those conditions.
 
 1. Signed, upgradeable Android APK and a reproducible build.
 2. Server setup, explicit host trust, safe SSH authentication, and desktop handoff.
-3. Shared remote conversation discovery, history, and safe controller ownership.
+3. Shared remote conversation discovery/history and server-serialized multi-device actions.
 4. Threads home, new task, conversation, questions/permissions, read-only Todos,
    activity, and read-only changes.
 5. Photo/file attachments through Android pickers, subject to provider capability.
@@ -64,21 +78,25 @@ limitations; do not advertise guaranteed delivery under those conditions.
 
 ## 2. Evidence and current gaps
 
-Source inspection on 2026-11-09 establishes the following. A generated scaffold,
-responsive browser test, or standalone mockup is not Android runtime evidence.
+Source reinspection on 2026-11-11 establishes the following. On 2026-11-10, the
+ARM64 debug APK installed successfully on the connected A142 and
+`dev.still.app/.MainActivity` became the resumed activity with an app PID. That
+proves install/start only; full native SSH, lifecycle, shared-sync and push evidence
+are recorded separately from responsive browser/mockup checks.
 
 | Area | Current foundation | Required change / evidence |
 | --- | --- | --- |
-| Native host | React/TypeScript in Tauri 2; `src-tauri/src/lib.rs` has a mobile entry point | Compile, install, and exercise the real Android app; audit native modules and permissions |
-| Android scaffold | Local `src-tauri/gen/android/` has Gradle, an edge-to-edge activity, and an Internet permission | Reproducible source-controlled configuration; that directory is ignored by Git |
+| Native host | React/Tauri mobile shell; ARM64 debug APK installed and started on A142 | Complete real SSH, credentials, lifecycle and functional agent/terminal validation |
+| Android scaffold | Tracked `src-tauri/android/MainActivity.kt` is copied by the Android frontend build hook; generated Gradle project is ignored | Extend reproducible tracked configuration to signing, manifest, push and clean builds |
 | Conversation library | `src-tauri/src/agent_store.rs` is explicitly device-owned; `src/session/agentStorage.ts` persists native history | Remote discoverability and shared durable history, with device caches and migration |
 | Agent execution | Detached workers and journals under `~/.local/state/still/agents/<execution-id>/` | Discover conversations without already knowing an execution ID; retain all required history and metadata |
-| Controller | `supervisor.mjs` currently replaces the prior owner on `_still/attach` | Separate observation from control; explicit, race-safe transfer rather than reconnect battles |
-| Duplicate protection | Existing stable prompt receipts and event cursors | Extend the same discipline to cross-device operations, approvals, ownership, and migration |
+| Multi-client commands | `supervisor.mjs` currently replaces the prior owner on `_still/attach` | Non-destructive readers and one server-side command authority; either device can submit, with deterministic conflict handling |
+| Duplicate protection | Existing stable prompt receipts and event cursors | Extend the same discipline to cross-device operations, approvals, execution generations, and migration |
 | Remote identity | Server/account and folder are chosen deliberately; current profile identity includes hostname/port/user | Associate aliases with verified server/account identity; preserve conversation/provider/tmux IDs |
 | UI | Existing compact styles and browser regression tests | A phone shell with real Back, IME, insets, touch controls, recovery, and native accessibility evidence |
 | Native APIs | Desktop keyring, clipboard, external-open, local PTY, window and orb paths exist | Platform capability boundaries; Android secure storage, pickers, links, and notification integration |
 | Notifications | Structured conversation/request events exist; no production Android push path is established | Remote event source, durable notification outbox, delivery service, Android permission/intents |
+| Subagents | Delegation and guidance coordination currently run in mounted `AgentWorkspace` effects | Move execution coordination/queues to the remote authority so closing both clients does not stall parent tools |
 
 The current remote replay journal must not be assumed to be a complete replacement
 for native history. Verify user messages, accepted configuration, attachments,
@@ -87,6 +105,12 @@ request outcomes, closed executions, and provider resume references individually
 ## 3. Approved mobile UI and UX
 
 ### Visual authority and portability
+
+The implemented phone shell in `src/mobile/` and the compact-header/message-card
+refinements accepted in this conversation on 2026-11-10 are the current UI baseline.
+This continuity plan preserves that interface while connecting it to shared data.
+Earlier mockup descriptions below are historical reference where the accepted
+implementation differs.
 
 The reviewed artifact is the sibling directory
 [`mobile-mockup/`](../../../mobile-mockup/README.md), especially
@@ -142,9 +166,9 @@ Settings
 | --- | --- |
 | Threads home | Clear Threads heading; recent list as the main surface; inline attention/working/outcome states; quiet search and project selection; no large hero, separate attention card, duplicate timestamps, or connected-server footer |
 | New task | Compact outlined, circled-plus **New task** pill right-aligned above the dock, without a surrounding panel; explicitly choose server/project before preparing an agent; provider/model controls use actual negotiated support |
-| Conversation | Latest accepted **Quiet transcript + Editorial signal**: confident title and speaker roles, unboxed user prompt with subtle left rule, readable agent response, compact execution/control state, anchored composer |
-| Execution context | Distinguish working/request/outcome from connectivity and device control. Do not repeat origin in four rows. Keep project/account details reachable from conversation info even when hidden in the title bar |
-| Handoff | Reading never silently steals control. Show **Continue here** when another device controls mutations. After confirmed transfer, update both devices and prevent the old controller from auto-reclaiming ownership |
+| Conversation | Current accepted compact glass header, contained user prompt, readable response hierarchy, collapsed activity summaries with expanded-only side lines, and anchored composer; add shared sync/request state to this baseline |
+| Execution context | Distinguish working/request/outcome from connectivity, catch-up and command acceptance. Keep project/account details reachable from conversation info without repeated origin rows |
+| Cross-device action | Reading never disconnects another client. Either device can act; show accepted/sending/checking-result states and explain stale/busy/already-answered races with local draft preservation |
 | Requests | Attention link opens the same question/permission in a focused screen with context, large options, optional answer, persistent submit, sending/error/outdated states, and a confirmed receipt |
 | Todos | Collapsed current step/count; read-only expansion. Checklist progress is not turn completion, test success, or an editable user checklist |
 | Activity | Secondary disclosure, not a permanent stream of every event. Expand relevant tool details without losing the reading position |
@@ -219,9 +243,9 @@ egress-only path, not a replacement source of conversation truth.
 | Gate | Proposed default | Why it needs a decision / proof |
 | --- | --- | --- |
 | MOB-D1 — Client stack | React/Tauri 2, shared domain logic and a mobile shell | Real Android compile plus SSH/IME/native-API spike must pass; scaffold presence is insufficient |
-| MOB-D2 — Continuity authority | Account-scoped remote catalog/history; device-local cache/drafts | Requires explicit history-sharing/migration and retention contract, not just copying desktop profiles |
-| MOB-D3 — Controller model | Multiple readers; one authorized mutating controller per conversation, with explicit transfer | Must coordinate with AG-10/AG-12 and old single-owner workers; no reconnect takeover loop |
-| MOB-D4 — Push deployment | Small authenticated notification-only relay + FCM; optional self-hosted deployment contract | Hosting operator, credentials, cost, privacy, retention, revocation, and non-GMS policy must be selected |
+| MOB-D2 — Continuity authority | Remote account catalog/history and shared organization; native caches/local drafts | Shared fields selected 2026-11-11; exact wire/retention/migration implementation is in the continuity plan |
+| MOB-D3 — Command concurrency | Multiple readers and **act from either device**, server-serialized commands | Selected 2026-11-11. Replace destructive attachment; use receipts, execution generations and revision preconditions, including AG-12 |
+| MOB-D4 — Push deployment | User-hosted notification-only relay + FCM first | Operator/delivery direction selected 2026-11-11; actual endpoint, FCM project, credentials and non-GMS policy remain deployment work |
 | MOB-D5 — Pairing | Metadata-only QR/config exchange plus independent SSH authentication | A six-digit mock code is not secure pairing or an Internet rendezvous service |
 | MOB-D6 — Android support | ARM64 APK first; x86_64 emulator for CI; establish minimum OS with the first physical devices | Do not inherit min/target SDK values from ignored generated files as a release policy |
 
@@ -229,7 +253,7 @@ Saving this plan authorizes no cloud provisioning, new public endpoint, credenti
 transfer, source migration, or recurring service. Those are implementation decisions
 with their own review. None of these decisions requires resuming the deferred orb UI.
 
-## 5. Shared conversations and safe handoff
+## 5. Shared conversations and multi-device actions
 
 ### Authority and data boundaries
 
@@ -238,8 +262,10 @@ with their own review. None of these decisions requires resuming the deferred or
 | Provider execution, pending requests, acknowledged outcomes | Remote worker/provider, with durable normalized state |
 | Conversation ID, project/account association, current execution/provider-session references, title, replay history | Remote account catalog/history, revisioned and discoverable; native store caches it |
 | SSH passwords/private keys | Device-native secure storage only; never library, relay, QR, or WebView persistence |
-| Draft text, unsent answers, unuploaded attachments, reading position, pins/display preferences | Device-local first; no silent overwrite from another device |
-| Device read cursor and notification preferences | Device-scoped. Cross-device read synchronization may follow, but answered requests are shared state immediately |
+| Projects, titles, pins, archives and per-project ordering | Shared revisioned metadata; conflicting field edits are explicit |
+| Draft text, unsent answers, unuploaded attachments, reading position and display preferences | Device-local first; no silent overwrite from another device |
+| Read cursor | Shared per-user read-through watermark, monotonically merged; merely fetching in the background does not mark read |
+| Notification permissions/preferences | Device/channel-specific delivery settings; request resolution is shared immediately |
 | Cached history | Readable offline; clearly last-known until authoritative catch-up completes |
 | Git snapshot | Fresh server query with timestamp/repository identity, not assumed from a chat's reported patches |
 
@@ -261,32 +287,30 @@ with their own review. None of these decisions requires resuming the deferred or
 - Schema negotiation reports unsupported/unverified features. An old worker is not
   silently restarted just because the phone cannot observe it with the new protocol.
 
-### Controller state machine
+### Connection and command state machines
 
 ```text
-cached/offline → authenticated reader → caught-up reader
-                                      ↓ acquire if no active controller
-                              current controller
-                                      ↑ explicit transfer, expected owner epoch
-another device controls → Continue here → acknowledged ownership change
+cached/offline → authenticated subscriber → catching up → current + can act
+                                           ↑                ↓ network loss
+                                           └──── reconnect ─┘
 
-uncertain mutation → reconcile receipt/current state → confirmed or safe failure
+local draft → sending(operationId) → accepted → provider acknowledged → outcome
+                       └─ lost reply → reconcile same receipt → known / unknown
 ```
 
-- Observation does not use the current destructive attach behavior. Introduce a
-  negotiated observer path before allowing both devices to watch the same worker.
-- Server-side serialization and a monotonically changing ownership epoch/lease
-  fence **all** mutating calls: prompt, answer, cancel, model/mode change, revert,
-  retry, and close. A stale controller cannot write after transfer.
-- Ownership is per conversation, not a global phone/desktop switch. Taking one
-  conversation must not transfer unrelated conversations or another account.
-- Backgrounding/losing a lease does not cancel remote work. Reopening reconnects
-  as a reader, reconciles state, and reacquires only when safe; it must not steal
-  the lease back from the device the user deliberately chose.
+- Observation does not use the current destructive attach behavior. Introduce
+  negotiated multi-client observation and server-side mutation authority first.
+- Serialize **all** mutating calls per conversation: prompt, answer, cancel,
+  model/mode change, revert, retry, resume and close. Fence stale requests with
+  execution generations, request/turn identities and relevant revisions.
+- There is no phone-versus-desktop controller switch. Both authorized, caught-up
+  devices can act; first valid acceptance wins an incompatible race.
+- Backgrounding/disconnecting never cancels remote work. Reopening subscribes,
+  catches up and reconciles its pending operations without displacing another app.
 - Acknowledge a durable operation/receipt separately from provider completion.
   After a lost acknowledgement, query outcome before allowing resubmission.
-- Handle simultaneous takeovers and already-answered questions deterministically.
-  Show the new controller/outcome; keep unsent local text.
+- Handle concurrent sends, config changes and already-answered questions
+  deterministically. Show the accepted action/outcome; keep losing local drafts.
 - Coordinate Still-managed parent/child messaging with
   [AG-12](agent-subagents.md#runtime-ownership-and-persistence). A phone viewing a
   child must not disconnect its parent coordinator. Do not invent a second child
@@ -307,9 +331,9 @@ uncertain mutation → reconcile receipt/current state → confirmed or safe fai
    remains honestly incomplete/read-only; it is not permission to duplicate a run.
 6. Imported historical outcomes do **not** produce new finished-work notifications.
 
-Archiving/deleting needs explicit scope. For the first release, device-local archive
-and read preferences may remain local; destructive deletion of shared history must
-be a separate, confirmed operation with durable tombstones and recovery policy.
+Archiving and read state sync in the first release. Archive remains reversible and
+does not stop a run or hide an unresolved request from Needs you. Shared deletion
+uses durable tombstones and is distinct from removing a device's cached download.
 
 ## 6. Connection setup, pairing, and security
 
@@ -435,9 +459,9 @@ for execution tracking rather than treating a summary-table row as a completed t
 | ID | Deliverable | Depends on | Done when |
 | --- | --- | --- | --- |
 | MOB-01 | Native feasibility APK and compatibility inventory | MOB-D1/D6 spike | Real ARM64 phone starts; native SSH, one agent exchange, credential persistence, terminal IME and suspend/resume paths have recorded results |
-| MOB-02 | Versioned identity/catalog/history/ownership contract | MOB-D2/D3 | Desktop-offline continuity, aliases, caches, operation receipts, revisions, compatibility and migration rules are reviewed together |
+| MOB-02 | Versioned identity/catalog/history/command contract | MOB-D2/D3 | Desktop-offline continuity, aliases, caches, multi-client command receipts, revisions, compatibility and migration rules are reviewed together |
 | MOB-03 | Remote catalog, complete replay and migration | MOB-02 | A fresh authenticated device discovers an existing live and saved conversation with the correct history/provider identity; rerunning migration is safe |
-| MOB-04 | Observer/control transfer and mutation fencing | MOB-02; AG-10/12 coordination | Two clients can read; explicit takeover is race-safe; stale writers and duplicate/uncertain requests are rejected/reconciled |
+| MOB-04 | Multi-client observation and serialized mutations | MOB-02; AG-10/12 coordination | Two clients can read and act without takeover; conflicting/stale/duplicate operations are rejected or reconciled with preserved drafts |
 | MOB-05 | Phone routing, insets, Back and native persistence lifecycle | MOB-01; reviewed UI direction | Root/detail navigation, real IME, rotation/process recreation, and draft/scroll restoration work on-device without desktop chrome |
 | MOB-06 | Thread library, search/filter and new task | MOB-03/05 | Thread-first home shows remote/cached truth; explicit project/agent setup works with negotiated model controls |
 | MOB-07 | Conversation, requests, Todos and capability states | MOB-04/05/06 | User can read, continue, answer, cancel safely, inspect progress/activity and recover unknown submissions without duplicate work |
@@ -474,7 +498,7 @@ is committed until the native and continuity spikes establish their actual gaps.
 | Identity, local cache and recovery | `src/session/identity.ts`, `agentStorage.ts`, `agentThreads.ts`, `src/agents/workspace.ts`, `src-tauri/src/agent_store.rs`, `agent.rs` |
 | Remote catalog/control/outbox | `src-tauri/agent-host/bootstrap.mjs`, `supervisor.mjs`, provider transports; introduce only the narrowly scoped shared service/data modules required |
 | Touch terminal | `src/terminal/SessionTerminal.tsx`, `clipboard.ts`, `links.ts`, `src/session/connections.ts`, native SSH/tmux worker |
-| Android integration/build | `src-tauri/gen/android/` as current local scaffold only; establish tracked templates/config/plugin sources and CI before relying on edits there |
+| Android integration/build | `src-tauri/android/MainActivity.kt`, `scripts/android/build-frontend.mjs`, native credentials; extend tracked templates/plugins for the ignored generated Gradle scaffold and CI |
 | Regression evidence | `tests-agents/`, `tests-terminal/`, Rust tests, new Android instrumentation/physical-device matrix |
 
 ## 10. Acceptance matrix
@@ -484,7 +508,7 @@ is committed until the native and continuity spikes establish their actual gaps.
 | AND-A01 | Clean checkout builds a signed ARM64 APK through the documented process; install and upgrade preserve expected cache/settings and never expose credentials |
 | AND-A02 | Fresh phone authenticates to a selected server, verifies its host key and discovers existing desktop remote conversations without creating duplicate sessions |
 | AND-A03 | With desktop powered off, phone reads and continues the same remote conversation/provider session; draft text is never silently submitted |
-| AND-A04 | Two readers coexist; explicit Continue here transfers only that conversation; old-owner reconnect cannot reclaim it or write with a stale epoch |
+| AND-A04 | Two devices read and act without takeover; concurrent sends/answers have one valid acceptance; reconnect never disconnects the other client; stale generation/revision commands are rejected |
 | AND-A05 | Lose the network before/during/after prompt acknowledgement; catch-up uses the same message ID and produces no duplicate paid turn |
 | AND-A06 | Answer a request on desktop while phone has it open; phone shows Already answered and cannot apply a stale answer to a newer execution |
 | AND-A07 | Rotate, background, reclaim/restart the process, and reopen sheets with a draft/attachments present; expected local content and reading position restore safely |
@@ -497,7 +521,7 @@ is committed until the native and continuity spikes establish their actual gaps.
 | AND-A14 | 320px compact viewport, landscape and multi-window fit; 200% text scaling and TalkBack expose navigation/request controls, focus return and full control names |
 | AND-A15 | Long transcript and active streaming remain responsive on a mid-range phone; no hidden-window animation loop, unbounded output/DOM, or sustained background SSH-polling battery drain |
 | AND-A16 | Migration rerun/crash, old worker protocol, missing provider session, corrupted cache and unavailable server do not discard history or silently replace uncertain execution |
-| AND-A17 | Device unlink, host-key mismatch, forged/stale intent, untrusted attachment metadata, cross-project ID, and unauthorized control mutation are rejected with useful recovery |
+| AND-A17 | Device unlink, host-key mismatch, forged/stale intent, untrusted attachment metadata, cross-project ID, and unauthorized/stale-generation mutation are rejected with useful recovery |
 | AND-A18 | Existing desktop agent/terminal suites pass; phone implementation does not regress desktop navigation, persistence, host trust or the deferred orb's current behavior |
 
 Run domain/worker/native tests first, responsive browser checks next, emulator/Android
@@ -522,23 +546,27 @@ baseline, before MOB-14; do not claim those budgets are met from the mockup.
   imply shipping commit/push/PR workflows.
 - **AG-04:** reuse attachment/message-parts and remote-path contracts. Android
   picker/URI support remains its own native work.
-- **AG-10:** coordinate import/adoption and active-controller behavior rather than
-  implementing a second incompatible discovery/ownership model.
+- **AG-10:** coordinate import/adoption and legacy attachment behavior rather than
+  implementing a second incompatible discovery/mutation model.
 - **AG-11 / AG-18:** actual provider capabilities and shared Todo truth remain the
   source; example model/plan controls are not production defaults.
 - **AG-12:** child relationships must survive mobile replay. Direct child chat uses
-  the same ownership/queue rules; no floating multi-panel desktop layout on a phone.
+  the same server-owned command/queue rules; no floating multi-panel desktop layout on a phone.
 - **AG-15:** version migration/export formats together, but a general portable backup
   product is not required to unblock the bounded continuity migration.
 
-This planning update expands the old desktop-companion-only AG-16 assumption. It
-does not automatically reorder the currently active capability/Todo/Git milestones,
-mark mobile implementation started, or approve a relay deployment. Record scheduling
-changes explicitly in the master tracker when implementation is authorized.
+The 2026-11-11 decision round prioritized S1/S2 in the
+[continuity execution plan](android-continuity.md#11-implementation-sequence-vertical-proofs)
+as the first functional slices. Initial discovery and concurrent commands now have
+implementation/test evidence and fresh native builds; real-provider desktop/phone
+acceptance is pending. Full account metadata/organization, migration and push remain
+implementation work. Record deployment configuration and milestone sign-off as
+those slices are delivered.
 
 ## 12. References
 
 - [Current agent behavior and persistence](../agents-ui-and-persistence.md)
+- [Desktop ↔ Android continuity plan](android-continuity.md)
 - [Provider capability audit](provider-capabilities.md)
 - [Subagents and direct chat](agent-subagents.md)
 - [Tauri mobile prerequisites](https://v2.tauri.app/start/prerequisites/#configure-for-mobile-targets)

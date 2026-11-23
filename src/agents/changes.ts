@@ -1,11 +1,12 @@
 import { formatPatch, parsePatch, structuredPatch, type StructuredPatchHunk } from "diff"
-import type { AgentToolContent } from "./types"
+import type { AgentChangeIndexItem, AgentToolContent } from "./types"
 import type { TranscriptItem } from "./transcript"
 
 export type ChangeContent = Extract<AgentToolContent, { type: "diff" | "patch" }>
 export type ChangeOutcome = "completed" | "failed" | "pending" | "unconfirmed"
 export interface AgentChange {
   id: string
+  toolCallId?: string
   outcome: ChangeOutcome
   path: string
   source: ChangeContent
@@ -13,7 +14,7 @@ export interface AgentChange {
   deletions: number | null
   patch: string | null
   hunks: StructuredPatchHunk[] | null
-  preview?: "snippet" | "written"
+  preview?: "snippet" | "written" | "saved"
 }
 export type ReportedChange = Omit<AgentChange, "id" | "outcome">
 const cache = new WeakMap<ChangeContent, ReportedChange[]>()
@@ -128,11 +129,19 @@ export function conversationChanges(items: TranscriptItem[]): AgentChange[] {
       "path" in content && typeof content.path === "string" && !!content.path && (content.type === "diff" && typeof content.newText === "string" && (content.oldText == null || typeof content.oldText === "string")
         || content.type === "patch" && typeof content.patch === "string" && !!content.patch.trim()))
     if (edits.length) for (const [index, content] of edits.entries()) {
-      describeChanges(content).forEach((change, file) => changes.push({ id: `${item.id}:${index}:${file}`, outcome, ...change }))
+      describeChanges(content).forEach((change, file) => changes.push({ id: `${item.id}:${index}:${file}`, toolCallId: item.toolCallId, outcome, ...change }))
     }
-    else suppliedToolEdits(item).forEach((change, index) => changes.push({ id: `${item.id}:input:${index}`, outcome, ...change }))
+    else suppliedToolEdits(item).forEach((change, index) => changes.push({ id: `${item.id}:input:${index}`, toolCallId: item.toolCallId, outcome, ...change }))
   }
   return changes
+}
+export function mergeChangeIndex(changes: AgentChange[], index: AgentChangeIndexItem[] = []): AgentChange[] {
+  const visible = new Set(changes.map(change => change.toolCallId).filter((id): id is string => !!id))
+  return [...changes, ...index.filter(item => !visible.has(item.toolCallId)).map(item => ({
+    id: item.id, toolCallId: item.toolCallId, path: item.path, outcome: item.outcome,
+    source: { type: "patch" as const, path: item.path, patch: "" },
+    additions: null, deletions: null, patch: null, hunks: null, preview: "saved" as const,
+  }))]
 }
 export function changeTotals(changes: AgentChange[]) {
   const completed = changes.filter(change => change.outcome === "completed")

@@ -23,6 +23,7 @@ const ReviewPatch = memo(function ReviewPatch({ path, hunks }: { path: string; h
 })
 
 export default function AgentReviewDiff({ change, sourceLabel = "Original provider patch" }: { change: ReportedChange; sourceLabel?: string }) {
+  if (change.preview === "saved") return <p className="agent-diff-fallback">This file was changed earlier in the saved conversation. Its change summary is available independently of the messages currently loaded.</p>
   if (change.preview === "written" && change.source.type === "diff") return <div className="agent-diff"><p className="agent-diff-fallback">Written content · the agent did not supply the original file. Line totals are unavailable.</p><pre className="agent-written-content" tabIndex={0} aria-label={`Written content for ${change.path}`}>{change.source.newText}</pre></div>
   return <div className="agent-diff">
     {change.preview === "snippet" && <p className="agent-diff-fallback">Reported replacement · line numbers are relative to the supplied snippet.</p>}

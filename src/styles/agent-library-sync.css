@@ -1,0 +1,14 @@
+.agent-library-sync-notice { flex-shrink: 0; min-width: 0; max-width: 100%; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-library-sync-notice.is-compact { padding: 0 16px; color: var(--ag-dim); }
+.agent-library-sync-notice > p { margin: 0; }
+.agent-library-sync-notice.is-error > p { padding-block: 10px; color: var(--ag-red, var(--mobile-accent, currentColor)); }
+.agent-library-sync-details { min-width: 0; }
+.agent-library-sync-details > summary { box-sizing: border-box; min-height: 44px; padding-block: 11px; cursor: pointer; }
+.agent-library-sync-details > summary:focus-visible,
+.agent-library-sync-records:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.agent-library-sync-records { max-height: min(240px, 30vh); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; }
+.agent-library-sync-records > p { margin: 0 0 10px; }
+.agent-library-sync-records ul { margin: 0; padding: 0 0 0 20px; }
+.agent-library-sync-records li { margin-block: 0 12px; }
+.agent-library-sync-records li > strong { font-weight: 500; }
+.agent-library-sync-records li > span { display: block; }

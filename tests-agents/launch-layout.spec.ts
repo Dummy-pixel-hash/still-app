@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test"
+import { projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/live.js?*", route => route.abort())
@@ -67,12 +68,12 @@ test("the compact sidebar preserves complete titles, search, and selected-state 
   const panel = page.locator(".agent-sidebar-panel")
   await expect(panel.locator(".agent-storage-status")).toHaveCount(0)
   const title = panel.locator(".agent-thread-title").first()
-  await expect(title).toHaveCSS("font-size", "13.65px")
+  await expect(title).toHaveCSS("font-size", "13px")
   await expect(title).toHaveCSS("font-weight", "400")
-  await expect(title).toHaveCSS("white-space", "nowrap")
-  await expect(title).toHaveCSS("text-overflow", "ellipsis")
-  await expect(panel.locator(".agent-thread-time").first()).toHaveCSS("font-size", "11.55px")
-  for (const row of await panel.locator(".agent-thread-open").all()) await expect(row).toBeInViewport()
+  await expect(title).toHaveCSS("white-space", "normal")
+  await expect(title).toHaveCSS("-webkit-line-clamp", "2")
+  await expect(panel.locator(".agent-thread-time").first()).toHaveCSS("font-size", "10.5px")
+  for (const row of await panel.locator(".agent-thread-open").all()) { await row.scrollIntoViewIfNeeded(); await expect(row).toBeInViewport() }
   await expect(panel.locator(".agent-thread-open").first()).toHaveAttribute("title", /^Refine project navigation · OpenCode · Saved/)
   await panel.getByRole("textbox", { name: "Search conversations", exact: true }).fill("keyboard")
   await expect(panel.locator(".agent-thread-title")).toHaveCount(1)
@@ -80,7 +81,7 @@ test("the compact sidebar preserves complete titles, search, and selected-state 
   await panel.getByRole("textbox", { name: "Search conversations", exact: true }).fill("")
   await expect(panel.locator(".agent-thread-title")).toHaveCount(8)
   await panel.locator(".agent-thread-open").first().click()
-  await expect(panel.locator(".agent-thread.is-selected .agent-thread-title")).toHaveCSS("font-weight", "500")
+  await expect(panel.locator(".agent-thread.is-selected .agent-thread-title")).toHaveCSS("font-weight", "600")
   expect(await panel.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
 })
 
@@ -342,7 +343,8 @@ test("the sidebar is a rounded glass pane and keeps search, selection, collapse 
   await sidebar.getByRole("textbox", { name: "Search conversations", exact: true }).fill("")
   await sidebar.locator(".agent-thread-open").first().click()
   const selected = sidebar.locator(".agent-thread.is-selected")
-  await expect(selected).toHaveCSS("background-image", /linear-gradient\(110deg/)
+  await expect(selected).toHaveCSS("background-image", "none")
+  await expect(selected).toHaveCSS("background-color", "rgba(255, 255, 255, 0.055)")
   await expect(selected).toHaveCSS("box-shadow", /rgba\(255, 255, 255,/)
   await page.getByRole("button", { name: "Collapse project sidebar" }).click()
   await expect(sidebar).toHaveCSS("width", "56px")
@@ -353,13 +355,13 @@ test("the sidebar is a rounded glass pane and keeps search, selection, collapse 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(topbar).toHaveCSS("height", "46px")
   await expect(topbar).toHaveCSS("margin-top", "8px")
-  await page.getByRole("button", { name: "Toggle projects" }).click()
+  await projectSidebarToggle(page).click()
   await expect(sidebar).toBeVisible()
   await expect(sidebar).toHaveCSS("left", "8px")
   await expect(sidebar).toHaveCSS("border-radius", "16px")
   await expect(sidebar).toHaveCSS("backdrop-filter", "blur(30px) saturate(1.12)")
   await page.keyboard.press("Escape")
   await expect(sidebar).toBeHidden()
-  await expect(page.getByRole("button", { name: "Toggle projects" })).toBeFocused()
+  await expect(projectSidebarToggle(page)).toBeFocused()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })

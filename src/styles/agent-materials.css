@@ -789,3 +789,78 @@
   height: 38px;
   color: #b1a5ae;
 }
+
+/* Keep the conversation change summary out of the transcript's layout. */
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary {
+  position: absolute;
+  z-index: 6;
+  right: auto;
+  left: 50%;
+  bottom: calc(var(--ag-composer-height, 0px) + 48px);
+  width: 42px;
+  height: 42px;
+  min-height: 42px;
+  margin: 0;
+  padding: 5px;
+  gap: 0;
+  flex-wrap: nowrap;
+  justify-content: center;
+  overflow: hidden;
+  transform: translateX(-50%);
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary > svg { flex: none; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary > :is(strong, .agent-change-numbers, .agent-change-attempts, .agent-change-summary-action) { display: none; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible {
+  width: max-content;
+  max-width: min(460px, calc(100% - 32px));
+  height: auto;
+  min-height: 44px;
+  padding: 8px 12px;
+  gap: 10px;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible > :is(strong, .agent-change-numbers, .agent-change-attempts) { display: inline-flex; }
+.agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible > .agent-change-summary-action { display: flex; }
+@media (hover: hover) and (pointer: fine) {
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary {
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 5px);
+    transition: opacity 140ms ease, transform 140ms ease, background 120ms, border-color 120ms;
+  }
+  .agent-workspace .agent-chat:not(.is-launch):hover > .agent-change-summary,
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible {
+    width: max-content;
+    max-width: min(460px, calc(100% - 32px));
+    height: auto;
+    min-height: 44px;
+    padding: 8px 12px;
+    gap: 10px;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0);
+  }
+  .agent-workspace .agent-chat:not(.is-launch):hover > .agent-change-summary > :is(strong, .agent-change-numbers, .agent-change-attempts),
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible > :is(strong, .agent-change-numbers, .agent-change-attempts) { display: inline-flex; }
+  .agent-workspace .agent-chat:not(.is-launch):hover > .agent-change-summary > .agent-change-summary-action,
+  .agent-workspace .agent-chat:not(.is-launch) > .agent-change-summary:focus-visible > .agent-change-summary-action { display: flex; }
+}
+
+/* Errors remain readable and actionable without competing with the work. */
+.agent-workspace .agent-error {
+  padding: 7px 11px;
+  margin-bottom: 8px;
+  border: 0;
+  border-inline-start: 2px solid rgba(218, 130, 145, .5);
+  border-radius: 0 7px 7px 0;
+  background: rgba(104, 43, 57, .16);
+  color: #d8bec4;
+  font-size: 11.5px;
+  line-height: 1.55;
+  max-height: 160px;
+}
+.agent-workspace .agent-error > p { margin-top: 4px; opacity: .9; }
+.agent-workspace .agent-error > button { margin-top: 7px; }

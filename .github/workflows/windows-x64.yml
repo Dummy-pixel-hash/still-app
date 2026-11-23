@@ -79,6 +79,9 @@ jobs:
       - name: Frontend typecheck
         run: npm run typecheck
 
+      - name: Verify read-only Windows conversation export
+        run: node --test tests-agents/windows-library-export.test.mjs
+
       - name: Frontend build
         run: npm run build
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { nativeBridge } from "../bridge/nativeBridge"
 import OrbSettings from "../orb/OrbSettings"
+import { UpdateSettings } from "../updates/UpdateNotice"
 import type { OrbPublisherState } from "../orb/publisher"
 import {
   addKey,
@@ -128,6 +129,8 @@ export default function SettingsSheet({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-serif text-3xl text-fg">Settings</h2>
+
+        <UpdateSettings />
 
         <section className="mt-5">
           <h3 className="font-mono text-[10px] uppercase tracking-[0.2em] text-faint">

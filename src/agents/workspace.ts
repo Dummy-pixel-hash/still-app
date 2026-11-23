@@ -2,13 +2,13 @@ import type { Session } from "../types"
 import type { AgentDraftAttachment } from "./attachments"
 import { saveAgentWorkspace, storedWorkspace, storedWorkspaces } from "../session/agentStorage"
 import { sessionHostKey } from "../session/identity"
-import type { CustomAgent } from "./types"
+import type { CustomAgent, SharedConversation, SharedOperation, SharedProject } from "./types"
 import { isCustomAgent } from "./customAgents"
+import { folderName, normalizeFolder, projectKey } from "./projectIdentity"
+export { folderName, normalizeFolder, projectKey }
 
 export const hostKey = (session: Pick<Session, "host" | "port" | "username"> & Partial<Pick<Session, "transport">>) => sessionHostKey(session)
 export const agentConnectionId = (session: Session) => `agents:${hostKey(session)}`
-export function folderName(cwd: string) { return cwd.split("/").filter(Boolean).pop() || cwd }
-export function normalizeFolder(cwd: string) { return cwd === "/" ? cwd : cwd.trim().replace(/\/+$/, "") || "~" }
 export interface ConversationMeta {
   id: string
   hostKey: string
@@ -29,6 +29,13 @@ export interface ConversationMeta {
   subagentGuidance?: Array<{ requestId: string; messageId: string; text: string }>
   subagentGuidancePaused?: boolean
   subagentPrepared?: boolean
+  shared?: SharedConversation
+  sharedPending?: SharedOperation[]
+  sharedSyncError?: string
+  sharedConflict?: boolean
+  sharedDeleted?: boolean
+  sharedLocalChanges?: Partial<SharedConversation["values"]>
+  sharedAdoptionResolved?: boolean
 }
 export interface AgentWorkspacePreferences {
   selectedId?: string
@@ -58,7 +65,57 @@ export function saveWorkspace(host: string, value: AgentWorkspacePreferences) {
 }
 
 export interface AgentProject { host: string; folder: string; name?: string }
-export const projectKey = (project: AgentProject) => JSON.stringify([project.host, project.folder])
+export interface SharedAccountCache { serverAccountId: string; revision: number; projects: SharedProject[] }
+export function sharedAccount(host: string): SharedAccountCache | undefined {
+  return storedWorkspace(`shared-account:${host}`) as SharedAccountCache | undefined
+}
+export function sharedProjectNameDraft(project: AgentProject): { title: string; conflict: boolean } | undefined {
+  const account = sharedAccount(project.host), remote = account?.projects.find(item => item.cwd === project.folder)
+  if (!account || !remote) return
+  const pending = storedWorkspace(`shared-project-intent:${account.serverAccountId}:${remote.id}`) as { input?: SharedOperation; conflict?: boolean } | undefined
+  return typeof pending?.input?.patch?.name === "string" ? { title: pending.input.patch.name, conflict: pending.conflict === true } : undefined
+}
+export function sharedProjectDeleted(project: AgentProject) {
+  return sharedAccount(project.host)?.projects.find(item => item.cwd === project.folder)?.deleted === true
+}
+export function sharedProjects(): AgentProject[] {
+  return Object.entries(storedWorkspaces()).flatMap(([key, value]) => {
+    if (!key.startsWith("shared-account:") || !value || typeof value !== "object") return []
+    const cache = value as SharedAccountCache
+    if (!Array.isArray(cache.projects)) return []
+    const host = key.slice("shared-account:".length)
+    const saved = (storedWorkspace("library") as Partial<AgentLibraryPreferences> | undefined)?.projects || []
+    return [...cache.projects].filter(project => !project.deleted).sort((a, b) => b.order - a.order).map(project => {
+      const pending = storedWorkspace(`shared-project-intent:${cache.serverAccountId}:${project.id}`) as { input?: SharedOperation; conflict?: boolean } | undefined
+      const intended = !pending?.conflict && typeof pending?.input?.patch?.name === "string" ? pending.input.patch.name : undefined
+      return { host, folder: project.cwd, name: intended ?? (project.name || saved.find(local => local.host === host && local.folder === project.cwd)?.name || undefined) }
+    })
+  })
+}
+export function orderSharedProjects(projects: AgentProject[]): AgentProject[] {
+  const byHost = new Map<string, AgentProject[]>()
+  for (const project of projects) {
+    const account = sharedAccount(project.host)
+    if (!account) continue
+    const group = byHost.get(project.host) || []
+    group.push(project); byHost.set(project.host, group)
+  }
+  for (const [host, group] of byHost) {
+    const account = sharedAccount(host)!
+    const pending = storedWorkspace(`shared-project-order:${account.serverAccountId}`) as { input?: SharedOperation; conflict?: boolean } | undefined
+    const intended = !pending?.conflict ? pending?.input?.order : undefined
+    const orders = new Map(account.projects.map(project => [project.cwd, intended ? (intended.length - intended.findIndex(item => item.id === project.id)) * 1024 : project.order]))
+    group.sort((a, b) => (orders.get(b.folder) || 0) - (orders.get(a.folder) || 0))
+  }
+  const cursors = new Map<string, number>()
+  return projects.map(project => {
+    const group = byHost.get(project.host)
+    if (!group) return project
+    const cursor = cursors.get(project.host) || 0
+    cursors.set(project.host, cursor + 1)
+    return group[cursor]
+  })
+}
 export function hostLabel(key: string) {
   try { const [host, port, username] = JSON.parse(key); return `${username}@${host}${port === 22 ? "" : `:${port}`}` } catch { return "Unassigned server" }
 }

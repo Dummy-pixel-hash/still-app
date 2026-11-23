@@ -6,6 +6,7 @@ export interface TranscriptItem {
   kind: "user" | "assistant" | "reasoning" | "tool" | "notice" | "request"
   text: string
   title?: string
+  toolCallId?: string
   status?: string
   content?: AgentToolContent[]
   toolKind?: string
@@ -70,7 +71,7 @@ export function conversation(events: AgentThreadEvent[]): TranscriptItem[] {
       stream = undefined
       let tool = tools.get(event.toolCallId)
       if (!tool) {
-        tool = { id: `tool-${key}-${event.toolCallId}`, kind: "tool", text: "" }
+        tool = { id: `tool-${key}-${event.toolCallId}`, toolCallId: event.toolCallId, kind: "tool", text: "" }
         tools.set(event.toolCallId, tool)
         items.push(tool)
       }

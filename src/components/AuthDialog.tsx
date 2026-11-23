@@ -26,12 +26,10 @@ export default function AuthDialog({
 
   useEffect(() => {
     fieldRef.current?.focus()
-    if (mode === "password") {
-      void nativeBridge
-        .hasCredential(session.host, session.port, session.username)
-        .then(setStored)
-        .catch(() => setStored(false))
-    }
+    void nativeBridge
+      .hasCredential(session.host, session.port, session.username)
+      .then(setStored)
+      .catch(() => setStored(false))
   }, [session, mode])
 
   // Portalled to document.body: the workspace container underneath gets
@@ -81,7 +79,7 @@ export default function AuthDialog({
             ref={fieldRef as React.RefObject<HTMLTextAreaElement>}
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
-            placeholder="Paste private key (single connect only)"
+            placeholder={stored ? "Private key (blank = use remembered)" : "Paste private key"}
             aria-label="Private key"
             rows={4}
             spellCheck={false}

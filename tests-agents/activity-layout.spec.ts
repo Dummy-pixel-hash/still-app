@@ -5,26 +5,26 @@ test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto("/tests-agents/fixture.html?demo&layout=split")
   await page.locator(".agent-recent").first().click()
-  await expect(page.locator(".agent-activity-block")).toHaveCount(3)
+  await expect(page.locator(".agent-activity-block")).toHaveCount(1)
 })
 
 test("finished history has readable, clickable summaries rather than empty rails", async ({ page }) => {
   const rails = page.locator(".agent-activity-rail")
   const summaries = page.locator(".agent-activity-summary")
-  await expect(summaries).toHaveCount(3)
-  for (let index = 0; index < 3; index++) {
-    await expect(rails.nth(index)).toHaveAttribute("aria-expanded", "false")
+  await expect(summaries).toHaveCount(1)
+  for (const [index, rail] of (await rails.all()).entries()) {
+    await expect(rail).toHaveAttribute("aria-expanded", "false")
     await expect(summaries.nth(index)).toBeVisible()
     await expect(summaries.nth(index)).not.toHaveText(/^\s*$/)
     await expect(summaries.nth(index)).not.toContainText(/\b(?:Steps|Done|Complete)\b/)
-    const controls = await rails.nth(index).getAttribute("aria-controls")
+    const controls = await rail.getAttribute("aria-controls")
     expect(controls).toBeTruthy()
     await expect(page.locator(`[id="${controls}"]`)).toBeHidden()
   }
 
   await summaries.first().click()
   await expect(rails.first()).toHaveAttribute("aria-expanded", "true")
-  await expect(page.locator(".agent-activity-event-list").first().locator(":scope > *")).toHaveCount(5)
+  await expect(page.locator(".agent-activity-event-list").first().locator(":scope > *")).toHaveCount(15)
   await expect(page.locator(".agent-activity-block").first().locator(".agent-activity-summary")).toHaveCount(0)
 })
 
@@ -59,7 +59,7 @@ test("side lines are visible only while their activity group is expanded", async
   await expect(page.locator(".agent-activity-summary").first()).toBeVisible()
 })
 
-test("all five-item groups stay expanded until the turn actually finishes", async ({ page }) => {
+test("only the latest activity group stays expanded while a turn is active", async ({ page }) => {
   await page.evaluate(() => {
     const fixture = (window as any).agentFixture
     fixture.emit(fixture.current, { type: "userMessage", text: "Continue the review" })
@@ -68,30 +68,53 @@ test("all five-item groups stay expanded until the turn actually finishes", asyn
       content: [{ type: "content", content: { type: "text", text: `Contents of file ${index + 1}` } }],
     })
   })
-  await expect(page.locator(".agent-activity-block")).toHaveCount(4)
-  const firstRail = page.locator(".agent-activity-rail").nth(3)
-  await expect(firstRail).toHaveAttribute("aria-expanded", "true")
+  await expect(page.locator(".agent-activity-block")).toHaveCount(2)
+  const liveRail = page.locator(".agent-activity-rail").nth(1)
+  await expect(liveRail).toHaveAttribute("aria-expanded", "true")
 
   await page.evaluate(() => {
     const fixture = (window as any).agentFixture
     fixture.emit(fixture.current, { type: "reasoningChunk", text: "The next chunk must not close the earlier work." })
   })
-  await expect(page.locator(".agent-activity-block")).toHaveCount(5)
-  await expect(firstRail).toHaveAttribute("aria-expanded", "true")
-  await expect(page.locator(".agent-activity-rail").nth(4)).toHaveAttribute("aria-expanded", "true")
+  await expect(page.locator(".agent-activity-block")).toHaveCount(2)
+  await expect(liveRail).toHaveAttribute("aria-expanded", "true")
 
   await page.evaluate(() => {
     const fixture = (window as any).agentFixture
     fixture.emit(fixture.current, { type: "assistantChunk", text: "The initial checks look good. I will verify one more case." })
     fixture.emit(fixture.current, { type: "reasoningChunk", text: "A prose update is not turn completion either." })
   })
-  await expect(page.locator(".agent-activity-block")).toHaveCount(6)
-  for (let index = 3; index < 6; index++) await expect(page.locator(".agent-activity-rail").nth(index)).toHaveAttribute("aria-expanded", "true")
+  await expect(page.locator(".agent-activity-block")).toHaveCount(3)
+  await expect(liveRail).toHaveAttribute("aria-expanded", "false")
+  await expect(page.locator(".agent-activity-rail").last()).toHaveAttribute("aria-expanded", "true")
 
   await page.evaluate(() => (window as any).agentFixture.finish())
-  await expect(page.locator(".agent-activity-summary")).toHaveCount(6)
+  await expect(page.locator(".agent-activity-summary")).toHaveCount(3)
   for (const rail of await page.locator(".agent-activity-rail").all()) await expect(rail).toHaveAttribute("aria-expanded", "false")
   for (const line of await page.locator(".agent-activity-rail > span").all()) await expect(line).toBeHidden()
+})
+
+test("activity groups bundle recursively and expand to a flat list of collapsed entries", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = (window as any).agentFixture
+    fixture.emit(fixture.current, { type: "userMessage", text: "Review a long sequence" })
+    for (let index = 0; index < 125; index++) {
+      if (index % 5 === 0) fixture.emit(fixture.current, { type: "reasoningChunk", text: `Reasoning ${index}` })
+      else fixture.emit(fixture.current, { type: "toolStart", toolCallId: `step-${index}`, title: "Edit file", toolKind: "edit", rawInput: { path: `src/file-${index}.ts` }, status: "completed" })
+    }
+  })
+  const root = page.locator(".agent-activity-block").last()
+  await expect(page.locator(".agent-activity-block")).toHaveCount(2)
+  await page.evaluate(() => (window as any).agentFixture.finish())
+  const summary = root.locator(".agent-activity-summary")
+  await expect(summary).toContainText("25 activity groups")
+  await summary.click()
+  const eventList = root.locator(".agent-activity-event-list")
+  await expect(eventList.locator(":scope > details")).toHaveCount(125)
+  await expect(eventList.locator(":scope > details[open]")).toHaveCount(0)
+  await expect(eventList.locator(".agent-activity-block")).toHaveCount(0)
+  const rails = await page.locator(".agent-activity-rail").all()
+  for (const rail of rails.slice(0, -1)) await expect(rail).toHaveAttribute("aria-expanded", "false")
 })
 
 test("reopened activity remains open across metadata updates and supports keyboard toggling", async ({ page }) => {
@@ -116,6 +139,7 @@ test("failed or unfinished tool output is not hidden by auto-collapse", async ({
     fixture.finish()
   })
   await expect(page.locator(".agent-activity-rail").last()).toHaveAttribute("aria-expanded", "true")
+  await page.locator(".agent-tool--inline > summary").last().click()
   await expect(page.locator(".agent-tool-body").last()).toContainText("Build failed: missing export")
 
   await page.evaluate(() => {
@@ -144,23 +168,21 @@ for (const layout of ["chapters", "timeline", "split"]) {
         const rail = rails.nth(index)
         if (await rail.getAttribute("aria-expanded") !== "true") await rail.click()
         await expect(rail).toHaveAttribute("aria-expanded", "true")
-      }
-
-      const geometry = await page.locator(".agent-activity-block").evaluateAll(blocks => blocks.map(block => {
-        const content = block.querySelector(".agent-activity-content")!.getBoundingClientRect()
-        const rail = block.querySelector(".agent-activity-rail")!.getBoundingClientRect()
-        const box = block.getBoundingClientRect()
-        const events = [...block.querySelector(".agent-activity-event-list")!.children].map(el => {
-          const rect = el.getBoundingClientRect()
-          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }
+        for (let other = 0; other < await rails.count(); other++) if (other !== index) await expect(rails.nth(other)).toHaveAttribute("aria-expanded", "false")
+        const geometry = await rail.evaluate(railElement => {
+          const block = railElement.closest(".agent-activity-block")!
+          const content = block.querySelector(".agent-activity-content")!.getBoundingClientRect()
+          const rail = railElement.getBoundingClientRect()
+          const box = block.getBoundingClientRect()
+          const events = [...block.querySelector(".agent-activity-event-list")!.children].map(el => {
+            const rect = el.getBoundingClientRect()
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom }
+          })
+          return { top: box.top, bottom: box.bottom, railRight: rail.right, railBottom: rail.bottom, contentLeft: content.left, contentRight: content.right, events }
         })
-        return { top: box.top, bottom: box.bottom, railRight: rail.right, railBottom: rail.bottom, contentLeft: content.left, contentRight: content.right, events }
-      }))
-      for (let index = 0; index < geometry.length; index++) {
-        const block = geometry[index]
+        const block = geometry
         expect(block.contentLeft).toBeGreaterThanOrEqual(block.railRight)
         expect(block.railBottom).toBeLessThanOrEqual(block.bottom + 1)
-        if (index > 0) expect(block.top).toBeGreaterThanOrEqual(geometry[index - 1].bottom - 1)
         for (let eventIndex = 0; eventIndex < block.events.length; eventIndex++) {
           const item = block.events[eventIndex]
           expect(item.left).toBeGreaterThanOrEqual(block.contentLeft - 1)
@@ -175,8 +197,9 @@ for (const layout of ["chapters", "timeline", "split"]) {
       await expect(page.locator(".agent-tool-heading").getByText("Done", { exact: true })).toHaveCount(0)
     }
     // A collapsed group must still have a real row, not a line spilling into its neighbour.
-    for (const rail of await page.locator(".agent-activity-rail").all()) await rail.click()
-    await expect(page.locator(".agent-activity-summary")).toHaveCount(3)
+    const lastRail = page.locator(".agent-activity-rail").last()
+    if (await lastRail.getAttribute("aria-expanded") === "true") await lastRail.click()
+    await expect(page.locator(".agent-activity-summary")).toHaveCount(1)
     const collapsed = await page.locator(".agent-activity-block").evaluateAll(blocks => blocks.map(el => {
       const rect = el.getBoundingClientRect()
       return { top: rect.top, bottom: rect.bottom, height: rect.height, railBottom: el.querySelector(".agent-activity-rail")!.getBoundingClientRect().bottom }
@@ -221,6 +244,7 @@ test("long tool names, commands, and unbroken output stay inside their split col
       content: [{ type: "content", content: { type: "text", text: "output/" + "unbroken".repeat(250) } }],
     })
   })
+  for (const summary of await page.locator(".agent-tool--inline > summary").all()) await summary.click()
   for (const width of [1440, 960, 390, 320]) {
     await page.setViewportSize({ width, height: 800 })
     const overflows = await page.locator(".agent-activity-block").last().evaluate(block => {

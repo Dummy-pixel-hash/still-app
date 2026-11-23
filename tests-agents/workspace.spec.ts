@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test"
+import { openAgentSettings, projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   // Optional live-design chrome belongs to the interactive preview, not test input.
@@ -21,7 +22,7 @@ async function connect(page: Page, agent = "opencode", firstMessage?: string) {
   await expect(page.getByRole("button", { name: "Model: Model A" })).toBeEnabled()
 }
 async function addFolder(page: Page, path: string) {
-  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await page.getByRole("button", { name: "Toggle projects" }).click()
+  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await projectSidebarToggle(page).click()
   await page.getByRole("button", { name: "Add project folder", exact: true }).click()
   await page.getByLabel("Remote project folder").fill(path)
   await page.getByRole("button", { name: "Open folder", exact: true }).click()
@@ -66,8 +67,7 @@ test("Agent interface hides scrollbars without disabling scrolling", async ({ pa
 
 test("discovery is automatic and the installed base CLIs use project/path overrides", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.checks.length)).toBe(1)
-  await page.getByRole("button", { name: "Workspace options" }).click()
-  await page.getByRole("menuitem", { name: "Agent settings", exact: true }).click()
+  await openAgentSettings(page)
   await expect(page.getByText("Installed · native connection", { exact: true })).toHaveCount(4)
   await expect(page.getByText("Installed · ACP connection", { exact: true })).toHaveCount(1)
   await page.locator(".agent-provider-setting").filter({ hasText: "Pi" }).locator("summary").click()
@@ -251,7 +251,7 @@ test("tools, supplied diffs, plan and the full command catalog are accessible", 
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
   await expect(page.locator(".agent-message-assistant h2")).toHaveText("Reconnect behavior")
-  await page.locator(".agent-work-group > summary").click()
+  await page.locator(".agent-activity-rail").last().click()
   await page.locator(".agent-tool").first().locator("summary").first().click()
   await expect(page.locator(".agent-tool-body").first()).toContainText("connectSession(id)")
   await page.locator(".agent-tool").nth(1).locator("summary").first().click()
@@ -420,7 +420,7 @@ test("small windows retain the composer and keyboard focus", async ({ page }) =>
   await page.evaluate(() => (window as any).agentFixture.populate())
   await expect(page.getByLabel("Message agent")).toBeInViewport()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.getByRole("button", { name: "Toggle projects" }).click()
+  await projectSidebarToggle(page).click()
   await expect(page.getByRole("navigation", { name: "Conversations by folder" })).toBeVisible()
   await page.getByRole("button", { name: "Collapse project sidebar", exact: true }).click()
   await page.getByLabel("Message agent").fill("Draft")
@@ -431,7 +431,7 @@ test("small windows retain the composer and keyboard focus", async ({ page }) =>
     await expect(details).toBeFocused()
     await page.keyboard.press("Tab")
   }
-  await expect(page.getByRole("button", { name: "Toggle projects" })).toBeFocused()
+  await expect(projectSidebarToggle(page)).toBeFocused()
 })
 
 test("streaming does not move the reader or continuously reorder conversations", async ({ page }) => {
@@ -544,6 +544,43 @@ test("worker loss offers explicit saved-session recovery and keeps the draft wit
   expect(after.start.options).toMatchObject({ cwd: "/srv/still", conversationId: before.conversationId, resumeSessionId: "acp-fixture" })
   expect(after.rows).toHaveLength(1)
   expect(after.rows[0].meta.draft).toBe("An unsent recovery draft")
+})
+
+for (const blocked of [false, true]) test(`older desktop conversations ${blocked ? "keep live workers untouched" : "upgrade only on explicit request"}`, async ({ page }, testInfo) => {
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.persistent = true; h.resumable = true })
+  await connect(page, "opencode", "Keep this older desktop conversation")
+  await page.getByLabel("Message agent").fill("Retain this unsent phone draft")
+  await page.evaluate(async () => {
+    const h = (window as any).agentFixture; await h.flush()
+    const data = h.saved(); data.rows[0].remoteImported = true; data.rows[0].continuity = false
+    localStorage.setItem("still.test.agent-library", JSON.stringify(data))
+  })
+  await page.reload()
+  await page.evaluate(blocked => {
+    const h = (window as any).agentFixture; h.persistent = true; h.resumable = true
+    if (blocked) h.resumeError = "The previous worker or provider process is still running. No replacement was started."
+  }, blocked)
+  await page.locator(".agent-thread-open").filter({ hasText: "Keep this older desktop conversation" }).click()
+  const upgrade = page.getByRole("button", { name: "Upgrade saved session", exact: true })
+  await expect(upgrade).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled()
+  expect(await page.evaluate(() => (window as any).agentFixture.attaches)).toEqual([])
+  expect(await page.evaluate(() => (window as any).agentFixture.starts)).toEqual([])
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(upgrade).toBeInViewport()
+  await page.screenshot({ path: testInfo.outputPath("legacy-recovery-mobile.png") })
+  await upgrade.click()
+  if (blocked) {
+    await expect(page.locator(".agent-error")).toContainText("still running")
+    await expect(upgrade).toBeEnabled()
+  } else {
+    await expect(upgrade).toHaveCount(0)
+    await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled()
+  }
+  await expect(page.getByLabel("Message agent")).toHaveValue("Retain this unsent phone draft")
+  await expect(page.locator(".agent-message-user")).toContainText("Keep this older desktop conversation")
+  expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual([])
+  await expect(page.locator(".agent-thread-open")).toHaveCount(1)
 })
 
 test("a server restart discovered during reattach requires explicit recovery rather than starting or replaying work", async ({ page }) => {
@@ -929,7 +966,7 @@ test("reduced motion disables transitions and the message finder preserves navig
   await expect(page.locator(".agent-message-assistant h2")).toBeInViewport()
 })
 
-test("long history loads in pages and earlier messages remain searchable without losing position", async ({ page }) => {
+test("long history loads invisibly on scroll, remains searchable, and never grows beyond its window", async ({ page }) => {
   await page.evaluate(async () => {
     await (window as any).agentFixture.flush()
     const host = JSON.stringify(["dev.example.test", 22, "dev"])
@@ -941,28 +978,24 @@ test("long history loads in pages and earlier messages remain searchable without
   })
   await page.reload()
   await page.locator(".agent-thread-open").click()
-  await expect(page.locator(".agent-message")).toHaveCount(120)
+  await expect(page.locator(".agent-message")).toHaveCount(200)
   const anchor = page.locator(".agent-message").first()
   await page.locator(".agent-conversation").evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")) })
   const id = await anchor.getAttribute("data-timeline-id"), top = (await anchor.boundingBox())!.y
-  await page.getByRole("button", { name: /Load earlier activity/ }).click()
-  await expect(page.locator(".agent-message")).toHaveCount(200)
+  await expect(page.locator(".agent-message")).toHaveCount(400)
   await expect.poll(async () => Math.abs((await page.locator(`[data-timeline-id="${id}"]`).boundingBox())!.y - top)).toBeLessThan(2)
-  await page.getByRole("button", { name: "Load earlier saved activity", exact: true }).click()
-  await expect(page.getByRole("button", { name: "Back to latest activity" })).toBeVisible()
-  await expect(page.locator(".agent-message").last()).toContainText("Message 249:")
-  const reveal = page.getByRole("button", { name: /Load earlier activity/ })
-  if (await reveal.count()) await reveal.click()
-  await page.getByRole("button", { name: "Load earlier saved activity", exact: true }).click()
-  await expect(page.locator(".agent-message")).toHaveCount(50)
+  await expect(page.locator(".agent-message").first()).toContainText("Message 50:")
+  await page.locator(".agent-conversation").evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")) })
+  await page.locator(".agent-conversation").dispatchEvent("wheel", { deltaY: -120 })
+  await expect(page.locator(".agent-message")).toHaveCount(400)
+  await expect(page.locator(".agent-message").first()).toContainText("Message 0:")
+  await expect(page.getByRole("button", { name: /Load earlier|Load earlier saved|Back to latest activity/ })).toHaveCount(0)
   await page.getByLabel("Message agent").press("ControlOrMeta+p")
   await page.getByLabel("Search commands").fill("timeline")
   await page.getByLabel("Search commands").press("Enter")
   await page.getByLabel("Search this conversation").fill("Message 4:")
   await page.locator(".agent-timeline-results button").click()
   await expect(page.locator(".agent-message-user").filter({ hasText: /^YouMessage 4:/ })).toBeInViewport()
-  await page.getByRole("button", { name: "Back to latest activity" }).click()
-  await expect(page.locator(".agent-message").last()).toContainText("Message 449:")
   expect(await page.evaluate(() => (window as any).agentFixture.historyReads.map((read: any) => read.before))).toEqual([undefined, 250, 50])
 })
 
@@ -1035,7 +1068,7 @@ test("uncertain submissions remain unresolved after a local reload", async ({ pa
 test("context menus stay inside a narrow viewport and support keyboard selection", async ({ page }) => {
   await page.setViewportSize({ width: 620, height: 700 })
   await connect(page)
-  await page.getByRole("button", { name: "Toggle projects" }).click()
+  await projectSidebarToggle(page).click()
   await page.getByRole("button", { name: "Actions for New OpenCode conversation" }).click()
   await expect(page.getByRole("menuitem", { name: "Rename", exact: true })).toBeFocused()
   await page.keyboard.press("End")
@@ -1128,11 +1161,11 @@ test("sidebar shortcuts expand search and mobile collapse returns to the toolbar
   await expect(page.getByRole("textbox", { name: "Search conversations", exact: true })).toBeFocused()
   await expect(page.locator(".agent-sidebar-toggle")).toHaveAttribute("aria-expanded", "true")
   await page.setViewportSize({ width: 620, height: 700 })
-  await page.getByRole("button", { name: "Toggle projects" }).click()
+  await projectSidebarToggle(page).click()
   await page.locator(".agent-sidebar-toggle").click()
   await expect(page.locator(".agent-sidebar")).not.toBeVisible()
-  await expect(page.getByRole("button", { name: "Toggle projects" })).toBeFocused()
-  await page.getByRole("button", { name: "Toggle projects" }).click()
+  await expect(projectSidebarToggle(page)).toBeFocused()
+  await projectSidebarToggle(page).click()
   await expect(page.getByRole("textbox", { name: "Search conversations", exact: true })).toBeVisible()
   await expect(page.locator(".agent-sidebar-toggle")).toHaveAttribute("aria-expanded", "true")
 })
@@ -1252,9 +1285,12 @@ test("failed and pending edits remain inspectable without counting as completed 
   await connect(page)
   await page.evaluate(() => {
     const h = (window as any).agentFixture
+    h.emit(h.current, { type: "userMessage", text: "Inspect these files" })
     h.emit(h.current, { type: "toolStart", toolCallId: "failed-edit", status: "failed", content: [{ type: "diff", path: "src/failed.ts", oldText: "", newText: "export const failed = true;\n" }] })
     h.emit(h.current, { type: "toolStart", toolCallId: "pending-edit", status: "in_progress", content: [{ type: "diff", path: "src/pending.ts", oldText: "", newText: "export const pending = true;\n" }] })
   })
+  await expect(page.locator(".agent-change-summary")).toHaveCount(0)
+  await page.evaluate(() => (window as any).agentFixture.finish())
   await expect(page.getByRole("button", { name: "Review 2 reported files", exact: true })).toContainText("2 edits not completed")
   await expect(page.locator(".agent-change-summary .agent-change-numbers")).toHaveCount(0)
   await page.getByRole("button", { name: "Review changes", exact: true }).click()
@@ -1302,17 +1338,17 @@ test("mobile project navigation owns focus and restores it on dismissal", async 
   await page.setViewportSize({ width: 620, height: 700 })
   await connect(page)
   await page.getByLabel("Message agent").fill("Keep this while navigating")
-  const toggle = page.getByRole("button", { name: "Toggle projects", exact: true })
+  const toggle = projectSidebarToggle(page)
   await toggle.click()
   const navigation = page.getByRole("dialog", { name: "Projects and conversations", exact: true })
   await expect(navigation).toBeVisible()
   await expect(navigation.getByRole("button", { name: "Collapse project sidebar", exact: true })).toBeFocused()
   await expect(page.locator(".agent-main")).toHaveAttribute("inert", "")
-  await navigation.getByRole("button", { name: "Workspace options", exact: true }).focus()
+  await navigation.getByRole("button", { name: "Agent settings", exact: true }).focus()
   await page.keyboard.press("Tab")
   await expect(navigation.getByRole("button", { name: "Still conversations", exact: true })).toBeFocused()
   await page.keyboard.press("Shift+Tab")
-  await expect(navigation.getByRole("button", { name: "Workspace options", exact: true })).toBeFocused()
+  await expect(navigation.getByRole("button", { name: "Agent settings", exact: true })).toBeFocused()
   await navigation.getByRole("textbox", { name: "Search conversations", exact: true }).focus()
   await page.keyboard.press("Escape")
   await expect(navigation).toHaveCount(0)

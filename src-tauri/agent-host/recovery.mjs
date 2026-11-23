@@ -63,7 +63,15 @@ export function verifyExecutionRecovery(directory, config, todoDirectory = dirna
   const previous = recoveryIdentity(config)
   const previousDirectory = join(dirname(directory), previous.executionId)
   for (const path of [previousDirectory, todoDirectory]) {
-    const info = lstatSync(path)
+    let info
+    try { info = lstatSync(path) }
+    catch (error) {
+      // Workers predating shared Todos have no directory/owner to transfer.
+      // Preflight remains read-only; the new worker creates its private store
+      // before taking the recovery guard and repeating the process checks.
+      if (path === todoDirectory && !recoveryGuard && error.code === "ENOENT") continue
+      throw error
+    }
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.()) throw new Error("The previous execution directory is unsafe. Its ownership was not changed.")
   }
   const guardPath = join(todoDirectory, "recovery.lock")

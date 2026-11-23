@@ -1,0 +1,155 @@
+name: stable app release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-app-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: node scripts/release/metadata.mjs check-tag "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run build
+      - name: Verify agent continuity, coordination and private storage
+        run: |
+          mkdir -p /tmp/opencode
+          node --import ./tests-agents/isolated-env.mjs --test tests-agents/*.test.mjs
+      - run: node --test tests-updates/*.test.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test -c tests-updates/playwright.config.ts
+      - run: npx playwright test -c tests-mobile/playwright.config.ts
+
+  windows:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            machine: 34404
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            machine: 43620
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: npm ci
+      - name: Build signed NSIS updater artifacts
+        run: npx tauri build --target ${{ matrix.target }} --config src-tauri/tauri.updater-build.conf.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Verify native executable architecture
+        shell: pwsh
+        run: |
+          $file = "src-tauri/target/${{ matrix.target }}/release/still-app.exe"
+          $bytes = [IO.File]::ReadAllBytes($file)
+          if ([BitConverter]::ToUInt16($bytes, 0) -ne 0x5a4d) { throw "Not a Windows executable" }
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw "Invalid PE signature" }
+          if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne ${{ matrix.machine }}) { throw "Wrong PE architecture" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*setup.exe
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*setup.exe.sig
+
+  android:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+      - run: npm ci
+      - name: Initialize reproducible Android project
+        run: NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006" npx tauri android init --ci --skip-targets-install
+      - name: Build and verify signed production APK
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export STILL_ANDROID_KEYSTORE="$RUNNER_TEMP/still-release.p12"
+          trap 'rm -f "$STILL_ANDROID_KEYSTORE"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$STILL_ANDROID_KEYSTORE"
+          test -s "$STILL_ANDROID_KEYSTORE"
+          export NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+          npx tauri android build --target aarch64 --apk --ci
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -path '*/release/*')
+          test "${#apks[@]}" -eq 1
+          mkdir -p android-release
+          cp "${apks[0]}" android-release/Still_android-arm64.apk
+          node scripts/release/metadata.mjs android-metadata android-release/Still_android-arm64.apk android-release/android-package.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64
+          if-no-files-found: error
+          path: android-release/
+
+  publish:
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-input
+      - run: node scripts/release/metadata.mjs prepare release-input release-output
+      - name: Publish complete stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < release-assets.txt
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Still $GITHUB_REF_NAME" --generate-notes --verify-tag --draft
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest

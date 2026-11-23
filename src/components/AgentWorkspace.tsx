@@ -12,7 +12,7 @@ import { conversation } from "../agents/transcript"
 import { agentsForHost, customLaunchOptions } from "../agents/customAgents"
 import CustomAgentSetup from "./CustomAgentSetup"
 import { attachmentId, loadAttachmentFile, removeAttachmentFile, saveAttachmentFile, validateAttachments, type AgentDraftAttachment } from "../agents/attachments"
-import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, projectKey, readLibraryPreferences, sessionForHost, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
+import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, orderSharedProjects, projectKey, readLibraryPreferences, sessionForHost, sharedProjectDeleted, sharedProjectNameDraft, sharedProjects, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
 import { useConversationScroll } from "../agents/useConversationScroll"
 import { useComposerOverlay } from "../agents/useComposerOverlay"
 import { useComposerMotion } from "../agents/useComposerMotion"
@@ -20,8 +20,8 @@ import { useAgentListMotion } from "../agents/useAgentListMotion"
 import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
 import { commandInventory } from "../agents/commands"
-import { clearAgentHistoryPage, loadAgentHistory, loadEarlierAgentHistory } from "../session/agentThreads"
-import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, reconcileAgentRequest, reconcileAgentThread, refreshAgentCommands, refreshAgentThread, respondAgentInput, respondAgentPermission, resumeAgentThread, sendAgentMessage, setAgentConfig, subscribeRemoteAgent, threadTitle, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
+import { loadAgentChangeHistory, loadAgentHistory, loadEarlierAgentHistory, loadLaterAgentHistory } from "../session/agentThreads"
+import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, markAgentThreadRead, reconcileAgentRequest, reconcileAgentThread, refreshAgentCommands, refreshAgentThread, removeSharedProject, reorderSharedProjects, respondAgentInput, respondAgentPermission, resumeAgentThread, retrySharedChanges, sendAgentMessage, setAgentConfig, sharedUnread, subscribeRemoteAgent, syncRemoteAgentLibrary, threadTitle, updateSharedProject, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
 import { agentDiscoverySelectionKey, discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
 import { nativeBridge, readClipboardImageFile } from "../bridge/nativeBridge"
@@ -31,7 +31,7 @@ import AgentMenu from "./AgentMenu"
 import AgentProviderMark, { StillAgentMark } from "./AgentProviderMark"
 import AgentChanges, { AgentChangeSummary } from "./AgentChanges"
 import AgentRepositoryChanges from "./AgentRepositoryChanges"
-import { conversationChanges } from "../agents/changes"
+import { conversationChanges, mergeChangeIndex } from "../agents/changes"
 import { CommandPicker, ConfigPicker, modeOption, reasoningOption } from "./AgentControls"
 import AgentModelPicker from "./AgentModelPicker"
 import AgentReasoningBars from "./AgentReasoningBars"
@@ -48,6 +48,7 @@ import type { TranscriptItem } from "../agents/transcript"
 import "../styles/agent-workspace.css"
 import "../styles/agent-materials.css"
 import "../styles/agent-changes.css"
+import "../styles/agent-polish.css"
 
 type Props = {
   presentation?: "desktop" | "mobile"
@@ -63,6 +64,7 @@ type Props = {
   transportId?: string
   connected?: boolean
   connectionNotice?: React.ReactNode
+  syncNotice?: React.ReactNode
   onClose: () => void
   onOpenTerminal?: () => void
   onStart: (agentId: string, options?: AgentLaunchOptions, onCreated?: (row: AgentThreadRow) => void) => Promise<AgentThreadRow>
@@ -71,10 +73,9 @@ type Props = {
   onResolveFolder?: (cwd: string) => Promise<string>
 }
 const messageOf = (e: unknown) => e && typeof e === "object" && "message" in e ? String(e.message) : String(e || "Operation failed")
-const idle = (row: AgentThreadRow | null) => !!row && !row.recoveryReason && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
+const idle = (row: AgentThreadRow | null) => !!row && !row.meta.sharedDeleted && !(row.remoteImported && !row.continuity) && !row.recoveryReason && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
 const statusOf = (row: AgentThreadRow) => row.meta.subagentPrepared ? "Prepared" : row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? row.turnActive ? "Connection issue · still running" : "Turn failed" : row.turnActive ? "Working" : "Ready"
 const subagentInFlight = (row: AgentThreadRow) => row.turnActive || ["connecting", "working", "inputRequired", "detached", "submissionUnknown", "rewinding"].includes(row.state)
-const historyWindows = new Map<string, string>()
 async function subagentOperationId(parentExecutionId: string, requestId: string) {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${parentExecutionId}:${requestId}`)))
   return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("")
@@ -97,7 +98,7 @@ function relativeActivity(at: number) {
 }
 function markdownCode(value: string) { return `\`${value.replace(/`/g, "ˋ")}\`` }
 
-export default function AgentWorkspace({ presentation = "desktop", initialConversationId, initialView, initialProject, initialProjectPicker = false, closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
+export default function AgentWorkspace({ presentation = "desktop", initialConversationId, initialView, initialProject, initialProjectPicker = false, closing = false, session, sessions = [], onSelectHost, onReattach, transportId, connected = true, connectionNotice, syncNotice, onClose, onOpenTerminal, onStart, onCheck, onCatalog, onResolveFolder }: Props) {
   const mobile = presentation === "mobile"
   const allThreads = useAgentThreads(), storage = useAgentStorage()
   const [prefs, setPrefs] = useState<AgentLibraryPreferences>(() => readLibraryPreferences())
@@ -112,7 +113,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const [narrowNavigation, setNarrowNavigation] = useState(() => matchMedia("(max-width: 800px)").matches)
   const reviewReturnFocus = useRef<HTMLElement | null>(null)
   const [menu, setMenu] = useState<string | null>(null)
-  const [rename, setRename] = useState<{ id: string; title: string; project?: AgentProject } | null>(null)
+  const [rename, setRename] = useState<{ id: string; title: string; project?: AgentProject; awaitingReview?: boolean } | null>(null)
   const [deleting, setDeleting] = useState<AgentThreadRow | null>(null)
   const [undo, setUndo] = useState<{ id: string; at?: number } | null>(null)
   const [busy, setBusy] = useState(false), [configBusy, setConfigBusy] = useState(false)
@@ -149,9 +150,9 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const subagentRequestQueue = useRef(Promise.resolve())
   const subagentGuidanceAttempts = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
-  const [, updateHistoryWindow] = useState(0)
   const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null), timelineSearch = useRef<HTMLInputElement>(null)
   const sidebarToggle = useRef<HTMLButtonElement>(null)
+  const compactSidebarToggle = useRef<HTMLButtonElement>(null)
   const navigationPanel = useRef<HTMLElement>(null)
   const projectPopover = useRef<HTMLDivElement>(null), agentDetailsRoot = useRef<HTMLDivElement>(null), returnFocus = useRef<HTMLElement | null>(null)
   useAgentPopover(projectPopover, projectChoices, "start", true)
@@ -173,6 +174,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   }
   const libraryThreads = allThreads.filter(row => !row.meta.prepared || row.state === "saved" || !!row.meta.draft || row.transcript.some(event => event.type === "userMessage"))
   const current = libraryThreads.find(row => row.meta.id === selected) || null
+  const legacyConversation = !!current?.persistent && !!current.remoteImported && !current.continuity
   const parentThread = current?.meta.parentConversationId ? libraryThreads.find(row => row.meta.id === current.meta.parentConversationId) || null : null
   const isSubagent = !!current?.meta.parentConversationId
   const childThreads = current ? libraryThreads.filter(row => row.meta.parentConversationId === current.meta.id && !row.meta.archivedAt).sort((a, b) => b.meta.activityAt - a.meta.activityAt) : []
@@ -311,7 +313,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     }
   }, [allThreads])
   useEffect(() => {
-    if (!current?.persistent || !onReattach || !transportId || !connectedHere || !["saved", "detached"].includes(current.state)) return
+    if (!current?.persistent || current.meta.sharedDeleted || current.remoteImported && !current.continuity || !onReattach || !transportId || !connectedHere || !["saved", "detached"].includes(current.state)) return
     const key = `${current.executionId}:${transportId}:${current.state}`
     if (attachAttempt.current === key) return
     attachAttempt.current = key
@@ -347,7 +349,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const draftKey = project ? projectKey(project) : "unassigned"
   const configurationKey = JSON.stringify([contextKey, agentId, executable, customAgent])
   const startScreen = !current && !archived && view !== "settings"
-  const preparing = hydrated && startScreen && connectedHere && discoveryCurrent && available?.available === true && !discovery.checking
+  const preparing = hydrated && startScreen && connectedHere && !!context && !sharedProjectDeleted(context) && discoveryCurrent && available?.available === true && !discovery.checking
   const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent, ...(parentReturnId ? { parentConversationId: parentReturnId } : {}) }, context?.host || "", onStart)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
@@ -382,9 +384,8 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const agentModeControl = modeOption(fields)
   const otherControls = fields.filter(option => option !== modelControl && option !== reasoningControl && option !== agentModeControl)
   const items = useMemo(() => {
-    const transcript = conversation(current?.historyPage?.transcript || current?.transcript || [])
+    const transcript = conversation(current?.transcript || [])
     if (!current) return transcript
-    if (current.historyPage) return transcript
     const kind = current.pendingPermission ? "permission" : current.pendingInput ? "question" : undefined
     const request = current.pendingPermission || current.pendingInput
     if (!kind || !request) return transcript
@@ -394,33 +395,58 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       else found.agentInput = current.pendingInput
     } else transcript.push({ id: `pending-${requestKey(current.executionId, kind, request.requestId)}`, kind: "request", attemptId: current.executionId, requestKind: kind, requestId: request.requestId, title: request.title, text: "", permission: current.pendingPermission, agentInput: current.pendingInput })
     return transcript
-  }, [current?.transcript, current?.historyPage, current?.pendingPermission, current?.pendingInput])
-  const changes = useMemo(() => conversationChanges(items), [items])
+  }, [current?.transcript, current?.pendingPermission, current?.pendingInput])
+  const changes = useMemo(() => mergeChangeIndex(conversationChanges(items), current?.changeSummaries), [items, current?.changeSummaries])
   const openHistoryAction = useCallback((message: TranscriptItem, retry: boolean) => { setError(""); setHistoryAction({ message, retry }) }, [])
   const historyActions = useMemo(() => ({ capabilities: current?.historyCapabilities, enabled: connectedHere && !busy && !configBusy && !!current && !current.turnActive && !current.pendingInput && !current.pendingPermission && !current.meta.archivedAt && !current.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(current.state), act: openHistoryAction }), [current?.historyCapabilities, current?.state, current?.turnActive, current?.pendingInput, current?.pendingPermission, current?.meta.archivedAt, current?.meta.submissionUnknown, connectedHere, busy, configBusy, openHistoryAction])
   const timelineMatches = timelineOpen ? items.filter(item => ["user", "assistant"].includes(item.kind) && item.text.toLowerCase().includes(timelineQuery.toLowerCase())) : []
-  const historyId = current?.meta.id || ""
-  const historyStart = historyWindows.get(historyId)
-  const firstItem = historyStart === undefined ? Math.max(0, items.length - 120) : historyStart === "" ? 0 : Math.max(0, items.findIndex(item => item.id === historyStart))
-  const visibleItems = useMemo(() => items.slice(firstItem), [items, firstItem])
-  const olderHistory = !!current?.historyPage
-  const earlierCursor = current?.historyPage ? current.historyPage.before : current?.historyBefore
-  const hasEarlierHistory = typeof earlierCursor === "number" && earlierCursor > 0 || !olderHistory && !!current?.historyTruncated
-  const turnActive = !!(current?.turnActive && !olderHistory && !current.pendingInput && !current.pendingPermission)
-  const lastVisibleUser = visibleItems.reduce((last, item, index) => item.kind === "user" ? index : last, -1)
-  const hasActiveReasoning = turnActive && visibleItems.some((item, index) => item.kind === "reasoning" && (lastVisibleUser < 0 || index > lastVisibleUser))
-  useLayoutEffect(() => { if (historyId && current?.historyLoaded !== false && !historyWindows.has(historyId)) historyWindows.set(historyId, items[firstItem]?.id || "") }, [historyId, items, firstItem, current?.historyLoaded])
-  const plan = useMemo(() => current?.historyPage ? undefined : current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript, current?.historyPage])
-  const scroll = useConversationScroll(current?.meta.id ? `${current.meta.id}${olderHistory ? `:history:${earlierCursor ?? "start"}` : ""}` : `${view}:${contextKey}`, current?.historyPage || current?.transcript)
+  const turnActive = !!(current?.turnActive && !current.pendingInput && !current.pendingPermission)
+  const lastVisibleUser = items.reduce((last, item, index) => item.kind === "user" ? index : last, -1)
+  const hasActiveReasoning = turnActive && items.some((item, index) => item.kind === "reasoning" && (lastVisibleUser < 0 || index > lastVisibleUser))
+  const plan = useMemo(() => current?.transcript.slice().reverse().find(event => event.type === "plan")?.plan, [current?.transcript])
+  const scroll = useConversationScroll(current?.meta.id || `${view}:${contextKey}`, current?.transcript, !review)
+  const historyScrollRequest = useRef(false)
+  const loadedScrollEdge = useRef<"top" | "bottom" | null>(null)
+  const onConversationScroll = () => {
+    scroll.onScroll()
+    const viewport = scroll.viewport.current
+    if (!current || !viewport || !current.historyLoaded || current.historyLoading || historyScrollRequest.current) return
+    const older = viewport.scrollTop < 72 && typeof current.historyBefore === "number"
+    const newer = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop < 72 && typeof current.historyAfter === "number"
+    const edge = older ? "top" : newer ? "bottom" : null
+    if (!edge) { loadedScrollEdge.current = null; return }
+    if (loadedScrollEdge.current === edge) return
+    loadedScrollEdge.current = edge
+    historyScrollRequest.current = true
+    if (older) scroll.preparePrepend()
+    void (older ? loadEarlierAgentHistory(current.executionId) : loadLaterAgentHistory(current.executionId))
+      .catch(error => setError(`Conversation history could not be loaded: ${messageOf(error)}`))
+      .finally(() => { historyScrollRequest.current = false })
+  }
+  const onConversationWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    scroll.onWheel(event)
+    const viewport = scroll.viewport.current
+    if (event.deltaY < 0 && viewport && viewport.scrollTop < 72 && loadedScrollEdge.current === "top") {
+      loadedScrollEdge.current = null
+      onConversationScroll()
+    } else if (event.deltaY > 0 && viewport && viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop < 72 && loadedScrollEdge.current === "bottom") {
+      loadedScrollEdge.current = null
+      onConversationScroll()
+    }
+  }
+  useEffect(() => {
+    if (!current || current.historyLoaded === false || !scroll.atLatest || review || document.visibilityState !== "visible" || !scroll.viewport.current?.getClientRects().length) return
+    markAgentThreadRead(current.executionId)
+  }, [current?.executionId, current?.remoteCursor, current?.meta.shared?.conversationSeq, scroll.atLatest, review, scroll.viewport])
   const showComposer = startScreen || !!current
   const composerCollapsed = !!current && !composerExpanded && !draft && !attachments.length
   const { dock: composerDock, compact: compactChat } = useComposerOverlay(!!current)
-  const canSend = hydrated && connectedHere && !olderHistory && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
+  const canSend = hydrated && connectedHere && !busy && !configBusy && (!!draft.trim() || attachments.length > 0) && (current ? idle(current) && !current.meta.archivedAt : preparation.ready && idle(prepared))
   const threads = libraryThreads.filter(row => !!row.meta.archivedAt === archived && (!query || `${threadTitle(row)} ${row.meta.folder} ${hostLabel(row.meta.hostKey)} ${row.agentName}`.toLowerCase().includes(query.toLowerCase())))
-  const projects = [...prefs.projects]
+  const projects = [...new Map([...prefs.projects, ...sharedProjects()].map(project => [projectKey(project), project])).values()].filter(project => !sharedProjectDeleted(project))
   for (const row of libraryThreads) if (!projects.some(p => p.host === row.meta.hostKey && p.folder === row.meta.folder)) projects.push({ host: row.meta.hostKey, folder: row.meta.folder })
   const activity = (p: AgentProject) => Math.max(0, ...libraryThreads.filter(row => row.meta.hostKey === p.host && row.meta.folder === p.folder).map(row => row.meta.activityAt))
-  const sortedProjects = projects.filter(p => (!archived && !query) || threads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)).sort((a, b) => prefs.sort === "name" ? (a.name || folderName(a.folder)).localeCompare(b.name || folderName(b.folder)) : prefs.sort === "recent" ? activity(b) - activity(a) : 0)
+  const sortedProjects = (prefs.sort === "manual" ? orderSharedProjects(projects) : projects).filter(p => (!archived && !query) || threads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)).sort((a, b) => prefs.sort === "name" ? (a.name || folderName(a.folder)).localeCompare(b.name || folderName(b.folder)) : prefs.sort === "recent" ? activity(b) - activity(a) : 0)
   const listMotion = useAgentListMotion(JSON.stringify([sortedProjects.map(projectKey), prefs.collapsed, prefs.sort, threads.map(row => [row.meta.id, row.meta.order, row.meta.pinned, row.meta.activityAt])]))
   const knownServers = [...prefs.servers, ...sessions, ...(session ? [session] : [])]
   const hosts = [...new Map([...projects.map(p => sessionForHost(p.host, knownServers)).filter((s): s is Session => !!s), ...knownServers].map(s => [hostKey(s), s])).values()]
@@ -503,7 +529,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     if (!panel?.contains(document.activeElement)) sidebarToggle.current?.focus({ preventScroll: true })
     return () => { requestAnimationFrame(() => {
       if (!surface.current || !matchMedia("(max-width: 800px)").matches || panel?.getAttribute("aria-modal") === "true") return
-      if (document.activeElement === document.body || panel?.contains(document.activeElement)) surface.current.querySelector<HTMLButtonElement>(".agent-mobile-menu")?.focus({ preventScroll: true })
+      if (document.activeElement === document.body || panel?.contains(document.activeElement)) compactSidebarToggle.current?.focus({ preventScroll: true })
     }) }
   }, [sidebarOverlay])
 
@@ -533,12 +559,13 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   }, [host, connected, transportId, hydrated, customDiscoveryKey])
   useEffect(() => { setCatalogError(""); setConfigError(""); setConfigBusy(false); setHistoryAction(null); setModelMenu(null); setExtraControl(null); setExpandedRequest(null) }, [contextKey, agentId, selected])
   useEffect(() => {
+    historyScrollRequest.current = false; loadedScrollEdge.current = null
     if (current) {
       void subscribeRemoteAgent(current.executionId)
-      void loadAgentHistory(current.executionId).catch(() => {})
+      void loadAgentHistory(current.executionId).catch(error => setError(`Conversation history could not be loaded: ${messageOf(error)}`))
+      void loadAgentChangeHistory(current.executionId)
     }
     setError(""); setMenu(null); setCommandOpen(false)
-    return () => { if (current) clearAgentHistoryPage(current.executionId) }
   }, [selected, current?.executionId])
   useEffect(() => { setReview(false); setTodosOpen(false) }, [selected, view])
   useEffect(() => { if (!current?.todos?.items.length) setTodosOpen(false) }, [current?.meta.id, current?.todos?.items.length])
@@ -572,7 +599,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     resize()
     return () => { observer.disconnect(); cancelAnimationFrame(frame); window.removeEventListener("resize", schedule); document.fonts.removeEventListener("loadingdone", schedule) }
   }, [draft, selected, view, composerCollapsed, attachments.length])
-  const { form: composerForm, setExpanded: setComposerExpanded } = useComposerMotion(composerCollapsed, composerExpanded, changeComposerExpanded)
+  const { form: composerForm, setExpanded: setComposerExpanded } = useComposerMotion(composerCollapsed, composerExpanded, changeComposerExpanded, !mobile)
   useEffect(() => { mounted.current = true; const previous = document.activeElement as HTMLElement | null; surface.current?.focus(); return () => { mounted.current = false; void flushAgentSaves(); if (previous?.isConnected) previous.focus() } }, [])
   useLayoutEffect(() => {
     if (!dialogOpen) return
@@ -642,6 +669,10 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       try {
         const resumeExecutable = prefsRef.current.executables[current.meta.hostKey]?.[current.agentId]?.trim() || undefined
         const next = await resumeAgentThread(current.executionId, (agent, options) => callbacks.current.onStart!(agent, { ...options, ...(current.meta.parentConversationId ? { parentConversationId: current.meta.parentConversationId } : {}), customAgent: customLaunchOptions(agent, current.meta.hostKey, prefsRef.current.customAgents, current.customAgent) }), resumeExecutable)
+        if (!nativeBridge.isDevelopmentAdapter) {
+          try { await syncRemoteAgentLibrary(transportId) }
+          catch (failure) { if (mounted.current && revision === navigation.current) setError(`The saved session resumed, but its library refresh needs retry: ${messageOf(failure)}`) }
+        }
         if (mounted.current && revision === navigation.current) {
           setSelected(next.meta.id)
           setGitRefreshEpoch(epoch => epoch + 1)
@@ -677,7 +708,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     setMenu(null)
     if (matchMedia("(max-width: 800px)").matches) {
       setSidebar(false)
-      requestAnimationFrame(() => surface.current?.querySelector<HTMLButtonElement>(".agent-mobile-menu")?.focus({ preventScroll: true }))
+      requestAnimationFrame(() => compactSidebarToggle.current?.focus({ preventScroll: true }))
     } else {
       setPrefs(old => ({ ...old, sidebarCollapsed: !old.sidebarCollapsed }))
       requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }))
@@ -806,13 +837,12 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       const attachmentContext = sent.length ? `\n\nAttached files uploaded to this server (remote paths; image understanding depends on the selected agent):\n${sent.map(file => `- ${markdownCode(file.name.replace(/[\r\n]/g, " "))}: ${markdownCode(file.remotePath || "")}`).join("\n")}` : ""
       const message = `${text}${attachmentContext}`.trim() || `Please inspect the attached file${sent.length === 1 ? "" : "s"}.${attachmentContext}`
       await sendAgentMessage(row.executionId, message)
-      const cleared = current ? clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
-        : (prefsRef.current.drafts[draftKey] || "").trim() === text.trim() && (prefsRef.current.draftAttachments?.[draftKey] || []).map(file => file.id).join("|") === submittedAttachments.map(file => file.id).join("|")
-      if (!current && cleared) {
-        setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" }, draftAttachments: { ...old.draftAttachments, [draftKey]: [] } }))
-        if (submittedAttachments.length) updateThreadMeta(row.executionId, { draftAttachments: [] })
-      }
-      if (cleared) await Promise.all(submittedAttachments.map(file => removeAttachmentFile(file.id).catch(() => {})))
+       const rowCleared = clearAgentDraft(row.executionId, text, submittedAttachments.map(file => file.id))
+       const workspaceCleared = !!current || (prefsRef.current.drafts[draftKey] || "").trim() === text.trim() && (prefsRef.current.draftAttachments?.[draftKey] || []).map(file => file.id).join("|") === submittedAttachments.map(file => file.id).join("|")
+       if (!current && workspaceCleared) {
+         setPrefs(old => ({ ...old, drafts: { ...old.drafts, [draftKey]: "" }, draftAttachments: { ...old.draftAttachments, [draftKey]: [] } }))
+       }
+       if (rowCleared && workspaceCleared) await Promise.all(submittedAttachments.map(file => removeAttachmentFile(file.id).catch(() => {})))
       setAttachmentProgress({}); setAttachmentError("")
       if (mounted.current && navigation.current === revision) scroll.anchorTurn(row.meta.id)
     })
@@ -835,8 +865,6 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     await run(async () => {
       await changeAgentHistory(target.executionId, action.message.messageId!, action.retry)
       if (mounted.current && navigation.current === revision) {
-        historyWindows.delete(target.meta.id)
-        updateHistoryWindow(value => value + 1)
         setHistoryAction(null)
         setReview(false)
         setFeedback(action.retry ? "Retrying with the selected model" : "Conversation reverted · project files kept")
@@ -856,12 +884,22 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   }
   const moveProject = (p: AgentProject, delta: number) => {
     const next = [...sortedProjects], index = next.findIndex(item => projectKey(item) === projectKey(p)), target = index + delta
-    if (target >= 0 && target < next.length) { [next[index], next[target]] = [next[target], next[index]]; setPrefs(old => ({ ...old, projects: next, sort: "manual" })) }
+    if (target >= 0 && target < next.length) {
+      [next[index], next[target]] = [next[target], next[index]]
+      const visible = new Set(next.map(projectKey)), moved = [...next]
+      const complete = orderSharedProjects(projects).map(project => visible.has(projectKey(project)) ? moved.shift()! : project)
+      void reorderSharedProjects(p.host, complete).then(() => setPrefs(old => ({ ...old, projects: complete, sort: "manual" }))).catch(failure => setError(messageOf(failure)))
+    }
     setMenu(null)
   }
   const finishRename = () => {
     if (!rename) return
-    if (rename.project) setPrefs(old => ({ ...old, projects: projects.map(p => projectKey(p) === rename.id ? { ...p, name: rename.title.trim() || undefined } : p) }))
+    if (rename.project) {
+      const request = rename
+      void updateSharedProject(rename.project, { name: rename.title.trim() }).then(shared => {
+        if (!shared) setPrefs(old => ({ ...old, projects: projects.map(p => projectKey(p) === request.id ? { ...p, name: request.title.trim() || undefined } : p) }))
+      }).catch(failure => { setError(messageOf(failure)); setRename({ ...request, awaitingReview: true }) })
+    }
     else updateThreadMeta(rename.id, { title: rename.title.trim(), titleSource: "user" })
     setRename(null)
   }
@@ -870,6 +908,18 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     setDraft(prompt)
     setView("draft")
     requestAnimationFrame(() => { textarea.current?.focus(); textarea.current?.setSelectionRange(prompt.length, prompt.length) })
+  }
+  const beginProjectRename = (project: AgentProject) => {
+    const saved = sharedProjectNameDraft(project)
+    setRename({ id: projectKey(project), project, title: saved?.title || project.name || folderName(project.folder), awaitingReview: saved?.conflict })
+    setMenu(null)
+  }
+  const removeEmptyProject = (project: AgentProject) => {
+    setMenu(null)
+    void removeSharedProject(project).then(() => {
+      setPrefs(old => ({ ...old, projects: old.projects.filter(item => projectKey(item) !== projectKey(project)) }))
+      if (contextKey === projectKey(project)) home()
+    }).catch(failure => setError(messageOf(failure)))
   }
   const check = checkDiscovery
   const refreshCatalog = async () => {
@@ -883,23 +933,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     } catch (e) { if (navigation.current === revision) setCatalogError(messageOf(e)) }
     finally { setCatalogBusy(false) }
   }
-  const loadEarlier = async () => {
-    scroll.preparePrepend()
-    if (firstItem > 0) {
-      historyWindows.set(historyId, items[Math.max(0, firstItem - 120)]?.id || "")
-      updateHistoryWindow(value => value + 1)
-    } else if (current) {
-      try {
-        await loadEarlierAgentHistory(current.executionId)
-        historyWindows.delete(historyId)
-        updateHistoryWindow(value => value + 1)
-        if (scroll.viewport.current) scroll.viewport.current.scrollTop = 0
-      } catch { /* The history error includes a retry control below. */ }
-    }
-  }
   const findMessage = (id: string) => {
-    const index = items.findIndex(item => item.id === id)
-    if (index >= 0 && index < firstItem) { historyWindows.set(historyId, items[Math.max(0, index - 12)].id); updateHistoryWindow(value => value + 1) }
     setTimelineOpen(false)
     requestAnimationFrame(() => scroll.jumpTo(id))
   }
@@ -919,12 +953,13 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
         return <div className="agent-folder" key={key}>
           <div className={`agent-folder-heading ${contextKey === key ? "is-current" : ""}`} data-agent-row={`project:${key}`}>
             <button className="agent-icon-button agent-folder-toggle" aria-label={`Toggle ${p.name || folderName(p.folder)} conversations`} aria-expanded={!collapsed} title={p.folder} onClick={() => setPrefs(old => ({ ...old, collapsed: collapsed ? old.collapsed.filter(id => id !== key) : [...old.collapsed, key] }))}><AgentIcon name="chevron" size={12} style={{ transform: collapsed ? "" : "rotate(90deg)" }} /></button>
-            {rename?.id === key ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Project name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-project-open" aria-label={`${p.name || folderName(p.folder)} · ${hostLabel(p.host)}`} title={`${hostLabel(p.host)} · ${p.folder}`} onClick={() => openProject(p)}><AgentIcon name="folder" size={15} /><span>{p.name || folderName(p.folder)}</span></button>}
+            {rename?.id === key ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Project name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={() => { if (!rename.awaitingReview) finishRename() }} /></form> : <button className="agent-project-open" aria-label={`${p.name || folderName(p.folder)} · ${hostLabel(p.host)}`} title={`${hostLabel(p.host)} · ${p.folder}`} onClick={() => openProject(p)}><AgentIcon name="folder" size={15} /><span>{p.name || folderName(p.folder)}</span></button>}
             <button className="agent-icon-button agent-project-new" aria-label={`New conversation in ${p.folder}`} title="New conversation here" onClick={() => newThread(p)}><AgentIcon name={prefs.drafts[key] ? "edit" : "plus"} size={14} /></button>
             <button className="agent-icon-button agent-thread-more" aria-label={`Project actions for ${p.folder}`} aria-haspopup="menu" aria-expanded={menu === key} onClick={() => setMenu(menu === key ? null : key)}><AgentIcon name="more" size={14} /></button>
-            {menu === key && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { newThread(p); setMenu(null) }}>New conversation</button><button role="menuitem" onClick={() => { setRename({ id: key, title: p.name || folderName(p.folder), project: p }); setMenu(null) }}>Rename project</button><button role="menuitem" onClick={() => moveProject(p, -1)}>Move project up</button><button role="menuitem" onClick={() => moveProject(p, 1)}>Move project down</button><button role="menuitem" disabled={allThreads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)} onClick={() => { setPrefs(old => ({ ...old, projects: old.projects.filter(item => projectKey(item) !== key) })); setMenu(null); if (contextKey === key) home() }}>Remove empty folder</button></AgentMenu>}
+            {menu === key && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { newThread(p); setMenu(null) }}>New conversation</button><button role="menuitem" onClick={() => beginProjectRename(p)}>Rename project</button><button role="menuitem" onClick={() => moveProject(p, -1)}>Move project up</button><button role="menuitem" onClick={() => moveProject(p, 1)}>Move project down</button><button role="menuitem" disabled={allThreads.some(row => row.meta.hostKey === p.host && row.meta.folder === p.folder)} onClick={() => removeEmptyProject(p)}>Remove empty folder</button></AgentMenu>}
           </div>
           {!collapsed && <div className="agent-folder-threads">{rows.map(row => <div key={row.meta.id} data-agent-row={row.meta.id} className={`agent-thread ${selected === row.meta.id ? "is-selected" : ""}`} onContextMenu={e => { e.preventDefault(); setMenu(row.executionId) }}>
+            {sharedUnread(row) && <span className="agent-thread-unread" role="img" aria-label="Unread activity" />}
             {rename?.id === row.executionId ? <form className="agent-rename" onSubmit={e => { e.preventDefault(); finishRename() }}><input autoFocus aria-label="Conversation name" value={rename.title} onChange={e => setRename({ ...rename, title: e.target.value })} onBlur={finishRename} /></form> : <button className="agent-thread-open" aria-current={selected === row.meta.id ? "page" : undefined} aria-label={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)}`} title={`${threadTitle(row)} · ${row.agentName} · ${statusOf(row)} · ${hostLabel(row.meta.hostKey)} · ${row.meta.folder}`} onClick={() => selectThread(row)}><span className="agent-thread-provider" title={row.agentName}><AgentProviderMark id={row.agentId} size={14} /></span><span className="agent-thread-title">{threadTitle(row)}</span><span className={`agent-thread-indicator ${row.pendingPermission || row.pendingInput ? "attention" : ["error", "submissionUnknown"].includes(row.state) ? "error" : row.turnActive ? "working" : row.meta.pinned ? "pinned" : "idle"}`} aria-hidden="true">{row.meta.pinned ? <AgentIcon name="pin" size={11} /> : <span />}</span>{row.pendingPermission || row.pendingInput ? <span className="agent-attention-label">Needs you</span> : ["error", "submissionUnknown"].includes(row.state) ? <span className="agent-attention-label is-error">{statusOf(row)}</span> : <time className="agent-thread-time" dateTime={new Date(row.meta.activityAt).toISOString()}>{relativeActivity(row.meta.activityAt)}</time>}</button>}
             <button className="agent-icon-button agent-thread-more" aria-label={`Actions for ${threadTitle(row)}`} aria-haspopup="menu" aria-expanded={menu === row.executionId} onClick={() => setMenu(menu === row.executionId ? null : row.executionId)}><AgentIcon name="more" size={14} /></button>
             {menu === row.executionId && <AgentMenu root={surface.current}><button role="menuitem" onClick={() => { setRename({ id: row.executionId, title: threadTitle(row) }); setMenu(null) }}><AgentIcon name="edit" />Rename</button><button role="menuitem" onClick={() => { updateThreadMeta(row.executionId, { pinned: !row.meta.pinned }); setMenu(null) }}><AgentIcon name="pin" />{row.meta.pinned ? "Unpin" : "Pin"}</button><button role="menuitem" onClick={() => moveThread(row, -1)}>Move up</button><button role="menuitem" onClick={() => moveThread(row, 1)}>Move down</button><hr /><button role="menuitem" disabled={row.turnActive} onClick={() => archiveThread(row)}><AgentIcon name="archive" />{row.meta.archivedAt ? "Restore" : "Archive"}</button><button role="menuitem" className="is-destructive" onClick={() => { setDeleting(row); setMenu(null) }}><AgentIcon name="trash" />Delete</button></AgentMenu>}
@@ -994,8 +1029,21 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     <main className={`agent-main ${review && current ? "has-review" : ""}`} inert={sidebarOverlay || dialogOpen}>
       <div className="agent-sr-only" role="status" aria-atomic="true">{current?.pendingPermission ? `Approval needed: ${current.pendingPermission.title}` : current?.pendingInput ? `Agent question: ${current.pendingInput.title}` : ""}</div>
 
-      {mobile ? <header className="mobile-detail-bar mobile-agent-header"><button className="mobile-icon-button" aria-label={review ? "Back to conversation" : "Back to threads"} onClick={review ? closeReview : onClose}><AgentIcon name="back" size={22} /></button><div><h1>{review ? "Changes" : current ? threadTitle(current) : view === "settings" ? "Agent settings" : "New task"}</h1>{current ? <p>{topbarStatus}</p> : <p>{context ? projectName : view === "settings" ? "Your remote providers" : "Choose a remote project"}</p>}</div>{current && !review && <button className="mobile-icon-button" aria-label="Review changes" onClick={event => openReview("conversation", event.currentTarget)}><AgentIcon name="changes" size={21} /></button>}{current && !review && <button className="mobile-icon-button" aria-label="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" size={21} /></button>}</header> : <header className={`agent-topbar agent-topbar--stacked agent-topbar--compact${review && current ? " is-reviewing" : ""}`} data-tauri-drag-region>
+      {mobile ? <header className="mobile-detail-bar mobile-agent-header">
+        <button className="mobile-icon-button" aria-label={review ? "Back to conversation" : "Back to threads"} onClick={review ? closeReview : onClose}><AgentIcon name="back" size={20} /></button>
+        <div className="mobile-agent-heading">
+          <div className="mobile-agent-title-row">
+            {current && <AgentProviderMark id={current.agentId} size={17} />}
+            <h1>{review ? "Changes" : current ? threadTitle(current) : view === "settings" ? "Agent settings" : "New task"}</h1>
+            {current && topbarStatus}
+          </div>
+          {!current && <p>{context ? projectName : view === "settings" ? "Your remote providers" : "Choose a remote project"}</p>}
+        </div>
+        {current && !review && <button className="mobile-icon-button" aria-label="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" size={19} /></button>}
+        {current && !review && <button className="mobile-icon-button" aria-label="Review changes" onClick={event => openReview("conversation", event.currentTarget)}><AgentIcon name="changes" size={19} /></button>}
+      </header> : <header className={`agent-topbar agent-topbar--stacked agent-topbar--compact${review && current ? " is-reviewing" : ""}`} data-tauri-drag-region>
         <div className="agent-topbar-leading agent-topbar-leading--focused">
+          {narrowNavigation && <button ref={compactSidebarToggle} className="agent-icon-button agent-mobile-menu" aria-label="Show projects" aria-expanded={sidebar} aria-controls="agent-project-navigation" onClick={() => revealProjects()}><AgentIcon name="panel" size={17} /></button>}
           {review && current ? <>
             <button type="button" className="agent-review-back" aria-label="Back to chat" onClick={closeReview}><AgentIcon name="back" size={15} /><span>Chat</span></button>
             <span className="agent-review-topbar-divider" aria-hidden="true" />
@@ -1011,7 +1059,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
           {current && <>
             {topbarStatus}
             {!review && <>
-              {!isSubagent && <button type="button" className="agent-subagents-topbar" onClick={newSubagent}><AgentIcon name="plus" size={14} /><span>New subagent</span></button>}
+              {!isSubagent && <button type="button" className="agent-subagents-topbar" aria-label="New subagent" onClick={newSubagent}><AgentIcon name="plus" size={14} /><span>New subagent</span></button>}
               <button className="agent-icon-button" aria-label="Find a message" title="Find a message" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}><AgentIcon name="search" /></button>
               <button className="agent-icon-button agent-topbar-changes-icon" aria-label="Review changes" title="Review changes" aria-expanded={false} onClick={event => openReview("repository", event.currentTarget)}><AgentIcon name="changes" size={16} /></button>
             </>}
@@ -1022,12 +1070,15 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       </header>}
 
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
+      {current?.meta.shared && (current.meta.sharedPending?.length || current.meta.sharedSyncError) ? <div className="agent-storage-notice" role="status"><span>{current.meta.sharedSyncError || "Saving organization changes to this account…"}</span>{!current.meta.sharedDeleted && <button className="agent-button" onClick={() => void retrySharedChanges(current.executionId)}>{current.meta.sharedConflict ? "Apply my saved changes" : "Retry sync"}</button>}</div> : null}
+      {syncNotice}
+      {context && sharedProjectDeleted(context) && <div className="agent-storage-notice" role="status">This project was removed from the shared account. Your unfinished draft remains on this device. Add or choose a project before sending it.</div>}
       <div className="agent-workbody">
       <div className={`agent-chat ${startScreen ? "is-launch" : ""} ${startScreen && recent.length ? "has-recents" : ""}`} inert={review || undefined} aria-hidden={review || undefined}>
       {view === "settings" ? <section className="agent-setup">
         <div className="agent-settings-heading"><h1>Agent settings</h1><p>Use the coding agents already installed on your server.</p></div>
         <label className="agent-field">Server<select aria-label="Settings server" value={host} onChange={e => selectHost(e.target.value)}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label>
-        {session && connectionNotice}
+        {session && !(mobile && folderOpen) && connectionNotice}
         <div className="agent-settings-list">{AGENTS.map(provider => {
           const info = discovery.agents.find(row => row.agentId === provider.id)
           const checkedAt = info?.checkedAt ?? discovery.checkedAt
@@ -1047,42 +1098,40 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       </section> : <>
         {current && !isSubagent && <AgentSubagents children={childThreads} onOpen={selectThread} onCreate={newSubagent} />}
         {isSubagent && <div className="agent-subagent-context"><AgentIcon name="folder" size={13} /><span>Subagent of <strong>{parentThread ? threadTitle(parentThread) : "unavailable parent"}</strong></span><span>·</span><span>Shared project folder</span></div>}
-        <div ref={scroll.viewport} className={`agent-conversation${current ? " agent-conversation--hierarchy" : ""}`} tabIndex={0} aria-label="Conversation" onScroll={scroll.onScroll} onWheel={scroll.onWheel}>
+        {mobile && current && !current.turnActive && !current.pendingInput && !current.pendingPermission && changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}
+        <div ref={scroll.viewport} className={`agent-conversation${current ? " agent-conversation--hierarchy" : ""}${mobile ? " agent-conversation--mobile" : ""}`} tabIndex={0} aria-label="Conversation" onScroll={onConversationScroll} onWheel={onConversationWheel}>
           <div ref={scroll.content} className="agent-message-list">
-            {current && <>
-              {(!firstItem && hasEarlierHistory || olderHistory || current.historyLoading) && <div className="agent-history-page">
-                {!firstItem && hasEarlierHistory && <button type="button" disabled={current.historyLoading} onClick={() => void loadEarlier()}>{current.historyLoading ? "Loading saved activity…" : "Load earlier saved activity"}</button>}
-                {current.historyLoading && !hasEarlierHistory && <span role="status">Loading saved activity…</span>}
-                {olderHistory && <button type="button" className="agent-link-button" onClick={() => { clearAgentHistoryPage(current.executionId); historyWindows.delete(historyId); updateHistoryWindow(value => value + 1); requestAnimationFrame(scroll.follow) }}>Back to latest activity</button>}
-              </div>}
-              {current.historyError && <div className="agent-history-page" role="alert"><span>{current.historyError}</span><button type="button" disabled={current.historyLoading} onClick={() => void (current.historyLoaded === false ? loadAgentHistory(current.executionId) : loadEarlierAgentHistory(current.executionId)).catch(() => {})}>Retry loading history</button></div>}
-              {olderHistory && <p className="agent-muted">Viewing an older saved page. Return to latest activity to reply. Full history remains saved on this device.</p>}
-            </>}
-            {current ? <>{firstItem > 0 && <div className="agent-history-page"><button onClick={loadEarlier}>Load earlier activity <span>{firstItem} more</span></button><button className="agent-link-button" onClick={() => { setTimelineQuery(""); setTimelineOpen(true) }}>Find a message</button></div>}<AgentTimeline items={visibleItems} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}{changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}</>
-              : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
+            {current ? <><AgentTimeline items={items} agentName={current.agentName} agentId={current.agentId} plan={plan} actions={historyActions} requests={requestActions} turnActive={turnActive} />{!items.length && <div className="agent-thread-empty"><AgentProviderMark id={current.agentId} size={34} /><h2>{current.state === "connecting" ? `Connecting ${current.agentName}…` : idle(current) ? `${current.agentName} is ready` : current.state === "saved" ? "Saved conversation" : "Agent connection unavailable"}</h2><p>{current.state === "connecting" ? "Loading the models and commands from your server." : idle(current) ? "Send a message to get started." : "Your conversation remains available on this device."}</p></div>}{turnActive && !hasActiveReasoning && <div className="agent-working" role="status"><AgentProviderMark id={current.agentId} size={16} /><span className="agent-status-dot working" />{current.lastError?.includes("Cancellation") ? "Stopping…" : "Working…"}</div>}</>
+                : startScreen ? <div className="agent-welcome"><h1>{mobile ? "What’s on your mind?" : <>What will you <em>build?</em></>}</h1>{context && <button className="agent-welcome-project" title={`${hostLabel(context.host)} · ${context.folder}`} onClick={() => setProjectChoices(!projectChoices)}><AgentIcon name="folder" size={16} />{projectName}<AgentIcon name="chevron" size={12} style={{ transform: "rotate(90deg)" }} /></button>}</div>
                 : <div className="agent-home"><div className="agent-home-heading"><h1>Archived conversations</h1><p>Your previous work, saved on this device.</p></div>{recent.length ? <div className="agent-recents">{recent.map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><AgentProviderMark id={row.agentId} size={18} /><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</div> : <p className="agent-muted">Nothing archived yet.</p>}</div>}
+            {!mobile && current && !current.turnActive && !current.pendingInput && !current.pendingPermission && changes.length > 0 && <AgentChangeSummary changes={changes} open={trigger => openReview("conversation", trigger)} />}
           </div>
         </div>
+        {!mobile && current && !scroll.atLatest && <button type="button" className="agent-latest-activity" aria-label="Latest activity" onClick={() => { scroll.follow(); scroll.viewport.current?.focus({ preventScroll: true }) }}><AgentIcon name="arrow" size={14} /><span>Jump to latest</span></button>}
         {showComposer && <div ref={composerDock} className={`agent-composer-area${startScreen ? " is-compact" : ""}${composerCollapsed ? " is-collapsed" : ""}`}>
-          {!scroll.atLatest && current && !activeRequestItem && <button className="agent-jump" onClick={scroll.follow}>Latest activity <AgentIcon name="arrow" size={13} style={{ transform: "rotate(180deg)" }} /></button>}
           <div className="agent-composer-notices" role="region" tabIndex={0} aria-label="Agent notices and tasks">
           {activeRequestItem && current && <button className={`agent-request-jump ${activeRequestKind === "permission" ? "is-approval" : "is-question"}`} onClick={() => {
             if (matchMedia("(max-height: 560px)").matches) setExpandedRequest(activeRequestItem.id)
-            else { findMessage(activeRequestItem.id); requestAnimationFrame(() => surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(activeRequestItem.id)}"] .agent-request-expand`)?.focus({ preventScroll: true })) }
+            else { findMessage(activeRequestItem.id); requestAnimationFrame(() => {
+              const card = surface.current?.querySelector<HTMLElement>(`[data-timeline-id="${CSS.escape(activeRequestItem.id)}"]`)
+              card?.querySelector<HTMLElement>(".agent-request-expand")?.focus({ preventScroll: true })
+              if (card && !matchMedia("(prefers-reduced-motion: reduce)").matches) card.animate([{ boxShadow: "0 0 0 3px rgba(226, 159, 177, .36)" }, { boxShadow: "0 0 0 3px rgba(226, 159, 177, 0)" }], { duration: 900, easing: "ease-out" })
+            }) }
           }}><span className="agent-status-dot attention" />{activeRequestKind === "permission" ? "Approval needed" : "Your answer is needed"}<span>Review request</span><AgentIcon name="chevron" size={13} /></button>}
-           {current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{restoring || !connectedHere ? "Connecting to the server to restore this agent…" : "Agent execution is kept on your server"}</span></div> : current?.state === "saved" ? <div className="agent-saved-notice" role="status"><span><AgentIcon name={restoring ? "refresh" : "check"} size={15} />{restoring ? "Restoring this conversation from the server…" : canResumeAgentThread(current) ? connectedHere ? "Resuming the saved provider session…" : "Connecting to the saved server…" : "Saved on this device"}</span></div> : null}
-          {session && connectionNotice}
+            {legacyConversation && current ? <div className="agent-storage-notice agent-recovery-notice" role="status"><span>{current.resumable && current.agentSessionId ? "Older desktop worker. Upgrade resumes the same saved provider session after verifying the old worker and provider have stopped. Your draft stays here; no prompt is resent." : "This older desktop conversation is read-only until its saved provider session is verified. Refresh its saved session details; the desktop connection and your draft are kept."}</span>{current.resumable && current.agentSessionId ? <button className="agent-button" type="button" disabled={busy || restoring || configBusy || !connectedHere || !onStart || !canResumeAgentThread(current)} onClick={resumeSavedSession}>{restoring ? "Upgrading…" : "Upgrade saved session"}</button> : <button className="agent-button" type="button" disabled={busy || !connectedHere || !transportId} onClick={() => void run(() => syncRemoteAgentLibrary(transportId!))}>Refresh saved session</button>}</div> : current?.persistent && ["saved", "detached", "connecting"].includes(current.state) ? <div className="agent-saved-notice" role="status"><span><AgentIcon name="refresh" size={15} />{restoring || !connectedHere ? "Connecting to the server to restore this agent…" : "Agent execution is kept on your server"}</span></div> : current?.state === "saved" ? <div className="agent-saved-notice" role="status"><span><AgentIcon name={restoring ? "refresh" : "check"} size={15} />{restoring ? "Restoring this conversation from the server…" : canResumeAgentThread(current) ? connectedHere ? "Resuming the saved provider session…" : "Connecting to the saved server…" : "Saved on this device"}</span></div> : null}
+          {session && !(mobile && folderOpen) && connectionNotice}
             {(error || current?.lastError && ["error", "submissionUnknown"].includes(current.state)) && <div className="agent-error" role="alert">
               <span>{error || current?.lastError}</span>
               {current?.turnActive && <p>The remote agent may still be working. Stop it to request cancellation; don’t send a duplicate prompt.</p>}
-              {current?.recoveryReason === "workerUnavailable" ? <>
+              {legacyConversation ? null : current?.recoveryReason === "workerUnavailable" ? <>
                 <p>{current.state === "submissionUnknown" || current.meta.submissionUnknown || current.recoveryRequired
                   ? "The last operation was not confirmed. Inspect the provider’s saved session before continuing; nothing will be resent."
                   : current.resumable && current.agentSessionId
                     ? "Your conversation and draft are kept. Resume the saved provider session without resending the last message."
-                    : "Your saved conversation is read-only. This provider did not confirm a resumable session; start a new conversation to continue."}</p>
+                    : "Your saved conversation is read-only until its provider session is verified. Refresh the saved session details; your history and draft are kept."}</p>
                 {current.customAgent && !prefs.customAgents[current.meta.hostKey]?.some(agent => agent.id === current.agentId) && <button className="agent-button" onClick={() => setCustomSetup(current.customAgent!)}>Configure agent again</button>}
                 {current.resumable && current.agentSessionId && <button className="agent-button" type="button" disabled={busy || restoring || configBusy || !connectedHere || !onStart || !canResumeAgentThread(current)} onClick={resumeSavedSession}>{restoring ? "Resuming…" : "Resume saved session"}</button>}
+                {(!current.resumable || !current.agentSessionId) && <button className="agent-button" type="button" disabled={busy || !connectedHere || !transportId} onClick={() => void run(() => syncRemoteAgentLibrary(transportId!))}>Refresh saved session</button>}
               </> : current && ["error", "submissionUnknown"].includes(current.state) && current.persistent && connectedHere && <button className="agent-button" type="button" disabled={busy} onClick={() => void run(() => reconcileAgentThread(current.executionId))}>Check remote status</button>}
             </div>}
           {!current && preparing && <div className={`agent-preparation ${preparation.error || prepared?.state === "error" ? "has-error" : ""}`} role="status"><span className={`agent-status-dot ${preparation.error || prepared?.state === "error" ? "attention" : preparation.ready ? "connected" : "working"}`} /><span>{preparation.error || (prepared?.state === "error" ? prepared.lastError : preparation.ready ? `${definition.label} connected · choose your model` : `Connecting ${definition.label} and loading models…`)}</span>{(preparation.error || prepared?.state === "error") && <button type="button" onClick={() => preparation.retry()}>Retry connection</button>}</div>}
@@ -1107,13 +1156,14 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
             {attachments.length > 0 && <p className="agent-attachment-note">Files upload to this server and are shared by path. Image understanding depends on the selected agent.</p>}
             {draggingFiles && <div className="agent-drop-hint" aria-hidden="true"><AgentIcon name="attach" size={17} />Drop files to attach</div>}
             <textarea ref={textarea} aria-label="Message agent" aria-description={mobile ? "Enter for a new line. Use Send to submit. Type / for commands." : "Enter to send. Shift+Enter for a new line. Type / for commands."} enterKeyHint={mobile ? "enter" : undefined} rows={2} placeholder={current ? "Ask for a change or a follow-up…" : "Describe a task, ask a question, or just start building…"} value={draft} onPaste={e => { const files = Array.from(e.clipboardData.files); if (files.length) { e.preventDefault(); void addAttachments(files); return } void readClipboardImageFile().then(file => { if (file) void addAttachments([file]) }) }} onChange={e => { setDraft(e.target.value); if (e.target.value === "/" || e.target.value === "@") { setCommandQuery(e.target.value === "@" ? "skill:" : ""); setCommandOpen(true) } }} onKeyDown={e => { if (!mobile && e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }} />
-            <div className="agent-composer-toolbar">
+            <div className="agent-composer-toolbar mobile-chatpill--stack" data-provider-picker={!current ? "true" : undefined}>
               <div className="agent-composer-controls">
-                {!current && <ConfigPicker option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} />}
-                  <AgentModelPicker key={activeAgent?.executionId || configurationKey} provider={current ? { id: current.agentId, name: current.agentName } : undefined} model={modelControl} open={modelMenu !== null} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : current?.state === "error" && idle(current) ? "This turn stopped; you can change its settings or continue" : "Connect the agent to configure its model"} change={changeConfig} />
-                  {reasoningControl && <AgentReasoningBars key={`${activeAgent?.executionId}:${reasoningControl.id}`} option={reasoningControl} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its reasoning" : current?.turnActive ? "Wait for the agent to finish before changing its reasoning" : "Connect the agent to configure its reasoning"} change={changeConfig} />}
+                {!current && <ConfigPicker className="agent-provider-picker" option={providerOption} icon={<AgentProviderMark id={agentId} size={20} />} disabled={busy || configBusy} change={(_, value) => setPrefs(old => ({ ...old, agent: String(value) }))} />}
+                <AgentModelPicker key={activeAgent?.executionId || configurationKey} provider={current ? { id: current.agentId, name: current.agentName } : undefined} model={modelControl} open={modelMenu !== null} onOpenChange={open => { setModelMenu(open ? "model" : null); if (open) { setCommandOpen(false); setProjectChoices(false); setAgentDetailsOpen(false) } }} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its model" : current?.turnActive ? "Wait for the agent to finish before changing its model" : current?.state === "error" && idle(current) ? "This turn stopped; you can change its settings or continue" : "Connect the agent to configure its model"} change={changeConfig} />
+                {reasoningControl && <AgentReasoningBars key={`${activeAgent?.executionId}:${reasoningControl.id}`} option={reasoningControl} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} disabledReason={current?.state === "saved" ? "Restore this conversation before changing its reasoning" : current?.turnActive ? "Wait for the agent to finish before changing its reasoning" : "Connect the agent to configure its reasoning"} change={changeConfig} />}
                 {agentModeControl && <ConfigPicker className="agent-mode-picker" key={`${activeAgent?.executionId}:${agentModeControl.id}`} option={agentModeControl} label="Agent" searchable={false} disabled={!connectedHere || !idle(activeAgent) || busy || configBusy || !current && !preparation.ready} change={changeSecondaryConfig} icon={<AgentIcon name="code" size={15} />} />}
               </div>
+              {composerCollapsed && <button type="button" className={mobile ? "mobile-compose-trigger" : "agent-compose-prompt"} aria-label="Write a message" onClick={() => { setComposerExpanded(true); requestAnimationFrame(() => textarea.current?.focus({ preventScroll: true })) }}>{mobile ? <AgentIcon name="compose" size={20} /> : "Write a follow-up…"}</button>}
               <div className="agent-composer-actions"><button type="button" className="agent-icon-button" aria-label="Commands and skills" title="Commands and skills · Ctrl/⌘+P" aria-haspopup="listbox" aria-expanded={commandOpen} onClick={() => { setProjectChoices(false); setCommandQuery(""); setCommandOpen(!commandOpen) }}><AgentIcon name="command" /></button>{current?.turnActive ? <button className="agent-send agent-stop" type="button" aria-label="Stop agent" title="Stop agent" disabled={busy} onClick={() => void run(() => cancelAgentTurn(current.executionId))}><AgentIcon name="stop" size={14} /></button> : <button className="agent-send" type="submit" aria-label="Send message" title={canSend ? "Send message" : !context ? "Choose a project to send" : "Send message"} disabled={!canSend}><AgentIcon name="arrow" size={19} /></button>}</div>
             </div>
           </form>
@@ -1130,7 +1180,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
         {startScreen && <div className="agent-launch-extras"><div className="agent-starters">{promptStarters.map(starter => <button key={starter.label} disabled={!!draft.trim() || busy} onClick={() => useStarter(starter.prompt)}><span>{starter.label}</span></button>)}</div>{recent.length > 0 && <section className="agent-recents"><div className="agent-section-label"><span>Recent conversations</span><button className="agent-link-button" onClick={() => revealProjects(true)}>View all {recent.length} conversations <AgentIcon name="chevron" size={12} /></button></div>{recent.slice(0, 3).map(row => <button key={row.meta.id} className="agent-recent" onClick={() => selectThread(row)}><span><strong>{threadTitle(row)}</strong><small>{folderName(row.meta.folder)} · {row.agentName}</small></span><time>{relativeActivity(row.meta.activityAt)}</time><AgentIcon name="chevron" size={13} /></button>)}</section>}</div>}
       </>}
       </div>
-      {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} />}
+      {review && current && <AgentChanges key={current.meta.id} changes={changes} mode={reviewMode} onModeChange={setReviewMode} repositoryCount={repositoryCount} conversationId={current.meta.id} repository={<AgentRepositoryChanges host={hostLabel(current.meta.hostKey)} cwd={repositoryCwd} active={repositoryEnabled} connected={repositoryConnected} status={git.status} diff={git.diff} refresh={git.refresh} loadDiff={git.loadDiff} />} />}
       </div>
       {(undo || feedback) && <div className="agent-toast" role="status">{undo ? `Conversation ${undo.at ? "restored" : "archived"}` : feedback}{undo && <button onClick={() => { updateThreadMeta(undo.id, { archivedAt: undo.at }); setUndo(null) }}>Undo</button>}<button className="agent-icon-button" aria-label="Dismiss notification" onClick={() => { setUndo(null); setFeedback("") }}><AgentIcon name="close" size={13} /></button></div>}
     </main>
@@ -1138,7 +1188,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     {expandedItem && <div className="agent-confirm-backdrop agent-request-backdrop"><AgentRequest key={expandedItem.id} item={expandedItem} actions={requestActions} expanded /></div>}
     {extraControl && <div className="agent-confirm-backdrop"><section className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-label={fields.find(option => option.id === extraControl)?.name || "Agent control"}><div className="agent-modal-heading"><h2>{fields.find(option => option.id === extraControl)?.name || "Agent control"}</h2><button className="agent-icon-button" aria-label="Close agent control" onClick={() => setExtraControl(null)}><AgentIcon name="close" /></button></div>{fields.filter(option => option.id === extraControl).map(option => <div key={option.id}>{option.description && <p>{option.description}</p>}<ConfigPicker option={option} disabled={!connectedHere || !idle(activeAgent) || configBusy} change={changeSecondaryConfig} /></div>)}{configError && <p className="agent-model-error" role="alert">{configError}</p>}</section></div>}
     {historyAction && current && <div className="agent-confirm-backdrop"><section className="agent-modal agent-history-confirm" role="dialog" aria-modal="true" aria-labelledby="agent-history-title"><h2 id="agent-history-title">{historyAction.retry ? "Retry this message?" : "Revert to this message?"}</h2><p>{historyAction.retry ? "Return to before this message and send it again with the currently selected model." : "Return to before this message. Its replies and later messages will leave the active conversation."}</p><blockquote>{historyAction.message.text.slice(0, 240)}{historyAction.message.text.length > 240 ? "…" : ""}</blockquote><p>Project files stay as they are. {current.agentId === "pi" ? "Pi continues from a fork at this point." : "This updates the agent’s conversation history."}</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" disabled={busy} onClick={() => setHistoryAction(null)}>Cancel</button><button className="agent-primary" disabled={busy || !connectedHere || !canChangeAgentHistory(current, historyAction.message.messageId || "", historyAction.retry)} onClick={() => void applyHistoryAction()}>{busy ? "Updating history…" : historyAction.retry ? "Retry message" : "Revert conversation"}</button></div></section></div>}
-    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><p id="agent-history-search-scope" className="agent-muted">Searches the loaded page. Load earlier saved activity to search older messages.</p><label className="agent-field">Search this conversation<input ref={timelineSearch} aria-describedby="agent-history-search-scope" autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
+    {timelineOpen && <div className="agent-confirm-backdrop"><section className="agent-modal" role="dialog" aria-modal="true" aria-label="Find a message"><div className="agent-modal-heading"><h2>Find a message</h2><button className="agent-icon-button" aria-label="Close message search" onClick={() => setTimelineOpen(false)}><AgentIcon name="close" /></button></div><label className="agent-field">Search this conversation<input ref={timelineSearch} autoFocus value={timelineQuery} onChange={e => setTimelineQuery(e.target.value)} /></label><div className="agent-timeline-results">{timelineMatches.length ? timelineMatches.map(item => <button key={item.id} onClick={() => findMessage(item.id)}><small>{item.kind === "user" ? "You" : current?.agentName}</small><span>{item.text.slice(0, 160)}</span></button>) : <div className="agent-search-empty"><p role="status">{timelineQuery ? `No messages match “${timelineQuery}”.` : "No messages in this conversation yet."}</p>{timelineQuery && <button className="agent-button" onClick={() => { setTimelineQuery(""); timelineSearch.current?.focus() }}>Clear search</button>}</div>}</div></section></div>}
     {customSetup && <CustomAgentSetup key={customSetup.id} agent={customSetup} serverName={hosts.find(server => hostKey(server) === customSetup.hostKey)?.name || hostLabel(customSetup.hostKey)} connected={connected && host === customSetup.hostKey} onTest={agent => callbacks.current.onCheck(agent.id, undefined, agent, true)} onClose={() => setCustomSetup(null)} onSave={agent => {
       setPrefs(old => ({ ...old, customAgents: { ...old.customAgents, [agent.hostKey]: [...(old.customAgents[agent.hostKey] || []).filter(row => row.id !== agent.id), agent] } }))
       setCustomSetup(null)

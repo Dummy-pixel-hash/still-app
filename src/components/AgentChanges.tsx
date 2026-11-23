@@ -26,12 +26,13 @@ export function AgentChangeSummary({ changes, open }: { changes: AgentChange[]; 
 
 export type AgentChangesMode = "repository" | "conversation"
 
-export default function AgentChanges({ changes, mode, onModeChange, repository, repositoryCount }: {
+export default function AgentChanges({ changes, mode, onModeChange, repository, repositoryCount, conversationId }: {
   changes: AgentChange[]
   mode: AgentChangesMode
   onModeChange: (mode: AgentChangesMode) => void
   repository: ReactNode
   repositoryCount?: number
+  conversationId: string
 }) {
   const total = changeTotals(changes)
 
@@ -62,7 +63,7 @@ export default function AgentChanges({ changes, mode, onModeChange, repository, 
     </header>
     <div id="agent-review-panel" className="agent-review-tabpanel" role="tabpanel" aria-label="Repository changes" aria-labelledby="agent-review-tab-repository" hidden={mode !== "repository"}>{repository}</div>
     <div id="agent-conversation-review-panel" className="agent-review-tabpanel" role="tabpanel" aria-label="Conversation changes" aria-labelledby="agent-review-tab-conversation" hidden={mode !== "conversation"}>
-      <AgentConversationChanges changes={changes} />
+       <AgentConversationChanges changes={changes} conversationId={conversationId} />
     </div>
   </section>
 }

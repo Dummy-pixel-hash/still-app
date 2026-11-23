@@ -2,7 +2,7 @@
 //! transcript (or all conversations' transcripts) just to open the library.
 use serde::{de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashSet, fmt, fs::{self, File, OpenOptions}, io::{self, BufRead, BufReader, Read, Write}, ops::Range, path::Path};
+use std::{collections::{HashMap, HashSet}, fmt, fs::{self, File, OpenOptions}, io::{self, BufRead, BufReader, Read, Write}, ops::Range, path::Path};
 
 pub const PAGE_EVENTS: usize = 200;
 pub const PAGE_BYTES: usize = 512 * 1024;
@@ -100,18 +100,28 @@ pub fn index(path: &Path, warnings: &mut Vec<String>) -> Result<Index, String> {
 }
 
 pub fn page(path: &Path, before: Option<usize>, warnings: &mut Vec<String>) -> Result<Value, String> {
+    window(path, before, None, warnings)
+}
+
+pub fn window(path: &Path, before: Option<usize>, after: Option<usize>, warnings: &mut Vec<String>) -> Result<Value, String> {
     let index = index(path, warnings)?;
     let total = index.total();
-    let end = before.unwrap_or(total).min(total);
-    let start = end.saturating_sub(PAGE_EVENTS);
+    let (start, end) = if let Some(after) = after {
+        let start = after.min(total);
+        (start, start.saturating_add(PAGE_EVENTS).min(total))
+    } else {
+        let end = before.unwrap_or(total).min(total);
+        (end.saturating_sub(PAGE_EVENTS), end)
+    };
     let selected = index.selection(start, end);
     let mut projection = Projection { selected: Some(&selected), ..Projection::default() };
     scan(path, &mut projection, |_| Ok(()), warnings)?;
-    let mut bytes = 0;
+    let mut bytes: usize = 0;
     let mut transcript = Vec::new();
     // Prefer the newest events when a page hits the byte budget. The next
     // cursor includes every omitted event; nothing on disk is truncated.
-    for (_, mut event) in projection.picked.into_iter().rev() {
+    let picked = if after.is_some() { projection.picked } else { projection.picked.into_iter().rev().collect() };
+    for (_, mut event) in picked {
         if event["type"] == "userMessage" {
             if let Some((_, message)) = index.messages.iter().find(|(_, message)| message["messageId"] == event["messageId"]) {
                 if let Some(checkpoint) = message.get("checkpoint") { event["checkpoint"] = checkpoint.clone(); }
@@ -123,15 +133,42 @@ pub fn page(path: &Path, before: Option<usize>, warnings: &mut Vec<String>) -> R
         bytes += size;
         transcript.push(event);
     }
-    transcript.reverse();
-    let before = end.saturating_sub(transcript.len());
+    if after.is_none() { transcript.reverse(); }
+    let actual_start = if after.is_some() { start } else { end.saturating_sub(transcript.len()) };
+    let actual_end = actual_start.saturating_add(transcript.len()).min(total);
     let mut row = index.row;
     row["transcript"] = json!(transcript);
     row["historyLoaded"] = json!(true);
-    row["historyBefore"] = if before > 0 { json!(before) } else { Value::Null };
+    row["historyBefore"] = if actual_start > 0 { json!(actual_start) } else { Value::Null };
+    row["historyAfter"] = if actual_end < total { json!(actual_end) } else { Value::Null };
     row["historyTotal"] = json!(total);
-    row["historyLatest"] = json!(end == total);
+    row["historyLatest"] = json!(actual_end == total);
     Ok(row)
+}
+
+pub fn change_summaries(path: &Path) -> Result<Vec<Value>, String> {
+    let mut projection = Projection { collect_changes: true, ..Projection::default() };
+    scan(path, &mut projection, |_| Ok(()), &mut Vec::new())?;
+    Ok(projection.change_summaries)
+}
+
+pub fn change_details(path: &Path, target: &str) -> Result<Vec<Value>, String> {
+    let mut summary = Projection { collect_changes: true, ..Projection::default() };
+    scan(path, &mut summary, |_| Ok(()), &mut Vec::new())?;
+    let selected: HashSet<usize> = summary.change_ordinals.get(target).into_iter().flatten().copied().collect();
+    if selected.is_empty() { return Ok(Vec::new()); }
+    let mut projection = Projection { selected: Some(&selected), ..Projection::default() };
+    scan(path, &mut projection, |_| Ok(()), &mut Vec::new())?;
+    let mut bytes: usize = 0;
+    let mut events = Vec::new();
+    for (_, event) in projection.picked.into_iter().rev() {
+        let size = json_size(&event);
+        if bytes.saturating_add(size) > PAGE_BYTES { break; }
+        bytes += size;
+        events.push(event);
+    }
+    events.reverse();
+    Ok(events)
 }
 
 /// Prompt identities/checkpoints need to outlive the bounded output window.
@@ -203,6 +240,10 @@ struct Projection<'a> {
     selected: Option<&'a HashSet<usize>>,
     picked: Vec<(usize, Value)>,
     full: bool,
+    collect_changes: bool,
+    change_summaries: Vec<Value>,
+    change_tools: HashMap<String, Vec<String>>,
+    change_ordinals: HashMap<String, Vec<usize>>,
 }
 #[derive(Default)]
 struct ProjectedRecord { op: String, row: Value, initial: Vec<(usize, Value)>, fields: Value, meta: Value, event: Option<(usize, Value)> }
@@ -220,6 +261,10 @@ impl<'de> DeserializeSeed<'de> for EventSeed<'_, '_> {
             } else { IgnoredAny::deserialize(deserializer)?; }
             return Ok((ordinal, Value::Null));
         }
+        if self.0.collect_changes {
+            let event = ChangeEventSeed(self.0, ordinal).deserialize(deserializer)?;
+            return Ok((ordinal, event));
+        }
         struct Header;
         impl<'de> Visitor<'de> for Header {
             type Value = Value;
@@ -234,6 +279,164 @@ impl<'de> DeserializeSeed<'de> for EventSeed<'_, '_> {
             }
         }
         Ok((ordinal, deserializer.deserialize_map(Header)?))
+    }
+}
+
+fn push_path(paths: &mut Vec<String>, path: String) {
+    let path = path.trim().chars().take(1024).collect::<String>();
+    if !path.is_empty() && !paths.contains(&path) && paths.len() < 32 { paths.push(path); }
+}
+
+struct PathCollector<'a>(&'a mut Vec<String>);
+impl<'de> DeserializeSeed<'de> for PathCollector<'_> {
+    type Value = ();
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> { deserializer.deserialize_any(self) }
+}
+impl<'de> Visitor<'de> for PathCollector<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("edit paths") }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "path" | "filePath" | "file_path" => {
+                    if let Some(path) = map.next_value::<Option<String>>()? { push_path(self.0, path); }
+                }
+                "edits" | "locations" => map.next_value_seed(PathCollector(self.0))?,
+                _ => { map.next_value::<IgnoredAny>()?; }
+            }
+        }
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element_seed(PathCollector(self.0))?.is_some() {}
+        Ok(())
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> { Ok(()) }
+    fn visit_string<E: de::Error>(self, _: String) -> Result<(), E> { Ok(()) }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> { Ok(()) }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> { Ok(()) }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<(), E> { Ok(()) }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> { Ok(()) }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> { Ok(()) }
+}
+
+struct ContentPaths<'a>(&'a mut Vec<String>);
+impl<'de> DeserializeSeed<'de> for ContentPaths<'_> {
+    type Value = ();
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> { deserializer.deserialize_any(self) }
+}
+impl<'de> Visitor<'de> for ContentPaths<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("reported edit content") }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        while seq.next_element_seed(ContentPath(self.0))?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<(), A::Error> { ContentPath(self.0).visit_map(map) }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> { Ok(()) }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> { Ok(()) }
+    fn visit_string<E: de::Error>(self, _: String) -> Result<(), E> { Ok(()) }
+}
+struct ContentPath<'a>(&'a mut Vec<String>);
+impl<'de> DeserializeSeed<'de> for ContentPath<'_> {
+    type Value = ();
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> { deserializer.deserialize_map(self) }
+}
+impl<'de> Visitor<'de> for ContentPath<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("one reported edit") }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut is_edit = false;
+        let mut path = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => is_edit = matches!(map.next_value::<String>()?.as_str(), "diff" | "patch"),
+                "path" => path = map.next_value::<Option<String>>()?,
+                _ => { map.next_value::<IgnoredAny>()?; }
+            }
+        }
+        if is_edit { if let Some(path) = path { push_path(self.0, path); } }
+        Ok(())
+    }
+}
+
+struct ChangeEventSeed<'a, 'b>(&'a mut Projection<'b>, usize);
+impl<'de> DeserializeSeed<'de> for ChangeEventSeed<'_, '_> {
+    type Value = Value;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> { deserializer.deserialize_map(self) }
+}
+impl<'de> Visitor<'de> for ChangeEventSeed<'_, '_> {
+    type Value = Value;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a change event") }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut event = serde_json::Map::new();
+        let mut paths = Vec::new();
+        let mut structured_paths = false;
+        let mut kind = String::new();
+        let mut tool_id = String::new();
+        let mut title = String::new();
+        let mut tool_kind = String::new();
+        let mut status = String::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => { kind = map.next_value()?; event.insert(key, json!(kind)); }
+                "sequence" | "attemptId" | "endSequence" => { event.insert(key, map.next_value()?); }
+                "toolCallId" => { tool_id = map.next_value::<Option<String>>()?.unwrap_or_default(); tool_id.truncate(tool_id.floor_char_boundary(1024)); }
+                "title" => { title = map.next_value::<Option<String>>()?.unwrap_or_default(); title.truncate(title.floor_char_boundary(256)); }
+                "toolKind" => { tool_kind = map.next_value::<Option<String>>()?.unwrap_or_default(); tool_kind.truncate(tool_kind.floor_char_boundary(128)); }
+                "status" => { status = map.next_value::<Option<String>>()?.unwrap_or_default(); status.truncate(status.floor_char_boundary(64)); }
+                "content" => {
+                    map.next_value_seed(ContentPaths(&mut paths))?;
+                    structured_paths = !paths.is_empty();
+                }
+                "rawInput" | "locations" => map.next_value_seed(PathCollector(&mut paths))?,
+                _ => { map.next_value::<IgnoredAny>()?; }
+            }
+        }
+        if kind == "historyReverted" {
+            self.0.change_summaries.clear(); self.0.change_tools.clear(); self.0.change_ordinals.clear();
+            return Ok(json!({"type":kind,"sequence":event.get("sequence")}));
+        }
+        if !matches!(kind.as_str(), "toolStart" | "toolUpdate") { return Ok(Value::Null); }
+        let previous_paths = self.0.change_tools.get(&tool_id).cloned();
+        let edit_tool = structured_paths || previous_paths.is_some() || matches!(tool_kind.as_str(), "edit" | "write") || {
+            let title = title.to_ascii_lowercase();
+            ["edit", "write", "apply_patch", "apply patch", "replace", "multiedit"].iter().any(|word| title.contains(word))
+        };
+        if edit_tool && paths.is_empty() {
+            if let Some(previous) = previous_paths { paths.extend(previous); }
+        }
+        paths.dedup();
+        if edit_tool && !tool_id.is_empty() {
+            if !self.0.change_tools.contains_key(&tool_id) && self.0.change_tools.len() >= 200 {
+                if let Some(evicted) = self.0.change_tools.keys().next().cloned() { self.0.change_tools.remove(&evicted); }
+            }
+            self.0.change_tools.insert(tool_id.clone(), paths.clone());
+        }
+        let outcome = if matches!(status.as_str(), "completed" | "complete" | "success") { "completed" }
+            else if matches!(status.as_str(), "failed" | "error" | "cancelled" | "canceled" | "rejected" | "denied") { "failed" }
+            else if matches!(status.as_str(), "pending" | "in_progress" | "running" | "queued") { "pending" }
+            else { "unconfirmed" };
+        for path in paths {
+            let item = json!({"id":format!("{}:{}",tool_id,self.1),"path":path,"toolCallId":tool_id,"outcome":outcome});
+            let ordinals = self.0.change_ordinals.entry(path.clone()).or_default();
+            if ordinals.len() >= 32 { ordinals.remove(0); }
+            ordinals.push(self.1);
+            if let Some(previous) = self.0.change_summaries.iter_mut().find(|previous| previous["path"] == path && previous["toolCallId"] == tool_id) { *previous = item; }
+            else {
+                if self.0.change_summaries.len() >= 200 {
+                    let evicted = self.0.change_summaries.remove(0);
+                    if let Some(evicted_path) = evicted["path"].as_str().map(str::to_owned) {
+                        if !self.0.change_summaries.iter().any(|summary| summary["path"] == evicted_path) {
+                            self.0.change_ordinals.remove(&evicted_path);
+                            self.0.change_tools.retain(|_, paths| { paths.retain(|saved| saved != &evicted_path); !paths.is_empty() });
+                        }
+                    }
+                }
+                self.0.change_summaries.push(item);
+            }
+        }
+        Ok(Value::Null)
     }
 }
 
@@ -422,6 +625,44 @@ mod tests {
         seen.sort_unstable();
         assert_eq!(seen, (1..=650).collect::<Vec<_>>());
         assert!(index(&journal.0, &mut Vec::new()).unwrap().row["transcript"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bidirectional_history_windows_join_without_gaps_or_visual_page_state() {
+        let journal = Journal::new();
+        journal.create(json!([]));
+        for sequence in 1..=650 { journal.event(sequence, "assistantChunk", None); }
+        let latest = window(&journal.0, None, None, &mut Vec::new()).unwrap();
+        let before = latest["historyBefore"].as_u64().unwrap() as usize;
+        let older = window(&journal.0, Some(before), None, &mut Vec::new()).unwrap();
+        assert_eq!(older["historyAfter"], json!(before));
+        assert_eq!(older["transcript"].as_array().unwrap().last().unwrap()["sequence"], latest["transcript"][0]["sequence"].as_u64().unwrap() - 1);
+        let newer = window(&journal.0, None, older["historyAfter"].as_u64().map(|cursor| cursor as usize), &mut Vec::new()).unwrap();
+        assert_eq!(newer["transcript"].as_array().unwrap().first().unwrap()["sequence"], latest["transcript"][0]["sequence"]);
+        assert_eq!(newer["historyAfter"], Value::Null);
+    }
+
+    #[test]
+    fn independent_change_index_skips_large_message_bodies_and_tracks_edit_outcomes() {
+        let journal = Journal::new();
+        journal.create(json!([
+            {"type":"assistantMessage","sequence":1,"text":"x".repeat(2_000_000)},
+            {"type":"toolStart","sequence":2,"attemptId":"attempt","toolCallId":"edit-1","title":"Edit file","toolKind":"edit","status":"in_progress","rawInput":{"file_path":"src/old.ts","new_string":"x".repeat(2_000_000)}},
+            {"type":"toolUpdate","sequence":3,"attemptId":"attempt","toolCallId":"edit-1","status":"completed"},
+            {"type":"toolStart","sequence":4,"attemptId":"attempt","toolCallId":"edit-2","content":[{"type":"diff","path":"src/new.ts","newText":"x".repeat(2_000_000)}]}
+        ]));
+        let changes = change_summaries(&journal.0).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["path"], "src/old.ts");
+        assert_eq!(changes[0]["outcome"], "completed");
+        assert_eq!(changes[1]["path"], "src/new.ts");
+        assert_eq!(changes[1]["outcome"], "unconfirmed");
+        let details = change_details(&journal.0, "src/new.ts").unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["previewTruncated"], true);
+        assert!(json_size(&details[0]) <= EVENT_BYTES);
+        journal.event(5, "historyReverted", Some("revert"));
+        assert!(change_summaries(&journal.0).unwrap().is_empty());
     }
 
     #[test]

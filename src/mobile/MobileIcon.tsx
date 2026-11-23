@@ -1,4 +1,4 @@
-export type MobileIconName = "agents" | "terminal" | "settings" | "search" | "folder" | "plus" | "back" | "chevron" | "close" | "check" | "more" | "key" | "server" | "arrow-up" | "arrow-down" | "arrow-left" | "arrow-right" | "keyboard" | "paste"
+export type MobileIconName = "agents" | "terminal" | "settings" | "search" | "folder" | "plus" | "back" | "chevron" | "close" | "check" | "more" | "key" | "server" | "arrow-up" | "arrow-down" | "arrow-left" | "arrow-right" | "keyboard" | "paste" | "sort" | "pin" | "sync"
 const paths: Record<MobileIconName, string> = {
   agents: "M7 4h10a4 4 0 0 1 4 4v5a4 4 0 0 1-4 4h-3l-5 4v-4H7a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4ZM8 9h8m-8 4h4",
   terminal: "M9 4H6a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h3m6-16h3a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-3M8 8l4 4-4 4m6 0h3",
@@ -11,6 +11,9 @@ const paths: Record<MobileIconName, string> = {
   "arrow-up": "m5 12 7-7 7 7M12 5v15", "arrow-down": "m5 12 7 7 7-7M12 4v15", "arrow-left": "m12 5-7 7 7 7M5 12h15", "arrow-right": "m12 5 7 7-7 7M4 12h15",
   keyboard: "M3 5h18v14H3ZM7 9h.01M11 9h.01M15 9h.01M7 13h.01M11 13h.01M15 13h.01M7 16h10",
   paste: "M5 5h14v16H5ZM9 2h6v6H9Z",
+  sort: "M4 6h16M4 12h11M4 18h6m6-3 3 3 3-3m-3-6v9",
+  pin: "m15 3 6 6-4 1-3 5-2-2-7 7-1-1 7-7-2-2 5-3Z",
+  sync: "M20 3v5h-5M4 21v-5h5M4 9a8 8 0 0 1 13-5l3 4M4 16l3 4a8 8 0 0 0 13-5",
 }
 export default function MobileIcon({ name, size = 22 }: { name: MobileIconName; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === "more" ? 3 : 1.65} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>

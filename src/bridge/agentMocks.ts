@@ -5,6 +5,11 @@ const unavailable=()=>new Error("Remote ACP execution needs Still's native SSH b
 export const unavailableAgentBridge={
   agentLibrary:async():Promise<import('../agents/types').AgentLibrary>=>{throw unavailable()},
   agentHistory:async():Promise<import('../agents/types').AgentHistoryPage>=>{throw unavailable()},
+  agentHistoryWindow:async():Promise<import('../agents/types').AgentHistoryPage>=>{throw unavailable()},
+  agentChangeHistory:async():Promise<import('../agents/types').AgentChangeHistory>=>{throw unavailable()},
+  agentChangeDetails:async():Promise<import('../agents/types').AgentChangeDetails>=>{throw unavailable()},
+   agentRemoteLibrary:async():Promise<never>=>{throw unavailable()},
+   agentSharedOperation:async():Promise<never>=>{throw unavailable()},
  agentFlush:async():Promise<void>=>{},
  agentSaveMetadata:async():Promise<void>=>{throw unavailable()},
  agentSaveWorkspace:async():Promise<void>=>{throw unavailable()},

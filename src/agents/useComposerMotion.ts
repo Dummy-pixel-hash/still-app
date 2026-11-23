@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef } from "react"
 type Frame = { left: number; top: number; width: number; height: number }
 
 /** Morph only the glass shell. Text is laid out at its final width before measurement. */
-export function useComposerMotion(collapsed: boolean, expanded: boolean, change: (expanded: boolean) => void) {
+export function useComposerMotion(collapsed: boolean, expanded: boolean, change: (expanded: boolean) => void, enabled = true) {
   const form = useRef<HTMLFormElement>(null)
   const from = useRef<Frame | null>(null)
   const animations = useRef<Animation[]>([])
@@ -11,7 +11,7 @@ export function useComposerMotion(collapsed: boolean, expanded: boolean, change:
   const setExpanded = (next: boolean) => {
     if (next === expanded) return
     const element = form.current
-    if (element) {
+    if (element && enabled) {
       const rect = element.getBoundingClientRect()
       const transform = getComputedStyle(element, "::before").transform
       const matrix = new DOMMatrixReadOnly(transform === "none" ? undefined : transform)
@@ -23,7 +23,7 @@ export function useComposerMotion(collapsed: boolean, expanded: boolean, change:
   useLayoutEffect(() => {
     const element = form.current, previous = from.current
     from.current = null
-    if (!element || !previous || matchMedia("(prefers-reduced-motion: reduce)").matches) return
+    if (!enabled || !element || !previous || matchMedia("(prefers-reduced-motion: reduce)").matches) return
     const rect = element.getBoundingClientRect()
     if (!rect.width || !rect.height) return
     const easing = "cubic-bezier(.22, .75, .25, 1)"
@@ -40,7 +40,7 @@ export function useComposerMotion(collapsed: boolean, expanded: boolean, change:
       if (collapsed && child.tagName === "TEXTAREA") continue
       animations.current.push(child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 240, delay: collapsed ? 35 : 70, fill: "backwards", easing }))
     }
-  }, [collapsed])
+  }, [collapsed, enabled])
   useEffect(() => {
     const query = matchMedia("(prefers-reduced-motion: reduce)")
     const reduce = () => { if (query.matches) stop() }

@@ -1,6 +1,6 @@
 # Agents roadmap and todo
 
-Updated: **2026-11-09**. Status: **AG-11a audit complete; capability and Todo
+Updated: **2026-11-11**. Status: **AG-11a audit complete; capability and Todo
 follow-ups scheduled; next-milestone execution pack imported**.
 
 **AG-12 update (2026-11-09):** the parent-agent tool path and direct child-chat flow are
@@ -8,15 +8,18 @@ under implementation in [Subagent integration and direct chat](agent-subagents.m
 Fixture coverage is being added; real provider, reconnect, and crash-recovery validation
 remain before the feature can be marked complete.
 
-**AG-16 Android planning update (2026-11-09):** the thread-first phone direction,
-desktop-to-phone remote continuity, background-alert requirement, architecture gates,
-implementation tasks, and acceptance matrix are saved in
-[Android phone application](android-mobile.md). This replaces the earlier assumption
-that mobile must depend on a running desktop. Production implementation is started
-at the MOB-01 Android compile-spike only; phone runtime and the rest remain TODO.
-Relay deployment and delivery-order changes are not implicitly approved.
-The [full Android implementation todo list](android-mobile-tasks.md) expands every
-mobile milestone into checkable work and release-evidence items.
+**AG-16 Android implementation update (2026-11-11):** initial S1/S2 remote discovery
+and concurrent conversation commands are implemented and tested with worker/store,
+native SSH-peer and mobile browser coverage. Updated desktop/Android debug clients
+are built; the new APK is not installed because ADB has no connected device.
+The older shell APK was installed and started on the A142; full real-provider,
+two-device continuity remains to be proved. The user selected **act from either device**, **shared organization
+and read state**, and a **user-hosted FCM relay first**. The
+[desktop ↔ Android continuity plan](android-continuity.md) records implementation
+evidence, remaining gaps, the server-serialized command contract and migration.
+[Android phone application](android-mobile.md) retains the full product
+scope; [the detailed task list](android-mobile-tasks.md) owns completion evidence.
+The obsolete per-device takeover proposal is superseded by this decision round.
 
 The remote agent startup regression is resolved. Commit `4c30626` streams the
 bootstrap configuration over SSH stdin, and the user confirmed the fix works
@@ -64,6 +67,7 @@ publisher whose lifetime depends on the selected conversation being visible.
 | [Subagent integration and direct chat](agent-subagents.md) | Approved AG-12 plan: cross-agent delegation, compact parent panel, direct child conversations, shared-folder safety, and verification |
 | [Android phone application](android-mobile.md) | AG-16 Android-first APK plan: reviewed mobile UX, shared remote history/control, background push, native integration, tasks and release evidence |
 | [Full Android implementation todo list](android-mobile-tasks.md) | Checkable MOB-01–15 work breakdown, decision gates, dependencies, release acceptance and evidence records |
+| [Desktop ↔ Android continuity](android-continuity.md) | Confirmed shared-organization/multi-device choices, account hub, durable commands/replay, migration and sync-first vertical slices |
 | [Current agent behavior](../agents-ui-and-persistence.md) | Existing controls, remote persistence, and current limitations |
 | [Current orb behavior](../../ORB.md) | Existing companion behavior and platform verification |
 | [Earlier T3 review](../agents-t3-review.md) | Historical design and implementation record |
@@ -109,7 +113,7 @@ Priority describes product sequencing, not defect severity. All new work starts 
 | [AG-13](agents-roadmap.md#ag-13-integrated-development-tools) | Terminal drawer, file viewer, preview, test results | Later | 5 | AG-02a; AG-04 remote-file access; AG-03 where used | TODO |
 | [AG-14](agents-roadmap.md#ag-14-plan-to-implementation-handoff) | Explicit plan → implementation action | Later | 5 | AG-07; AG-11a | TODO |
 | [AG-15](agents-roadmap.md#ag-15-portable-history-and-backup) | Restorable export/import and backup | Later | 5 | Existing native history; schemas from features included in export | TODO |
-| [AG-16](agents-roadmap.md#ag-16-mobile-access) | Android phone app, remote continuity and alerts | Later | 6 | Shared AG-01/05 state contracts, not orb UI; architecture gates in the Android plan | TODO |
+| [AG-16](agents-roadmap.md#ag-16-mobile-access) | Android phone app, remote continuity and alerts | Initial S1/S2 implemented / device acceptance next | 6 | Shared AG-01/05 state contracts, not orb UI; implementation evidence in the continuity plan | IN PROGRESS |
 | [AG-17](agents-roadmap.md#ag-17-scheduled-agent-tasks) | Explicitly scheduled remote tasks | Later | 6 | AG-01/03/05/06/07; server scheduler design decision | TODO |
 | [AG-18](agents-roadmap.md#ag-18-conversation-todos-and-task-progress) | Agent-managed Todos with read-only progress in Still | High | 1 | AG-11a task capability inventory; existing native history | IN PROGRESS |
 
@@ -129,6 +133,12 @@ in the [execution pack](next/TASKS.md): capability publication and its explanato
 UI (`CAP-*`, `UI-01`), Todo reliability (`TD-*`), then read-only Git review
 (`GIT-*`). Feature status here stays authoritative; a task checkbox in the pack is
 not a completion record on its own.
+
+**Mobile implementation focus (2026-11-11):** initial continuity S1 (shared remote
+discovery/history) and S2 (commands from either device) now need the real-provider,
+desktop/phone acceptance journey, with remaining native baseline probes included.
+Shared organization/read state, migration and push remain open. This is the mobile work order;
+the existing desktop feature tracks keep their own scheduling and evidence.
 
 1. **Foundation:** AG-11a inventories real provider support. AG-01a preserves typed
    turn outcomes and stable event identities needed for truthful statuses.

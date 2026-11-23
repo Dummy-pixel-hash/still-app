@@ -45,7 +45,7 @@ export const chatTitleTool = {
 
 export const subagentTool = {
   name: "still_subagents",
-  description: "Manage only this root conversation's child agents in the same project folder. Recommended flow: list -> prepare(agentId) -> inspect the returned settings choices -> spawn(childId,title,task). prepare starts a provider session but sends no model task. Its settings include exact IDs and current defaults. On spawn, model is applied first and dependent effort options are refreshed before effort/mode validation; unsupported choices fail without sending the task. Omit settings to keep the provider defaults. You may instead spawn directly with agentId when you already know valid IDs. Use inspect for effective settings/status, guide for more instructions (Queued is not Delivered), wait for bounded status updates, and cancel to request a stop. Children cannot spawn children. Permissions remain user-owned. Cancellation does not undo file edits.",
+  description: "Manage only this root conversation's child agents in the same project folder. Flow: list -> prepare(agentId) -> inspect the returned settings choices -> spawn(childId,title,task). prepare starts a provider session but sends no model task. Keep its stable childId before spawning so a lost acknowledgement cannot create another paid task. Its settings include exact IDs and current defaults. On spawn, model is applied first and dependent effort options are refreshed before effort/mode validation; unsupported choices fail without sending the task. Omit settings to keep the provider defaults. Use inspect for effective settings/status, guide for more instructions (Queued is not Delivered), wait for bounded status updates, and cancel to request a stop. Children cannot spawn children. Permissions remain user-owned. Cancellation does not undo file edits.",
   inputSchema: {
     type: "object", additionalProperties: false, required: ["action"],
     properties: {
@@ -334,7 +334,7 @@ export function requestChatTitle(connection, input, requestId = randomUUID(), si
 }
 
 export function requestSubagents(connection, input, requestId = randomUUID(), signal) {
-  if (!object(input) || !["list", "spawn", "inspect", "guide", "wait", "cancel"].includes(input.action)) return Promise.reject(new Error("Choose a supported subagent action."))
+  if (!object(input) || !["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"].includes(input.action)) return Promise.reject(new Error("Choose a supported subagent action."))
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error("Subagent request cancelled.")); return }
     const socket = createConnection(connection.socket)

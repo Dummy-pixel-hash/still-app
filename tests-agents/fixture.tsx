@@ -9,6 +9,7 @@ import { mockBridge } from "../src/bridge/mockBridge"
 import { reattachAgentThread, refreshAgentThread, startRemoteAgent, useAgentThreads } from "../src/session/agentThreads"
 import { reconcileTodos } from "../src/agents/todos"
 import Workspace from "../src/screens/Workspace"
+const MobileApp = React.lazy(() => import("../src/mobile/MobileApp"))
 import { hostKey } from "../src/agents/workspace"
 import { flushAgentSaves } from "../src/session/agentStorage"
 import { createAgentDemo } from "./demo"
@@ -18,6 +19,7 @@ import "./demo.css"
 const snapshots = new Map<string, AgentThreadSnapshot>()
 const sinks = new Map<string, (event: AgentThreadEvent) => void>()
 const preview = new URLSearchParams(location.search).has("demo") && !new URLSearchParams(location.search).has("workspace")
+const mobilePreview = preview && new URLSearchParams(location.search).has("mobile")
 const scenario = preview ? new URLSearchParams(location.search).get("scenario") : null
 const libraryKey = preview ? `still.test.agent-demo-library.v2${scenario ? `.${scenario}` : ""}` : "still.test.agent-library"
 const library = () => JSON.parse(localStorage.getItem(libraryKey) || '{"rows":[],"workspaces":{},"deleted":[]}')
@@ -39,7 +41,9 @@ const h = {
   attaches: [] as string[],
   catalogs: [] as unknown[], resolutions: [] as string[], copied: "", failSave: false,
   snapshotReads: [] as string[],
-  historyReads: [] as Array<{ id: string; before?: number }>,
+  historyReads: [] as Array<{ id: string; before?: number; after?: number }>,
+  changeReads: [] as string[],
+  changeDetailReads: [] as Array<{ id: string; path: string }>,
   refreshThread: refreshAgentThread,
   rawTodoEvent(id: string, event: Omit<AgentThreadEvent, "sequence">) {
     const row = snapshots.get(id)!
@@ -53,7 +57,7 @@ const h = {
   releaseResponse: () => {}, releaseConfig: () => {},
   reasoningByModel: {} as Record<string, AgentConfigOption | null>,
   configOptions: () => structuredClone(snapshots.get(h.current)!.configOptions),
-  closed: false, resumable: false, persistent: false, workerUnavailable: false, requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
+  closed: false, resumable: false, persistent: false, workerUnavailable: false, resumeError: "", requireAuth: false, hostKeyMode: "trusted", hostTrusted: false,
   gitStatusCalls: [] as Array<{ nativeSessionId: string; cwd: string }>,
   gitDiffCalls: [] as Array<{ nativeSessionId: string; cwd: string; snapshotId: string; entryId: string; view: AgentGitView }>,
   gitStatusState: "ready" as "ready" | "notRepository" | "gitUnavailable", gitRoot: "/srv/still", gitTruncated: false,
@@ -144,7 +148,23 @@ registerNativeBridge({
     const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)
     const transcript: AgentThreadEvent[] = JSON.parse(localStorage.getItem(`still.test.agent-history:${id}`) || "null") || saved.transcript
     const end = Math.min(before ?? transcript.length, transcript.length), start = Math.max(0, end - 200)
-    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, total: transcript.length, latest: end === transcript.length }
+    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, after: end < transcript.length ? end : null, total: transcript.length, latest: end === transcript.length }
+  },
+  agentHistoryWindow: async (id, before, after) => {
+    h.historyReads.push({ id, before, after })
+    const saved = library().rows.find((row: any) => (row.conversationId || row.executionId) === id)
+    const transcript: AgentThreadEvent[] = JSON.parse(localStorage.getItem(`still.test.agent-history:${id}`) || "null") || saved.transcript
+    const start = after ?? Math.max(0, Math.min(before ?? transcript.length, transcript.length) - 200)
+    const end = Math.min(start + 200, before ?? transcript.length)
+    return { executionId: saved.executionId, lastSequence: saved.lastSequence, transcript: transcript.slice(start, end), before: start || null, after: end < transcript.length ? end : null, total: transcript.length, latest: end === transcript.length }
+  },
+  agentChangeHistory: async id => {
+    h.changeReads.push(id)
+    return { executionId: id, changes: JSON.parse(localStorage.getItem(`still.test.agent-changes:${id}`) || "null") || library().changeHistory?.[id] || [] }
+  },
+  agentChangeDetails: async (id, path) => {
+    h.changeDetailReads.push({ id, path })
+    return { executionId: id, path, events: JSON.parse(localStorage.getItem(`still.test.agent-change-details:${id}:${path}`) || "[]") }
   },
   agentMigrate: async (rows, deleted, workspaces) => {
     const data = library(); data.deleted.push(...deleted)
@@ -188,6 +208,7 @@ registerNativeBridge({
   },
   agentStart: async (_native, localId, agentId, options) => {
     h.starts.push({ agentId, options })
+    if (options?.resumeSessionId && h.resumeError) throw new Error(h.resumeError)
      const row: AgentThreadSnapshot = { executionId: `fixture-${Date.now()}-${++counter}`, localSessionId: localId, agentId, agentName: AGENTS.find(a => a.id === agentId)!.label, agentSessionId: "acp-fixture", resumable: h.resumable, cwd: (options?.cwd || "/srv/still").replace(/^~\//,"/home/dev/"), parentConversationId: options?.parentConversationId, state: h.deferStartup ? "connecting" : "working", lastSequence: 0, transcript: [], turnActive: false,
       configOptions: h.deferStartup ? [] : structuredClone(modelOptions), commands: h.deferStartup ? [] : projectCommands, todos:{protocolVersion:3,revision:0,items:[],toolAvailable:true,available:true}, persistent:h.persistent, historyCapabilities: { revert: ["pi", "codex", "opencode"].includes(agentId), retry: ["pi", "codex", "opencode"].includes(agentId) } }
     row.conversationId = options?.conversationId || row.executionId
@@ -388,7 +409,10 @@ function FixtureWorkspace() {
   h.setConnected = setConnected
   return <><AgentThreadProbe /><AgentWorkspace session={session} sessions={[session]} transportId={transportId} connected={connected} onReattach={row => reattachAgentThread(row.executionId,transportId)} onClose={() => { h.closed = true }} onStart={(id, options, onCreated) => startRemoteAgent("ssh-fixture", session.id, id, options, session, onCreated)} onCheck={(id, path) => mockCheck(id, path)} onCatalog={(agent, cwd, executable) => nativeBridge.agentCatalog("ssh-fixture", agent, cwd, executable)} onResolveFolder={cwd => nativeBridge.agentResolveFolder("ssh-fixture", cwd)} /></>
 }
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a><PreviewLayoutControl /></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</React.StrictMode>)
+createRoot(document.getElementById("root")!).render(<React.StrictMode>{mobilePreview
+  ? <React.Suspense fallback={<div className="mobile-loading">Opening the mobile preview…</div>}><MobileApp /></React.Suspense>
+  : <>{preview && <header className="agent-demo-banner"><strong>Still · interactive preview</strong><span>Synthetic · no server connection</span><nav aria-label="Preview scenarios"><a href="?demo&scenario=models">Models</a><a href="?demo&scenario=question">Questions</a><a href="?demo&scenario=approval">Approvals</a><a href="?demo&scenario=todos">Todos</a><a href="/tests-agents/fixture.html">Blank workspace</a><PreviewLayoutControl /></nav></header>}{fullWorkspace ? <Workspace /> : <FixtureWorkspace />}</>}
+</React.StrictMode>)
 if (preview && scenario) {
   const observer = new MutationObserver(() => {
     const row = document.querySelector<HTMLButtonElement>('.agent-thread-open')
