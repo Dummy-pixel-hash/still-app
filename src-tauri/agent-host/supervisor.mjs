@@ -339,7 +339,7 @@ async function worker() {
     if (child || childEnded || closed) return
     const [executable, ...args] = config.command
     try {
-      child = spawn(executable, args, { cwd: config.cwd, env: { ...process.env, ...(config.env || {}), STILL_TODO_SOCKET: socketPath, STILL_TODO_TOKEN: todoToken, STILL_TODO_MODULE: join(directory, "todos.mjs"), STILL_TODO_PI_EXTENSION: join(directory, "todo-pi.mjs") }, stdio: ["pipe", "pipe", "pipe"] })
+      child = spawn(executable, args, { cwd: config.cwd, env: { ...process.env, ...(config.env || {}), STILL_TODO_SOCKET: socketPath, STILL_TODO_TOKEN: todoToken, STILL_TODO_MODULE: join(directory, "todos.mjs"), STILL_TODO_PI_EXTENSION: join(directory, "todo-pi.mjs"), STILL_SUBAGENTS: config.parentConversationId ? "0" : "1" }, stdio: ["pipe", "pipe", "pipe"] })
     } catch (error) {
       childEnded = true; retireTodoOwner(); throw error
     }
@@ -398,9 +398,10 @@ async function worker() {
   }
   const subagentInputError = input => {
     if (!input || typeof input !== "object" || Array.isArray(input) || !["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"].includes(input.action)) return "Choose a supported subagent action."
-    if (input.action === "prepare" && (typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId) || input.title !== undefined && (typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160))) return "Prepare requires an eligible agent ID and an optional title of 1–160 characters."
-    if (input.action === "spawn" && (input.childId === undefined && (typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId)) || typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160 || typeof input.task !== "string" || !input.task.trim() || [...input.task].length > 12000)) return "Spawn requires a prepared child ID or eligible agent ID, a title of 1–160 characters, and a task of 1–12,000 characters."
-    if (input.action === "spawn" && input.childId !== undefined && (typeof input.childId !== "string" || !/^[a-zA-Z0-9_-]{1,160}$/.test(input.childId))) return "Spawn child ID is invalid."
+    // prepare creates a child from an agentId, or re-configures an unused child named by childId.
+    if (input.action === "prepare" && (input.childId === undefined ? typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId) : typeof input.childId !== "string" || !/^[a-zA-Z0-9_-]{1,160}$/.test(input.childId) || input.agentId !== undefined && (typeof input.agentId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(input.agentId)) || input.title !== undefined && (typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160))) return "Prepare requires an eligible agentId for a new child, or the childId of an unused prepared child, and an optional title of 1–160 characters."
+    // A spawn always names its prepared child, so a lost acknowledgement cannot start a second paid task.
+    if (input.action === "spawn" && (typeof input.childId !== "string" || !/^[a-zA-Z0-9_-]{1,160}$/.test(input.childId) || typeof input.title !== "string" || !input.title.trim() || [...input.title].length > 160 || typeof input.task !== "string" || !input.task.trim() || [...input.task].length > 12000)) return "Spawn requires the childId returned by prepare, a title of 1–160 characters, and a task of 1–12,000 characters."
     if (input.modelId !== undefined && (typeof input.modelId !== "string" || !input.modelId.trim() || [...input.modelId].length > 300)) return "Model ID must be 1–300 characters."
     if (input.effort !== undefined && (typeof input.effort !== "string" || !input.effort.trim() || [...input.effort].length > 100)) return "Effort must be 1–100 characters."
     if (input.modeId !== undefined && (typeof input.modeId !== "string" || !input.modeId.trim() || [...input.modeId].length > 100)) return "Mode ID must be 1–100 characters."
@@ -550,7 +551,7 @@ async function worker() {
       if (runtime.transport === "acp-v1") {
         request = { ...request, params: { ...request.params, mcpServers: [
           ...(request.params?.mcpServers || []),
-          { name: "still-todos", command: process.execPath, args: [join(directory, "todos.mjs"), "mcp"], env: [{ name: "STILL_TODO_SOCKET", value: socketPath }, { name: "STILL_TODO_TOKEN", value: todoToken }] },
+          { name: "still-todos", command: process.execPath, args: [join(directory, "todos.mjs"), "mcp"], env: [{ name: "STILL_TODO_SOCKET", value: socketPath }, { name: "STILL_TODO_TOKEN", value: todoToken }, { name: "STILL_SUBAGENTS", value: config.parentConversationId ? "0" : "1" }] },
         ] } }
       }
     }
@@ -621,7 +622,8 @@ async function worker() {
         writeLine(socket, { jsonrpc: "2.0", id: clientId, result: { accepted: true, messageId, promptId: request.id } })
         inflight.set(JSON.stringify(request.id), { method: request.method, socket, clientId })
       }
-      if (config.agentId && !existsSync(titlePromptPath)) {
+      // A parent-titled child keeps its delegated title; asking it to rename itself only costs tokens.
+      if (config.agentId && !(config.parentConversationId && config.title) && !existsSync(titlePromptPath)) {
         let titlePrompted = false
         try { const fd = openSync(titlePromptPath, "wx", 0o600); fsyncSync(fd); closeSync(fd); titlePrompted = true }
         catch (error) { if (error.code !== "EEXIST") throw error }

@@ -2,11 +2,11 @@ import React from "react"
 import { createRoot } from "react-dom/client"
 import "../src/styles/theme.css"
 import AgentWorkspace from "../src/components/AgentWorkspace"
-import { AGENTS, type AgentConfigOption, type AgentThreadEvent, type AgentThreadSnapshot } from "../src/agents/types"
+import { AGENTS, type AgentConfigOption, type AgentThreadEvent, type AgentThreadSnapshot, type SharedConversation, type SharedOperation } from "../src/agents/types"
 import type { AgentGitDiff, AgentGitSnapshot, AgentGitView } from "../src/agents/git"
 import { nativeBridge, registerNativeBridge } from "../src/bridge/nativeBridge"
 import { mockBridge } from "../src/bridge/mockBridge"
-import { reattachAgentThread, refreshAgentThread, startRemoteAgent, useAgentThreads } from "../src/session/agentThreads"
+import { reattachAgentThread, refreshAgentThread, startRemoteAgent, syncRemoteAgentLibrary, useAgentThreads } from "../src/session/agentThreads"
 import { reconcileTodos } from "../src/agents/todos"
 import Workspace from "../src/screens/Workspace"
 const MobileApp = React.lazy(() => import("../src/mobile/MobileApp"))
@@ -32,7 +32,7 @@ const modelOptions = [
 const projectCommands = [{ name: "review", description: "Review the current changes" }, { name: "compact", description: "Compact this conversation" }, ...Array.from({ length: 25 }, (_, i) => ({ name: `team/command-${i}`, description: `Project command ${i}` })), { name: "skill:security-review", description: "Audit security boundaries", route: "skill" as const, source: "Skill" }]
 let counter = 0
 const h = {
-  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], uploads: [] as unknown[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[], subagentReplies: [] as unknown[],
+  checks: [] as unknown[], starts: [] as unknown[], sends: [] as string[], uploads: [] as unknown[], configs: [] as unknown[], approvals: [] as unknown[], closes: [] as string[], connects: [] as any[], disconnects: [] as string[], inputs: [] as unknown[], subagentReplies: [] as unknown[], cancels: [] as string[], deferCancel: false, rejectCancel: false, releaseCancel: () => {},
   rejectUpload: false,
   sentConfigs: [] as Array<{ agent: string; model: string | boolean | undefined }>, reverts: [] as Array<{ id: string; messageId: string }>, rejectRevert: false, unknownRevert: false, deferRevert: false,
   releaseRevert: () => {}, releaseStartups: new Map<string, () => void>(),
@@ -116,6 +116,19 @@ const h = {
       Object.assign(saved, structuredClone(row), { transcript: next, pendingInput: null, pendingPermission: null }); saveLibrary(data)
     }
     sinks.get(id)?.(structuredClone(value))
+  },
+  // Opt-in shared-account model: only `read.advance` is supported, which is all unread markers need. Off by default so
+  // library sync keeps failing as it always did in this fixture.
+  sharedMode: false, shared: new Map<string, SharedConversation>(), sharedOps: [] as SharedOperation[],
+  /** Puts a child's conversation sequence ahead of the account's read position, with the local mirror caught up, so that
+   * opening its chat advances the read position through the app's real read path. */
+  async markUnread(executionId: string, conversationSeq = 5) {
+    const row = snapshots.get(executionId)!
+    h.shared.set(executionId, { serverAccountId: "acct-fixture", conversationId: row.conversationId!, executionId, generation: 1, revision: 1, catalogRevision: 1, fields: { title: 1, pinned: 1, archivedAt: 1, order: 1 },
+      values: { title: "", titleSource: "prompt", pinned: false, archivedAt: null, order: Date.now() }, readThroughSeq: 0, conversationSeq, executionOffset: 0, projectId: "project-fixture" })
+    h.sharedMode = true
+    h.emit(executionId, { type: "commands", commands: projectCommands, remoteCursor: conversationSeq })
+    await syncRemoteAgentLibrary("ssh-fixture")
   },
   get current() { return [...snapshots.keys()].at(-1)! },
   finish() { h.emit(h.current, { type: "threadComplete", state: "working" }) },
@@ -288,7 +301,25 @@ registerNativeBridge({
     h.emit(id, { type: "threadState", state: "working" })
     if (h.unknownResponse) throw new Error("Response acknowledgement was lost")
   },
-  agentCancel: async id => { h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); await new Promise<void>(resolve => setTimeout(resolve, 0)); h.finish() },
+  agentCancel: async id => {
+    h.cancels.push(id)
+    if (h.rejectCancel) throw new Error("Cancellation could not be delivered.")
+    if (h.deferCancel) { await new Promise<void>(resolve => { h.releaseCancel = resolve }); return }
+    h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); await new Promise<void>(resolve => setTimeout(resolve, 0)); h.emit(id, { type: "threadComplete", state: "working" })
+  },
+  agentRemoteLibrary: async () => {
+    if (!h.sharedMode) throw new Error("Remote library is unavailable in this fixture.")
+    return { protocolVersion: 1, catalogVersion: 1, serverAccountId: "acct-fixture", revision: 1, hostKey: hostKey(session), projects: [], warnings: [], next: null,
+      rows: [...h.shared.values()].map(shared => ({ conversationId: shared.conversationId, executionId: shared.executionId, cwd: "/srv/still", protocolVersion: 1, shared: structuredClone(shared) })) }
+  },
+  agentSharedOperation: async (_native, operation) => {
+    h.sharedOps.push(structuredClone(operation))
+    const current = h.shared.get(operation.executionId || "")
+    if (operation.kind !== "read.advance" || !current) return { ok: false, code: "unsupported", message: "This fixture only models read.advance." }
+    current.readThroughSeq = Math.max(current.readThroughSeq, Math.min(operation.readThroughSeq || 0, current.conversationSeq))
+    current.revision += 1
+    return { ok: true, current: structuredClone(current) }
+  },
   agentSubagentReply: async (executionId, requestId, result, error) => { h.subagentReplies.push({ executionId, requestId, result, error }); if (!error) h.emit(executionId, { type: "subagentReply", subagentRequest: { requestId, input: {} } }) },
   agentClose: async id => { h.closes.push(id); snapshots.delete(id); sinks.delete(id) },
   agentRespondInput: async (id, requestId, answers) => {

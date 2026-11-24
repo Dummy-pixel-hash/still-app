@@ -1,5 +1,5 @@
 // Parent tools and guidance queues run on the remote worker, not in a mounted UI.
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { constants, closeSync, copyFileSync, existsSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -9,6 +9,20 @@ import { recordSharedWorker, setSharedChildTitle, sharedLibrary } from "./shared
 const hash = text => createHash("sha256").update(text).digest("hex")
 const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(value)
 const providers = { opencode: "OpenCode", pi: "Pi", codex: "Codex", claude: "Claude Code", gemini: "Gemini CLI" }
+const RECEIPT_LIMIT = 512, RECEIPT_MIN_AGE = 60 * 60 * 1000
+// Marks a read-only result that finishes outside the serialized operation lane.
+const deferred = Symbol("deferred")
+const executablePath = value => typeof value === "string" && value.length > 0 && value.length <= 4096 && !/\p{Cc}/u.test(value)
+
+// Never blocks the parent worker's event loop, which also streams the parent's own turn.
+function onPath(name) {
+  return new Promise(resolve => {
+    const probe = spawn("sh", ["-c", 'command -v -- "$1" >/dev/null 2>&1', "still", name], { stdio: "ignore" })
+    const timer = setTimeout(() => { probe.kill("SIGKILL"); resolve(false) }, 2000)
+    probe.once("error", () => { clearTimeout(timer); resolve(false) })
+    probe.once("exit", code => { clearTimeout(timer); resolve(code === 0) })
+  })
+}
 
 function privateJson(file) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
@@ -19,7 +33,7 @@ function privateJson(file) {
   } finally { closeSync(fd) }
 }
 
-class ChildTransport {
+export class ChildTransport {
   constructor(config, changed) {
     this.config = config
     this.changed = changed
@@ -27,8 +41,12 @@ class ChildTransport {
     this.messages = new Set()
     this.configOptions = []
     this.busy = false
-    this.needsAttention = false
-    this.lastUpdate = ""
+    // Keyed by request identity: answering one of two approvals must not hide the other.
+    this.pendingRequests = new Set()
+    this.turn = null
+    this.lastResult = null
+    this.activity = ""
+    this.waiters = new Set()
     this.generation = 0
     this.promptId = null
     this.sessionId = null
@@ -55,7 +73,8 @@ class ChildTransport {
       }
     })
     this.process.on("error", error => this.fail(error.message))
-    this.process.on("exit", () => this.fail(stderr || "The subagent transport disconnected; its remote worker was not stopped."))
+    // An ended execution's read-only replay is closed deliberately; its final state stays valid.
+    this.process.on("exit", () => { if (!this.ended) this.fail(stderr || "The subagent transport disconnected; its remote worker was not stopped.") })
     await this.request("initialize", { protocolVersion: 1, clientInfo: { name: "still-server-coordinator", version: "1" }, clientCapabilities: {} })
     const session = await this.request("session/new", { cwd: this.config.cwd, mcpServers: [] })
     this.sessionId = session.sessionId
@@ -81,27 +100,59 @@ class ChildTransport {
     }
     if (frame.method === "_still/prompt_accepted") {
       this.messages.add(frame.params.messageId); this.busy = true; this.promptId = frame.params.promptId
+      this.turn = { promptId: frame.params.promptId, messageId: frame.params.messageId, source: frame.params.source || "user", text: "" }
+      this.activity = ""
     }
-    if (frame.method === "_still/turn_finished") { this.busy = false; this.needsAttention = false; this.promptId = null }
+    if (frame.method === "_still/turn_finished") {
+      // A result belongs to the turn that produced it, not to a rolling output tail.
+      const turn = this.turn || { promptId: frame.params?.promptId ?? null, messageId: null, source: null, text: "" }
+      this.lastResult = { ...turn, resultIndex: frame._still?.index || 0, ...(frame.params?.stopReason ? { stopReason: frame.params.stopReason } : {}), ...(frame.params?.error ? { error: String(frame.params.error).slice(0, 1000) } : {}) }
+      this.turn = null; this.activity = ""
+      this.busy = false; this.pendingRequests.clear(); this.promptId = null
+    }
     if (frame.method === "_still/config_generation") this.generation = frame.params.configGeneration
     if (frame.method === "_still/caught_up") {
       this.caughtUp = true; this.busy = frame.params.busy; this.promptId = frame.params.activePrompt; this.ended = frame.params.ended === true
     }
-    if (["session/request_permission", "elicitation/create"].includes(frame.method)) this.needsAttention = true
-    if (frame.method === "_still/request_outcome") this.needsAttention = false
+    if (["session/request_permission", "elicitation/create"].includes(frame.method) && frame.id !== undefined) this.pendingRequests.add(JSON.stringify(frame.id))
+    if (frame.method === "_still/request_outcome") this.pendingRequests.delete(JSON.stringify(frame.params?.requestId))
     if (frame.method === "session/update") {
       const update = frame.params?.update
       if (update?.configOptions) this.configOptions = update.configOptions
-      if (typeof update?.content?.text === "string") this.lastUpdate = [...this.lastUpdate + update.content.text].slice(-1000).join("")
+      // Only the agent's reply is a result; thoughts and echoed prompts are not.
+      if (update?.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") {
+        this.turn ||= { promptId: this.promptId, messageId: null, source: null, text: "" }
+        this.turn.text = [...this.turn.text + update.content.text].slice(-4000).join("")
+      }
+      if (update?.sessionUpdate === "tool_call" && typeof update.title === "string") this.activity = [...update.title].slice(0, 300).join("")
     }
     if (["_still/unavailable", "_still/upgrade_required", "_still/error"].includes(frame.method)) this.fail(frame.params?.message || "This subagent requires recovery or a worker upgrade.")
     this.changed(frame)
+    this.notify()
+  }
+
+  get needsAttention() { return this.pendingRequests.size > 0 }
+
+  get lastUpdate() { return this.turn?.text ? [...this.turn.text].slice(-1000).join("") : this.activity }
+
+  notify() { for (const check of [...this.waiters]) check() }
+
+  /** Resolves true on timeout, false once `predicate` holds. Never polls the worker. */
+  waitFor(predicate, ms) {
+    if (predicate()) return Promise.resolve(false)
+    return new Promise(resolve => {
+      const done = timedOut => { clearTimeout(timer); this.waiters.delete(check); resolve(timedOut) }
+      const check = () => { if (predicate()) done(false) }
+      const timer = setTimeout(() => done(true), ms)
+      this.waiters.add(check)
+    })
   }
 
   fail(message) {
     this.failure = message
     for (const pending of this.requests.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)) }
     this.requests.clear()
+    this.notify()
   }
 
   request(method, params) {
@@ -148,7 +199,66 @@ export function createServerSubagents(config, ownsConversation = () => true) {
   }
   persist()
 
-  const available = () => Object.entries(providers).map(([agentId, name]) => ({ agentId, name, available: agentId === config.agentId || spawnSync("sh", ["-c", 'command -v -- "$1" >/dev/null 2>&1', "still", agentId], { timeout: 2000 }).status === 0 }))
+  // The app's discovery for this host is the eligibility source: it knows the configured
+  // executable and whether the integration actually connected. PATH presence is only a
+  // fallback for workers launched without it, and is reported as unverified.
+  const verified = new Map((Array.isArray(config.subagentAgents) ? config.subagentAgents : [])
+    .filter(entry => entry && Object.hasOwn(providers, entry.agentId) && (entry.executable === undefined || executablePath(entry.executable)))
+    .map(entry => [entry.agentId, entry]))
+  const executableFor = agentId => verified.get(agentId)?.executable || agentId
+  let availability = null
+  const available = async () => {
+    if (availability && Date.now() - availability.at < 60_000) return availability.value
+    const value = await Promise.all(Object.entries(providers).map(async ([agentId, name]) => {
+      if (agentId === config.agentId) return { agentId, name, available: true, verified: true }
+      const entry = verified.get(agentId)
+      if (entry) return { agentId, name, available: entry.available === true, verified: true, ...(entry.available === true ? {} : { reason: typeof entry.reason === "string" && entry.reason ? [...entry.reason].slice(0, 300).join("") : "Not available on this server." }) }
+      const present = await onPath(agentId)
+      return { agentId, name, available: present, verified: false, reason: present ? "Found on PATH; Still has not verified its sign-in or integration on this server." : "Not found on this server's PATH." }
+    }))
+    availability = { at: Date.now(), value }
+    return value
+  }
+  const deliverable = child => !child.paused && child.guidance.some(item => !item.executionId || item.executionId === child.config.executionId)
+  // Counts from the saved worker records instead of attaching to every retained child.
+  const activeChildren = () => {
+    let active = 0
+    for (const child of Object.values(state.children)) {
+      const client = clients.get(child.id)
+      if (client?.caughtUp && !client.failure) { if (!client.ended && (child.prepared || client.busy || client.needsAttention)) active++; continue }
+      try {
+        const saved = privateJson(join(child.config.directory, "state.json"))
+        if (saved.executionId !== child.config.executionId || !saved.closed && !saved.ended && (child.prepared || saved.busy)) active++
+      } catch { active++ } // An unreadable record is not proof the child stopped.
+    }
+    return active
+  }
+  // Frees one retained slot by forgetting an ended, idle child. Its history stays in the shared library.
+  const evictEnded = () => {
+    for (const child of Object.values(state.children)) {
+      if (child.prepared || child.guidance.length) continue
+      try {
+        const saved = privateJson(join(child.config.directory, "state.json"))
+        if (saved.executionId !== child.config.executionId || !(saved.closed || saved.ended) || saved.busy) continue
+      } catch { continue }
+      clients.get(child.id)?.close(); clients.delete(child.id)
+      delete state.children[child.id]
+      return true
+    }
+    return false
+  }
+  // Delivery stays deduplicated by message identity in the child worker, and prepare by
+  // its derived child ID, so forgetting receipts older than an hour cannot duplicate work.
+  const makeReceiptRoom = () => {
+    while (state.receipts.length >= RECEIPT_LIMIT) {
+      const oldest = state.receipts[0]
+      if (Number.isSafeInteger(oldest.at) && Date.now() - oldest.at < RECEIPT_MIN_AGE) return false
+      state.receipts.shift(); delete state.cancelIntents[oldest.id]
+    }
+    const intents = Object.keys(state.cancelIntents)
+    for (const key of intents.slice(0, Math.max(0, intents.length - RECEIPT_LIMIT))) delete state.cancelIntents[key]
+    return true
+  }
   const settings = client => {
     const select = (categories, ids) => client.configOptions.find(option => categories.includes(option.category) || ids.includes(option.id))
     const describe = option => option ? { id: option.id, name: option.name, current: option.currentValue,
@@ -170,7 +280,12 @@ export function createServerSubagents(config, ownsConversation = () => true) {
     })
     clients.set(child.id, client)
     client.ready = client.connect()
-    try { await client.ready; return client }
+    try {
+      await client.ready
+      // An ended execution is read-only history: keep its final state, release the process.
+      if (client.ended) client.close()
+      return client
+    }
     catch (error) { clients.delete(child.id); client.close(); throw error }
   }
 
@@ -183,7 +298,13 @@ export function createServerSubagents(config, ownsConversation = () => true) {
       settings: settings(client), prepared: child.prepared, turnActive: client.busy, needsAttention: client.needsAttention,
       queuedGuidance: child.guidance.filter(item => !item.executionId || item.executionId === child.config.executionId).length,
       heldGuidance: child.guidance.filter(item => item.executionId && item.executionId !== child.config.executionId).map(item => ({ messageId: item.messageId, message: item.message })),
-      guidancePaused: child.paused, lastUpdate: client.lastUpdate }
+      guidancePaused: child.paused, lastUpdate: client.lastUpdate,
+      ...(client.lastResult ? { lastResult: client.lastResult, newResult: client.lastResult.resultIndex > (child.seenResultIndex || 0) } : {}) }
+  }
+  // Marks the reported result as read by the parent; persisted with the next state write.
+  const reported = (child, value) => {
+    if (value.lastResult && value.lastResult.resultIndex > (child.seenResultIndex || 0)) child.seenResultIndex = value.lastResult.resultIndex
+    return value
   }
 
   function adoptExistingChildren() {
@@ -194,7 +315,10 @@ export function createServerSubagents(config, ownsConversation = () => true) {
         if (remote.parentConversationId !== parentId || remote.cwd !== config.cwd || remote.protocolVersion !== 4 || !remote.agentSessionId) continue
         const known = state.children[remote.conversationId]
         if (known && known.config.executionId === remote.executionId) continue
-        if (Object.keys(state.children).length >= 256 && !known) throw new Error("Parent child-history quota exceeded")
+        // An unknown ended child cannot receive guidance; adopting it would only refill the quota.
+        if (!known && remote.available === false) continue
+        // Never let one extra human-created child break every parent operation.
+        if (Object.keys(state.children).length >= 256 && !known && !evictEnded()) continue
         const previousExecution = known?.config.executionId
         const previousClient = clients.get(remote.conversationId)
         clients.delete(remote.conversationId)
@@ -215,19 +339,11 @@ export function createServerSubagents(config, ownsConversation = () => true) {
 
   async function create(agentId, title, requestId) {
     assertOwner()
-    if (!available().some(agent => agent.agentId === agentId && agent.available)) throw new Error("Choose an installed agent returned by list.")
     const childId = `subagent-${hash(`${parentId}:${requestId}`).slice(0, 32)}`
     if (state.children[childId]) return state.children[childId]
-    if (Object.keys(state.children).length >= 256) throw new Error("This parent reached its retained-child quota. Existing children and history were preserved.")
-    let active = 0
-    for (const child of Object.values(state.children)) {
-      try { const client = await clientFor(child); if (!client.ended && (child.prepared || client.busy || client.needsAttention)) active++ }
-      catch {
-        try { const saved = privateJson(join(child.config.directory, "state.json")); if (saved.executionId !== child.config.executionId || !saved.closed && (!saved.ended || saved.busy)) active++ }
-        catch { active++ } // An unavailable transport is not proof the child stopped.
-      }
-    }
-    if (active >= 3) throw new Error("This parent already has three active subagents.")
+    if (!(await available()).some(agent => agent.agentId === agentId && agent.available)) throw new Error("Choose an available agent returned by list.")
+    if (Object.keys(state.children).length >= 256 && !evictEnded()) throw new Error("This parent reached its retained-child quota and no ended child can be released. Existing children and history were preserved.")
+    if (activeChildren() >= 3) throw new Error("This parent already has three active subagents (prepared, working, or waiting for you). Wait for one to finish before preparing another.")
     const executionId = `agent-${hash(childId).slice(0, 32)}`
     const directory = join(process.env.HOME, ".local/state/still/agents", executionId)
     mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -242,8 +358,8 @@ export function createServerSubagents(config, ownsConversation = () => true) {
       command = [...config.command]
       if (config.env?.STILL_AGENT_DRIVER) command = [process.execPath, join(directory, "bridge.mjs")]
       env = { ...config.env }
-    } else if (agentId === "gemini") { command = ["gemini", "--acp"]; env = {} }
-    else { command = [process.execPath, join(directory, "bridge.mjs")]; env = { STILL_AGENT_DRIVER: agentId, STILL_AGENT_EXECUTABLE: agentId } }
+    } else if (agentId === "gemini") { command = [executableFor(agentId), "--acp"]; env = {} }
+    else { command = [process.execPath, join(directory, "bridge.mjs")]; env = { STILL_AGENT_DRIVER: agentId, STILL_AGENT_EXECUTABLE: executableFor(agentId) } }
     const child = { id: childId, title, agentId, prepared: true, paused: false, guidance: [],
       config: { directory, executionId, conversationId: childId, parentConversationId: parentId, cwd: config.cwd, agentId,
         command, env, continuity: true, requireContinuity: true, sharedLibrary: true, serverSubagents: false, title } }
@@ -253,11 +369,26 @@ export function createServerSubagents(config, ownsConversation = () => true) {
     return child
   }
 
-  async function applySetting(client, key, requested) {
+  // Applies model first: effort and mode choices depend on it, so each is validated
+  // against the choices offered after the previous change. Then verifies the final
+  // combination, since a later change (e.g. mode) may reset an earlier one.
+  async function configure(child, client, requested) {
+    await applySetting(child, client, "model", requested.modelId)
+    await applySetting(child, client, "effort", requested.effort)
+    await applySetting(child, client, "mode", requested.modeId)
+    const current = settings(client)
+    const drifted = [["model", requested.modelId], ["effort", requested.effort], ["mode", requested.modeId]]
+      .filter(([key, value]) => value !== undefined && current[key]?.current !== value)
+      .map(([key, value]) => `${key} is ${JSON.stringify(current[key]?.current ?? null)}, not ${JSON.stringify(value)}`)
+    if (drifted.length) throw new Error(`Prepared child ${child.id}: the provider did not keep the requested settings (${drifted.join("; ")}). No task was sent; inspect it and prepare it again.`)
+  }
+
+  async function applySetting(child, client, key, requested) {
     assertOwner()
     if (requested === undefined) return
     const option = settings(client)[key]
-    if (typeof requested !== "string" || !option?.choices.some(choice => choice.id === requested)) throw new Error(`Unsupported ${key} ID. Inspect the prepared child's advertised settings; no task was sent.`)
+    if (!option) throw new Error(`Prepared child ${child.id} does not offer a selectable ${key}. No task was sent; omit ${key} to keep the provider default.`)
+    if (typeof requested !== "string" || !option.choices.some(choice => choice.id === requested)) throw new Error(`Unsupported ${key} ID ${JSON.stringify(requested)} for prepared child ${child.id}. Choices: ${option.choices.map(choice => `${choice.name} (${choice.id})`).join(", ") || "none"}. No task was sent.`)
     if (option.current === requested) return
     const result = await client.request("session/set_config_option", { sessionId: client.sessionId, configId: option.id, value: requested, _meta: { expectedConfigGeneration: client.generation } })
     if (result.configOptions) client.configOptions = result.configOptions
@@ -294,17 +425,32 @@ export function createServerSubagents(config, ownsConversation = () => true) {
     }
     adoptExistingChildren()
     const mutation = ["prepare", "spawn", "guide", "cancel"].includes(input.action)
-    if (mutation && state.receipts.length >= 512) throw new Error("This parent reached its durable operation receipt quota. Previous identities will not be forgotten or replayed unsafely.")
+    if (mutation && !makeReceiptRoom()) throw new Error("This parent made 512 subagent changes within the last hour. Wait before making more; earlier operation identities were kept.")
     let result
     const find = () => {
       if (!id(input.childId) || !Object.hasOwn(state.children, input.childId)) throw new Error("This child does not belong to the parent conversation.")
       return state.children[input.childId]
     }
     if (input.action === "list") {
-      result = { agents: available(), children: await Promise.all(Object.values(state.children).map(detail)), instruction: "Prepare a child first to inspect exact model/effort/mode IDs. Coordination and guidance continue on this server with both apps closed." }
+      result = { agents: await available(), children: await Promise.all(Object.values(state.children).map(async child => reported(child, await detail(child)))), instruction: "Prepare a child first to inspect exact model/effort/mode IDs. Agents marked verified:false were only found on PATH. Coordination and guidance continue on this server with both apps closed." }
     } else if (input.action === "prepare") {
-      const child = await create(input.agentId, input.title?.trim() || `Prepared ${providers[input.agentId] || "subagent"}`, requestId)
-      result = { ...await detail(child), note: "Provider session prepared; no model task has been sent." }
+      const requested = ["modelId", "effort", "modeId"].some(key => input[key] !== undefined)
+      if (input.childId !== undefined) {
+        // Re-prepare: change an unused child's settings without creating another conversation.
+        const child = find()
+        if (input.agentId && child.agentId !== input.agentId) throw new Error(`Prepared child ${child.id} belongs to another provider. No task was sent.`)
+        const client = await clientFor(child)
+        if (client.ended || client.failure) throw new Error(`Prepared child ${child.id} is not available. No task was sent; prepare a new child with an agentId instead.`)
+        if (!child.prepared || client.messages.size || client.busy) throw new Error(`Child ${child.id} has already started work, so it can no longer be prepared. No task was sent; prepare a new child with an agentId instead.`)
+        await configure(child, client, input)
+        if (input.title?.trim()) child.title = input.title.trim()
+        persist()
+        result = { ...await detail(child), note: requested ? "Settings applied and verified; no model task has been sent. The effort and mode choices shown are those offered for the selected model." : "No settings were requested; no model task has been sent." }
+      } else {
+        const child = await create(input.agentId, input.title?.trim() || `Prepared ${providers[input.agentId] || "subagent"}`, requestId)
+        if (requested) await configure(child, await clientFor(child), input)
+        result = { ...await detail(child), note: requested ? "Provider session prepared and the requested settings verified; no model task has been sent." : "Provider session prepared; no model task has been sent." }
+      }
     } else if (input.action === "spawn") {
       if (!input.childId) throw new Error("Prepare a child first, then spawn with its stable childId. A lost acknowledgement must not create another paid task.")
       if (typeof input.title !== "string" || !input.title.trim() || typeof input.task !== "string" || !input.task.trim() || input.task.length > 12000) throw new Error("Spawn requires a title and a task of at most 12,000 characters.")
@@ -315,20 +461,38 @@ export function createServerSubagents(config, ownsConversation = () => true) {
       const messageId = `parent-task-${hash(`${parentId}:${requestId}`)}`
       if (!client.messages.has(messageId)) {
         if (!child.prepared || client.messages.size) throw new Error("Spawn requires an unused prepared child.")
-        await applySetting(client, "model", input.modelId)
-        await applySetting(client, "effort", input.effort)
-        await applySetting(client, "mode", input.modeId)
+        await configure(child, client, input)
         assertOwner()
         await client.prompt(input.task.trim(), messageId)
       }
       child.prepared = false; child.title = input.title.trim(); persist()
-      recordSharedWorker(process.env.HOME, child.config.executionId)
-      setSharedChildTitle(process.env.HOME, child.id, parentId, child.title)
-      result = { ...await detail(child), status: "Started" }
-    } else if (input.action === "inspect" || input.action === "wait") {
+      // The task is already accepted: a catalog failure must not read as a failed spawn.
+      let warning
+      try {
+        recordSharedWorker(process.env.HOME, child.config.executionId)
+        setSharedChildTitle(process.env.HOME, child.id, parentId, child.title)
+      } catch (error) { warning = `The task was sent, but the shared conversation list was not updated yet: ${error.message}` }
+      result = { ...await detail(child), status: "Started", ...(warning ? { warning } : {}) }
+    } else if (input.action === "inspect") {
       const child = find()
-      if (input.action === "wait") await new Promise(resolve => setTimeout(resolve, Math.max(1000, Math.min(15000, input.timeoutMs || 5000))))
-      result = await detail(child)
+      result = reported(child, await detail(child))
+    } else if (input.action === "wait") {
+      // Read-only: resolve the child here, then wait outside the lane so other calls proceed.
+      const child = find()
+      const client = await clientFor(child).catch(() => null)
+      const timeout = Math.max(1000, Math.min(15000, input.timeoutMs || 5000))
+      return { [deferred]: async () => {
+        let timedOut = false
+        if (client) {
+          const settled = () => client.failure || client.ended || !client.busy && !client.needsAttention && !deliverable(child)
+          // Starting a queued turn is not news; a result, a request, an answer, or a failure is.
+          const signature = () => JSON.stringify([client.failure || "", client.ended, [...client.pendingRequests].sort(), client.lastResult?.resultIndex || 0])
+          const initial = signature()
+          // Returns on the first real change rather than always sleeping the full timeout.
+          timedOut = await client.waitFor(() => settled() || signature() !== initial, timeout)
+        }
+        return { ...reported(child, await detail(child)), timedOut }
+      } }
     } else if (input.action === "guide") {
       const child = find()
       if (typeof input.message !== "string" || !input.message.trim() || input.message.length > 4000) throw new Error("Guidance must be 1–4,000 characters.")
@@ -353,17 +517,18 @@ export function createServerSubagents(config, ownsConversation = () => true) {
       if (client.busy && intent.promptId !== null) await client.request("session/cancel", { sessionId: client.sessionId, _meta: { promptId: intent.promptId } })
       result = { childId: child.id, status: client.busy ? "Cancellation requested" : "Already idle", guidancePaused: true }
     } else throw new Error("Unsupported subagent operation")
-    if (mutation) { state.receipts.push({ id: requestId, fingerprint, result }); persist() }
+    if (mutation) { state.receipts.push({ id: requestId, fingerprint, result, at: Date.now() }); persist() }
     return result
   }
 
-  // Reattach queues after a parent worker restart without requiring a visible client.
-  for (const child of Object.values(state.children)) void clientFor(child).then(() => drain(child)).catch(() => {})
+  // Reattach only children with deliverable guidance after a parent worker restart;
+  // others attach on demand instead of holding a transport process each.
+  for (const child of Object.values(state.children)) if (deliverable(child)) void clientFor(child).then(() => drain(child)).catch(() => {})
   return {
     apply(input, requestId) {
-      const result = lane.then(() => apply(input, requestId))
-      lane = result.catch(() => {})
-      return result
+      const phase = lane.then(() => apply(input, requestId))
+      lane = phase.catch(() => {})
+      return phase.then(value => value?.[deferred] ? value[deferred]() : value)
     },
     close() {
       closing = true

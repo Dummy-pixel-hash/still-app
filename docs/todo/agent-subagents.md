@@ -1,6 +1,6 @@
 # AG-12 — Subagent integration and direct chat
 
-Updated: **2026-11-10**. Status: **IN PROGRESS — create/resume fix and parent-model guide implemented locally; Windows verification pending**.
+Updated: **2026-11-24**. Status: **IN PROGRESS — runtime audit fixes implemented locally (see below); Windows and real cross-provider verification pending**.
 Feature status and delivery order live in the [Agents tracker](README.md).
 The implementation checklist is in [AG-12](agents-roadmap.md#ag-12-subagent-integration).
 
@@ -38,6 +38,44 @@ This is an implementation in progress, not a live compatibility claim: provider
 tool-call delivery, SSH reconnect behavior, packaged Windows behavior, and actual
 cross-provider sign-in have only fixture/build coverage so far. Pending tool requests
 and app-owned operation metadata also need broader restart/crash recovery validation.
+
+## Runtime audit fixes (2026-11-24)
+
+An audit of the server coordinator (`src-tauri/agent-host/subagents.mjs`) found defects that
+fixture tests did not cover. Fixed locally, with tests in `tests-agents/server-subagents.test.mjs`:
+
+- **`wait` returns at the first real change** — a finished turn, a new or answered request, or a
+  failure — instead of always sleeping its timeout. It runs outside the parent's serialized
+  operation lane, so a pending wait no longer blocks `inspect`, `guide`, or `cancel`. The result
+  carries `timedOut`; starting a queued turn alone is not reported as a change.
+- **Results are per turn.** `lastResult` holds the child's reply text for its latest finished
+  turn (agent message chunks only: no thoughts, echoed prompts, or earlier turns), with its prompt,
+  message identity, source, stop reason, or error. `newResult` marks a result the parent has not
+  yet been shown. `lastUpdate` is now the current turn's reply tail or latest tool title.
+- **Children are not offered `still_subagents`.** Child workers launch with `STILL_SUBAGENTS=0`;
+  the MCP server, Codex dynamic tools, and the Pi extension omit the tool. Server-side rejection
+  remains as a backstop.
+- **Spawn always names a prepared child.** The supervisor's validation, the schema text, and the
+  server coordinator now agree. (The in-app handler that serves workers from older builds still
+  accepts the spawn-by-agent form those workers' own schema advertises.)
+- **Quotas no longer disable delegation permanently.** Receipts older than an hour are released
+  when the 512 limit is reached (delivery stays deduplicated by message identity and prepare by
+  its derived child ID); 512 changes within an hour are still refused. Ended idle children are
+  released from the 256 retained-child limit; their history stays in the shared library. One
+  extra human-created child no longer makes every parent operation fail.
+- **Lower worker load.** Active children are counted from saved worker records instead of
+  attaching to every retained child; only children with deliverable guidance reattach at
+  startup; ended children's read-only transports are released. Agent PATH checks are
+  asynchronous and cached, so they no longer stall the parent's own streaming.
+- **Eligibility uses the app's verified discovery.** A root conversation's worker receives the
+  host's discovered agents (`subagentAgents`): availability, reason, and the executable the user
+  configured, which cross-provider children now launch with. Agents only found on `PATH` are
+  listed with `verified: false`.
+- Answering one of two pending child requests keeps the child marked as needing you.
+- A spawn whose task was accepted reports `Started` with a `warning` if the shared conversation
+  list could not be updated, instead of an error.
+- A parent-titled child is no longer asked to retitle itself on its first prompt.
+- Pi tool-call IDs are hashed into the operation-identity alphabet (provider IDs may contain `|`).
 
 ## Resolved locally; Windows/provider verification pending: child ID was treated as resume
 
@@ -144,6 +182,16 @@ status color is an accent, never the only status explanation.
 - Hide the empty panel when the parent has no children. Preserve keyboard access,
   visible focus, accessible names, focus return, and reduced-motion behavior.
 
+**Implemented locally (2026-11-24):** row details in place (agent, status, model, effort,
+mode) with **Guide**, **Open chat**, and **Stop**; a confirmed **Stop all subagents** scoped
+to this chat's working children; a collapsed **Finished** section. Unread markers reuse the
+account-wide read state (`sharedUnread`, cleared only by opening the chat): a settled child
+whose finished turn the user has not opened shows **New result** and stays out of Finished;
+an unattached child (no live status in the app) with unread activity shows **New activity**,
+never a claimed result. The header adds "· N new". Guide from the panel sends as the user and
+only to an idle child; it never starts a concurrent turn. Covered by Playwright fixture tests
+in `tests-agents/workspace.spec.ts`.
+
 ## Direct access to the child chat
 
 **Open chat must navigate to the same durable child conversation that the parent
@@ -220,15 +268,15 @@ schema and avoid provider-specific contradictory instructions.
 | Field | Meaning and constraints |
 | --- | --- |
 | `action` | One of the actual action names above; do not invent `send`, `stop`, or other aliases |
-| `agentId` | An eligible agent ID returned by `list`; required when preparing a new child or spawning without a prepared child |
-| `childId` | The stable child conversation ID returned by `prepare`/`spawn`, not its title, execution ID, or provider session ID |
+| `agentId` | An eligible agent ID returned by `list`; required by `prepare`. Optional on `spawn`, where it must match the prepared child |
+| `childId` | The stable child conversation ID returned by `prepare`; required by `spawn`, `inspect`, `guide`, `wait`, and `cancel`. Not its title, execution ID, or provider session ID |
 | `title` | A short task-specific title; required for `spawn`, optional for a new `prepare` |
 | `task` | The bounded task and relevant context to submit at `spawn`; preparation alone must not submit it |
 | `modelId` | An exact model ID from that child's provider-returned choices, not a guessed display name |
 | `effort` | An exact reasoning/effort option for the selected model; available values may change after model selection |
 | `modeId` | An exact supported agent-mode ID; Plan/Build must not be inferred from permission profiles or emulated by wording the prompt |
 | `message` | Additional child guidance; distinguish queue acknowledgement from actual delivery |
-| `timeoutMs` | A bounded wait of 1,000–15,000 milliseconds; a timeout does not mean the task failed |
+| `timeoutMs` | Upper bound for `wait`, 1,000–15,000 milliseconds. `wait` returns earlier on a result, request, answer, or failure; `timedOut: true` only means nothing changed yet |
 
 Include actual schema limits in the runtime descriptions: title 1–160 characters,
 task 1–12,000, guidance 1–4,000, model ID 1–300, and effort/mode IDs 1–100.
@@ -251,9 +299,9 @@ task 1–12,000, guidance 1–4,000, model ID 1–300, and effort/mode IDs 1–1
 7. Use `cancel` when necessary. Cancellation requested is not confirmed termination;
    inspect the outcome. Queued guidance pauses and existing file edits remain.
 
-#### Remaining preparation refinement — not yet supported
+#### Preparation refinement — implemented locally (2026-11-24)
 
-Extend `prepare` to accept an **existing unused `childId` plus requested settings**, as
+`prepare` accepts an **existing unused `childId` plus requested settings**, as
 an alternative to preparing a new agent. This lets the parent choose a model and
 receive refreshed effort/mode choices before submitting work, without creating another
 child. Scope it to this parent's idle, unused prepared children. Reject unknown,
@@ -266,6 +314,17 @@ that changing modes leaves every other setting unchanged.
 Option failures should identify the affected prepared child, invalid field, valid
 choices, and whether any task was submitted. On uncertain startup or delivery, instruct
 the parent to inspect/reconcile before retrying; never repeat the original task blindly.
+
+**Implementation:** the server coordinator applies model, then effort, then mode, each
+validated against the choices offered after the previous change, then rereads the
+effective settings and rejects the request if the provider did not keep the requested
+combination (for example, a mode change that resets the model). `spawn` runs the same
+check before submitting its task. `prepare` with an `agentId` may also carry settings,
+which are applied and verified the same way. Errors name the prepared child, the field,
+its valid choices, and state that no task was sent. Started, ended, unavailable, unknown,
+and other parents' children are rejected. Covered by fixture tests in
+`tests-agents/server-subagents.test.mjs`; not yet exercised against real providers.
+Workers launched by older builds keep their own validation, which requires `agentId`.
 
 ## Runtime ownership and persistence
 
@@ -354,10 +413,12 @@ Primary integration points, relative to the application root:
   identity conflicts, duplicate operations, and preserved parent/scope metadata.
 - [ ] All provider tool routes expose the same model-facing action/field guide, exact
   option IDs, defaults, limits, and queue/cancellation/uncertain-delivery semantics.
-- [ ] Re-preparing an unused child refreshes model-dependent choices without creating
+- [x] Re-preparing an unused child refreshes model-dependent choices without creating
   another conversation or submitting a task; unrelated/started children are rejected.
-- [ ] Invalid/unsupported settings submit no task, return actionable choices and the
+  (Fixture coverage only; real providers unverified.)
+- [x] Invalid/unsupported settings submit no task, return actionable choices and the
   prepared child identity, and never trigger silent model/mode substitution.
+  (Fixture coverage only; real providers unverified.)
 - [ ] A real supported parent delegates to a different installed provider in the
   same project folder; its titled child appears in the correct parent's panel.
 - [ ] The user opens that exact child chat, sends a message, receives a response,

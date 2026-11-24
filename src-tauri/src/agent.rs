@@ -358,6 +358,32 @@ pub struct StartArgs {
     conversation_id: Option<String>,
     custom_agent: Option<CustomAgent>,
     parent_conversation_id: Option<String>,
+    /// The app's verified discovery for this host, used by a root conversation's
+    /// worker to decide which agents it may delegate to and how to launch them.
+    #[serde(default)]
+    subagent_agents: Option<Vec<SubagentAgent>>,
+}
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentAgent {
+    agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable: Option<String>,
+    available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+const SUBAGENT_PROVIDERS: [&str; 5] = ["opencode", "pi", "codex", "claude", "gemini"];
+/// Keeps only built-in providers with a launchable executable; a bad entry is dropped,
+/// never trusted, so the worker falls back to reporting that agent as unverified.
+fn subagent_agents_payload(agents: &[SubagentAgent]) -> Value {
+    let valid = agents.iter().filter(|agent| SUBAGENT_PROVIDERS.contains(&agent.agent_id.as_str()))
+        .filter(|agent| agent.executable.as_deref().is_none_or(|path| !path.is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control)
+            && (path.starts_with('/') || path.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte)))))
+        .take(SUBAGENT_PROVIDERS.len())
+        .map(|agent| SubagentAgent { reason: agent.reason.as_ref().map(|reason| reason.chars().filter(|c| !c.is_control()).take(300).collect()), ..agent.clone() })
+        .collect::<Vec<_>>();
+    json!(valid)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1436,6 +1462,10 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
 }
 
 fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>, parent_conversation_id: Option<&str>) -> Result<(String, String), StillError> {
+    persistent_command_with(execution, conversation_id, cwd, agent_id, executable, create, cursor, runtime, todo_seed, recover_from, custom, parent_conversation_id, None)
+}
+
+fn persistent_command_with(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>, parent_conversation_id: Option<&str>, subagent_agents: Option<&[SubagentAgent]>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -1458,6 +1488,8 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
         payload["recoverySource"] = json!(include_str!("../agent-host/recovery.mjs"));
         payload["sharedLibrarySource"] = json!(include_str!("../agent-host/shared-library.mjs"));
         payload["subagentsSource"] = json!(include_str!("../agent-host/subagents.mjs"));
+        // Only a root conversation delegates; a child never receives eligibility data.
+        if let Some(agents) = subagent_agents.filter(|_| parent_conversation_id.is_none()) { payload["subagentAgents"] = subagent_agents_payload(agents); }
         payload["bridgeSource"] = json!(include_str!("../agent-host/bridge.mjs"));
         if let Some(previous) = recover_from { payload["recoverFrom"] = previous.clone(); }
         if let Some(seed) = todo_seed { payload["todoSeed"] = seed.clone(); }
@@ -1640,7 +1672,7 @@ pub async fn still_agent_start(
         seed
     });
     let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref(), parent_conversation_id.as_deref())?;
+    let (remote, bootstrap_payload) = persistent_command_with(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref(), parent_conversation_id.as_deref(), args.subagent_agents.as_deref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -3700,6 +3732,26 @@ mod tests {
     }
 
     #[test]
+    fn root_workers_receive_verified_subagent_eligibility_and_children_do_not() {
+        let agents = vec![
+            SubagentAgent { agent_id: "codex".into(), executable: Some("/opt/codex/bin/codex".into()), available: true, reason: None },
+            SubagentAgent { agent_id: "claude".into(), executable: None, available: false, reason: Some("Needs sign-in\nrun claude".into()) },
+            SubagentAgent { agent_id: "custom-x".into(), executable: Some("/bin/x".into()), available: true, reason: None },
+            SubagentAgent { agent_id: "pi".into(), executable: Some("pi; rm -rf /".into()), available: true, reason: None },
+        ];
+        let decode = |raw: String| -> Value { serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap() };
+        let (_, root) = persistent_command_with("agent-root", "root", "/srv/project", "opencode", "opencode", true, 0, None, None, None, None, None, Some(&agents)).unwrap();
+        let root = decode(root);
+        assert_eq!(root["subagentAgents"], json!([
+            {"agentId":"codex","executable":"/opt/codex/bin/codex","available":true},
+            {"agentId":"claude","available":false,"reason":"Needs sign-inrun claude"},
+        ]));
+        let (_, child) = persistent_command_with("agent-child", "child", "/srv/project", "opencode", "opencode", true, 0, None, None, None, None, Some("root"), Some(&agents)).unwrap();
+        assert!(decode(child).get("subagentAgents").is_none());
+        let (_, attach) = persistent_command_with("agent-root", "root", "/srv/project", "opencode", "", false, 3, None, None, None, None, None, Some(&agents)).unwrap();
+        assert!(decode(attach).get("subagentAgents").is_none(), "an attach never relaunches the worker, so it carries no eligibility");
+    }
+    #[test]
     fn persistent_agent_bootstrap_streams_large_sources_over_stdin() {
         let runtime = ProviderRuntime {
             transport: "codex-app-server".into(),
@@ -4122,7 +4174,7 @@ else if(m.method==='session/prompt'){const racing=m.params.prompt[0].text==='clo
             let custom = CustomAgent { id:"custom-continuity-test".into(),host_key:host,name:"Continuity test peer".into(),executable:peer.to_string_lossy().into(),args:vec![],transport:"acp-v1".into() };
             let start = still_agent_start(handle.clone(),state.clone(),StartArgs {
                 native_session_id:connected.session_id.clone(),local_session_id:id.clone(),agent_id:custom.id.clone(),cwd:Some(project.to_string_lossy().into()),executable:None,
-                resume_session_id:None,conversation_id:Some(id.clone()),custom_agent:Some(custom),parent_conversation_id:None,
+                resume_session_id:None,conversation_id:Some(id.clone()),custom_agent:Some(custom),parent_conversation_id:None,subagent_agents:None,
             }).await.unwrap();
             tokio::time::timeout(Duration::from_secs(20),async {
                 loop { let snapshot=still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();

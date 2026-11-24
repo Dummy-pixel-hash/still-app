@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder"
 import { pathToFileURL } from "node:url"
 
 const todoHost = process.env.STILL_TODO_MODULE ? await import(pathToFileURL(process.env.STILL_TODO_MODULE).href) : null
-const todoMcp = () => ({ command: process.execPath, args: [process.env.STILL_TODO_MODULE, "mcp"], env: { STILL_TODO_SOCKET: process.env.STILL_TODO_SOCKET, STILL_TODO_TOKEN: process.env.STILL_TODO_TOKEN } })
+const todoMcp = () => ({ command: process.execPath, args: [process.env.STILL_TODO_MODULE, "mcp"], env: { STILL_TODO_SOCKET: process.env.STILL_TODO_SOCKET, STILL_TODO_TOKEN: process.env.STILL_TODO_TOKEN, ...(process.env.STILL_SUBAGENTS ? { STILL_SUBAGENTS: process.env.STILL_SUBAGENTS } : {}) } })
 
 // Provider tool results may include several encoded images in one JSON record.
 // Keep a bounded ceiling, but do not reject ordinary screenshot-heavy turns.
@@ -318,7 +318,7 @@ export class CodexDriver extends Driver {
     this.peer.send({ jsonrpc: "2.0", method: "initialized" })
     const account = await this.peer.request("account/read", {})
     if (account.requiresOpenaiAuth && !account.account) throw new Error("Codex is installed but needs sign-in. Run codex login on this server.")
-    const tools = todoHost ? [todoHost.todoTool, todoHost.chatTitleTool, todoHost.subagentTool] : []
+    const tools = todoHost ? todoHost.hostTools() : []
     const dynamicTools = tools.length ? { dynamicTools: tools.map(tool => ({ type: "function", ...tool })) } : {}
     const result = await this.peer.request(resume ? "thread/resume" : "thread/start", { cwd: process.cwd(), ...(resume ? { threadId: resume } : {}), ...dynamicTools })
     this.id = result.thread?.id
@@ -395,7 +395,7 @@ export class CodexDriver extends Driver {
     if (event.id !== undefined && method) {
       try {
         let result
-        if (method === "item/tool/call" && todoHost && [todoHost.todoTool.name, todoHost.chatTitleTool.name, todoHost.subagentTool.name].includes(p.tool) && !p.namespace) {
+        if (method === "item/tool/call" && todoHost && todoHost.hostTools().some(tool => tool.name === p.tool) && !p.namespace) {
           try {
             if (p.tool === todoHost.todoTool.name) {
               await todoHost.markTodoToolReady(todoHost.todoConnection())

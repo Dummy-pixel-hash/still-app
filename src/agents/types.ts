@@ -200,7 +200,9 @@ export interface CustomAgent {
   args: string[]
   transport: "acp-v1"
 }
-export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string; customAgent?: CustomAgent; parentConversationId?: string }
+/** The app's verified discovery, given to a root conversation's worker for delegation. */
+export interface SubagentEligibility { agentId: string; executable?: string; available: boolean; reason?: string }
+export interface AgentLaunchOptions { cwd?: string; executable?: string; resumeSessionId?: string; conversationId?: string; customAgent?: CustomAgent; parentConversationId?: string; subagentAgents?: SubagentEligibility[] }
 export interface AgentAvailability { agentId: string; executable?: string; available: boolean; installed: boolean; runtime: "native" | "acp"; runtimeAvailable: boolean; message?: string; providerRuntime?: AgentProviderRuntime; checkedAt?: number }
 
 export interface AgentThreadSnapshot {

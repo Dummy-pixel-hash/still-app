@@ -45,22 +45,27 @@ export const chatTitleTool = {
 
 export const subagentTool = {
   name: "still_subagents",
-  description: "Manage only this root conversation's child agents in the same project folder. Flow: list -> prepare(agentId) -> inspect the returned settings choices -> spawn(childId,title,task). prepare starts a provider session but sends no model task. Keep its stable childId before spawning so a lost acknowledgement cannot create another paid task. Its settings include exact IDs and current defaults. On spawn, model is applied first and dependent effort options are refreshed before effort/mode validation; unsupported choices fail without sending the task. Omit settings to keep the provider defaults. Use inspect for effective settings/status, guide for more instructions (Queued is not Delivered), wait for bounded status updates, and cancel to request a stop. Children cannot spawn children. Permissions remain user-owned. Cancellation does not undo file edits.",
+  description: "Manage only this root conversation's child agents in the same project folder. Flow: list -> prepare(agentId) -> inspect the returned settings choices -> optionally prepare(childId, modelId) to apply a model and read the effort/mode choices it offers -> spawn(childId,title,task). prepare starts a provider session but sends no model task; preparing an existing childId only changes settings of a child that has not started work and never creates another child. Keep its stable childId before spawning so a lost acknowledgement cannot create another paid task. Its settings include exact IDs and current defaults. On spawn, model is applied first and dependent effort options are refreshed before effort/mode validation; unsupported choices fail without sending the task. Omit settings to keep the provider defaults. Use inspect for effective settings/status and lastResult (the child's reply for its latest finished turn; newResult marks one you have not seen), guide for more instructions (Queued is not Delivered), wait to block until the child's next result or request (bounded), and cancel to request a stop. Children cannot spawn children. Permissions remain user-owned. Cancellation does not undo file edits.",
   inputSchema: {
     type: "object", additionalProperties: false, required: ["action"],
     properties: {
-      action: { type: "string", enum: ["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"], description: "Use list to discover eligible agent IDs; prepare to create an unused child and read its settings choices; spawn to apply optional settings and submit its first task." },
-      childId: { type: "string", minLength: 1, maxLength: 160, description: "Stable child conversation ID returned by prepare or spawn. Use this ID, never its title or provider session ID." },
-      agentId: { type: "string", minLength: 1, maxLength: 100, description: "Exact eligible agent ID returned by list. Required by prepare and direct spawn." },
+      action: { type: "string", enum: ["list", "prepare", "spawn", "inspect", "guide", "wait", "cancel"], description: "Use list to discover eligible agent IDs; prepare with agentId to create an unused child, or with its childId to change that unused child's settings and read refreshed choices; spawn to apply optional settings and submit its first task." },
+      childId: { type: "string", minLength: 1, maxLength: 160, description: "Stable child conversation ID returned by prepare. Pass it to prepare to re-configure that unused child. Required by spawn, inspect, guide, wait, and cancel. Use this ID, never its title or provider session ID." },
+      agentId: { type: "string", minLength: 1, maxLength: 100, description: "Exact eligible agent ID returned by list. Required by prepare for a new child; optional otherwise, where it must match the prepared child." },
       title: { type: "string", minLength: 1, maxLength: 160, description: "Short child-task title. Optional during prepare, required during spawn." },
       task: { type: "string", minLength: 1, maxLength: 12000, description: "The task and only relevant context to send to the child. Sent once, after requested settings are validated." },
-      modelId: { type: "string", minLength: 1, maxLength: 300, description: "Exact provider model ID returned by prepare." },
+      modelId: { type: "string", minLength: 1, maxLength: 300, description: "Exact provider model ID returned by prepare. Applied before effort and mode, whose choices may change with the model; the final combination is verified before any task is sent." },
       effort: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider effort/reasoning option ID returned by prepare." },
       modeId: { type: "string", minLength: 1, maxLength: 100, description: "Exact provider agent-mode option ID returned by prepare (for example plan/build only when actually advertised)." },
       message: { type: "string", minLength: 1, maxLength: 4000, description: "Additional child guidance. If queued, report Queued; do not claim the child received it until inspect confirms the delivery." },
-      timeoutMs: { type: "integer", minimum: 1000, maximum: 15000, description: "Bounded wait duration in milliseconds; timeout does not imply child failure." },
+      timeoutMs: { type: "integer", minimum: 1000, maximum: 15000, description: "Upper bound for wait in milliseconds. wait returns early when the child finishes a turn, needs the user, has a request answered, or fails; timedOut:true only means nothing changed yet, not failure." },
     },
   },
+}
+
+/** Tools this provider process may offer. A child conversation never sees delegation. */
+export function hostTools(env = process.env) {
+  return env.STILL_SUBAGENTS === "0" ? [todoTool, chatTitleTool] : [todoTool, chatTitleTool, subagentTool]
 }
 
 export function todoStorePath(home, conversationId) {
@@ -374,7 +379,7 @@ async function mcp() {
     try {
       if (method === "initialize") result = { protocolVersion: ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].includes(params?.protocolVersion) ? params.protocolVersion : "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "still-todos", version: "1.0.0" } }
       else if (method === "ping") result = {}
-      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: [todoTool, chatTitleTool, subagentTool] } }
+      else if (method === "tools/list") { await markTodoToolReady(connection); result = { tools: hostTools() } }
       else if (method === "tools/call") {
         try {
           const requestId = `${client}:${createHash("sha256").update(JSON.stringify(id)).digest("hex")}`

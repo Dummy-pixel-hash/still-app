@@ -75,7 +75,9 @@ type Props = {
 const messageOf = (e: unknown) => e && typeof e === "object" && "message" in e ? String(e.message) : String(e || "Operation failed")
 const idle = (row: AgentThreadRow | null) => !!row && !row.meta.sharedDeleted && !(row.remoteImported && !row.continuity) && !row.recoveryReason && !row.turnActive && !row.pendingPermission && !row.pendingInput && !row.meta.submissionUnknown && ["working", "complete", "cancelled", "error"].includes(row.state)
 const statusOf = (row: AgentThreadRow) => row.meta.subagentPrepared ? "Prepared" : row.state === "detached" ? "On server" : row.pendingPermission || row.pendingInput ? "Needs you" : row.state === "saved" ? "Saved" : row.state === "connecting" ? "Connecting" : row.state === "rewinding" ? "Reverting" : row.state === "submissionUnknown" ? "Uncertain" : row.state === "error" ? row.turnActive ? "Connection issue · still running" : "Turn failed" : row.turnActive ? "Working" : "Ready"
-const subagentInFlight = (row: AgentThreadRow) => row.turnActive || ["connecting", "working", "inputRequired", "detached", "submissionUnknown", "rewinding"].includes(row.state)
+const SUBAGENT_PROVIDERS = ["opencode", "pi", "codex", "claude", "gemini"]
+// "working" with no active turn is the connected, idle state after a finished turn; it is not in flight.
+const subagentInFlight = (row: AgentThreadRow) => row.turnActive || !!row.pendingInput || !!row.pendingPermission || ["connecting", "inputRequired", "detached", "submissionUnknown", "rewinding"].includes(row.state)
 async function subagentOperationId(parentExecutionId: string, requestId: string) {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${parentExecutionId}:${requestId}`)))
   return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("")
@@ -147,7 +149,8 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const [expandedRequest, setExpandedRequest] = useState<string | null>(null)
   const requestOperations = useRef(new Set<string>())
   const subagentRequestOperations = useRef(new Set<string>())
-  const subagentRequestQueue = useRef(Promise.resolve())
+  // One lane per parent: a slow request from one parent must not hold up another.
+  const subagentRequestQueues = useRef(new Map<string, Promise<void>>())
   const subagentGuidanceAttempts = useRef(new Set<string>())
   const [draftGeneration, setDraftGeneration] = useState(0)
   const surface = useRef<HTMLElement>(null), textarea = useRef<HTMLTextAreaElement>(null), filePicker = useRef<HTMLInputElement>(null), search = useRef<HTMLInputElement>(null), timelineSearch = useRef<HTMLInputElement>(null)
@@ -158,7 +161,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   useAgentPopover(projectPopover, projectChoices, "start", true)
   const navigation = useRef(0), mounted = useRef(true), prefsRef = useRef(prefs)
   const folderOperation = useRef(0)
-  const callbacks = useRef({ onCheck, onCatalog, onStart }); callbacks.current = { onCheck, onCatalog, onStart }; prefsRef.current = prefs
+  const callbacks = useRef({ onCheck, onCatalog, onStart }); prefsRef.current = prefs
   const host = session ? hostKey(session) : ""
   const agents = agentsForHost(host, prefs.customAgents)
   const customDiscoveryKey = JSON.stringify(prefs.customAgents[host] || [])
@@ -166,6 +169,15 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const discoverySelectionKey = agentDiscoverySelectionKey(transportId, executableSelections, agents.map(agent => agent.id), prefs.customAgents[host])
   const discovery = useAgentDiscovery(host, discoverySelectionKey)
   const discoveryCurrent = !discovery.stale && discovery.selectionKey === discoverySelectionKey
+  // A root conversation's worker delegates with this host's verified discovery, so it
+  // launches the executable the user configured and reports unverified agents honestly.
+  const subagentAgents = discoveryCurrent ? discovery.agents.filter(info => SUBAGENT_PROVIDERS.includes(info.agentId)).map(info => {
+    const executable = (executableSelections[info.agentId]?.trim() || info.executable || "").trim()
+    const available = info.installed && info.available
+    return { agentId: info.agentId, ...(executable ? { executable } : {}), available, ...(available ? {} : { reason: info.message || "Not available on this server" }) }
+  }) : undefined
+  const startAgent: Props["onStart"] = (agentId, options, onCreated) => onStart(agentId, options?.parentConversationId || !subagentAgents ? options : { ...options, subagentAgents }, onCreated)
+  callbacks.current = { onCheck, onCatalog, onStart: startAgent }
   const discoveryStatus = (info?: AgentAvailability) => {
     const status = info?.installed
       ? info.available ? info.agentId.startsWith("custom-") ? "Installed · connection not tested" : info.runtime === "acp" ? "Installed · ACP connection" : "Installed · native connection" : info.message || "Integration unavailable"
@@ -191,8 +203,8 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
       if (completed.has(operationKey)) continue
       if (subagentRequestOperations.current.has(operationKey)) continue
       subagentRequestOperations.current.add(operationKey)
-      const task = subagentRequestQueue.current.then(async () => {
-        const action = typeof input.action === "string" ? input.action : ""
+      const action = typeof input.action === "string" ? input.action : ""
+      const run = async () => {
         const childId = typeof input.childId === "string" ? input.childId : ""
         const currentRows = () => latestThreads.current
         const childRows = () => currentRows().filter(row => row.meta.parentConversationId === parent.meta.id)
@@ -202,7 +214,8 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
           const definition = agents.find(agent => agent.id === agentId)
           const support = discovery.agents.find(info => info.agentId === agentId)
           if (!definition || support?.available !== true) throw new Error("Choose an installed, available agent returned by still_subagents list.")
-          if (childRows().filter(subagentInFlight).length >= 3) throw new Error("This parent already has three active subagents. Wait for one to finish before preparing another.")
+          // Matches the server coordinator: a prepared child holds a provider session and a slot.
+          if (childRows().filter(row => subagentInFlight(row) || row.meta.subagentPrepared).length >= 3) throw new Error("This parent already has three active subagents (prepared, working, or waiting for you). Wait for one to finish before preparing another.")
           if (!connected || !transportId || host !== parent.meta.hostKey) throw new Error("Select and connect to the parent conversation's server before preparing a child.")
           const operationMap = parent.meta.subagentOperations || {}
           const conversationId = operationMap[operationId] || `subagent-${crypto.randomUUID()}`
@@ -239,6 +252,9 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
           const title = typeof input.title === "string" ? input.title.trim().slice(0, 160) : ""
           const task = typeof input.task === "string" ? input.task.trim() : ""
           if (!title || !task || task.length > 12000) throw new Error("Spawn requires a title and task of at most 12,000 characters.")
+          // This path only serves workers launched by older builds, whose own tool schema still
+          // advertises spawning by agentId; current workers require a prepared childId server-side.
+          // A spawn by agentId is still idempotent: its child ID is reserved per request identity.
           let child = childId ? findChild() : undefined
           if (childId && (!child || !child.meta.subagentPrepared || child.transcript.some(item => item.type === "userMessage"))) throw new Error("spawn requires an unused prepared child from this parent. Use prepare first to discover settings.")
           if (child && typeof input.agentId === "string" && child.agentId !== input.agentId) throw new Error("The prepared child belongs to a different agent. Inspect the prepared child and retry without changing its agent.")
@@ -284,14 +300,26 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
           }
         } else if (action === "wait") {
           const timeout = Number.isSafeInteger(input.timeoutMs) ? Math.max(1000, Math.min(15000, Number(input.timeoutMs))) : 5000
-          await new Promise(resolve => setTimeout(resolve, timeout))
+          if (!findChild()) throw new Error("That child conversation does not belong to this parent.")
+          // Return on the first real change (a finished turn, a request, an answer, a failure), not after a fixed sleep.
+          const settled = (row?: AgentThreadRow) => !row || !subagentInFlight(row) && !row.pendingInput && !row.pendingPermission && !(row.meta.subagentGuidance?.length && !row.meta.subagentGuidancePaused)
+          const signature = (row?: AgentThreadRow) => row ? JSON.stringify([!!(row.pendingInput || row.pendingPermission), row.state === "error" || row.state === "submissionUnknown", row.transcript.filter(item => item.type === "threadComplete" || item.type === "threadError").length]) : ""
+          const initial = signature(findChild()), until = Date.now() + timeout
+          let timedOut = false
+          while (!settled(findChild()) && signature(findChild()) === initial) {
+            if (Date.now() >= until) { timedOut = true; break }
+            await new Promise(resolve => setTimeout(resolve, 250))
+          }
           const child = findChild()
           if (!child) throw new Error("That child conversation does not belong to this parent.")
-          result = detail(child)
+          result = { ...detail(child), timedOut }
         } else throw new Error("Unsupported subagent action.")
         await nativeBridge.agentSubagentReply(parent.executionId, requestId, result)
-      })
-      subagentRequestQueue.current = task.catch(() => {})
+      }
+      // wait only reads, so it runs beside the parent's lane instead of blocking it.
+      const lane = subagentRequestQueues.current.get(parent.executionId) || Promise.resolve()
+      const task = action === "wait" ? run() : lane.then(run)
+      if (action !== "wait") subagentRequestQueues.current.set(parent.executionId, task.catch(() => {}))
       void task.catch(error => { void nativeBridge.agentSubagentReply(parent.executionId, requestId, undefined, messageOf(error)).catch(() => { subagentRequestOperations.current.delete(operationKey) }); setError(messageOf(error)) })
     }
   }, [allThreads, agents, discovery.agents, host, connected, transportId])
@@ -350,7 +378,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
   const configurationKey = JSON.stringify([contextKey, agentId, executable, customAgent])
   const startScreen = !current && !archived && view !== "settings"
   const preparing = hydrated && startScreen && connectedHere && !!context && !sharedProjectDeleted(context) && discoveryCurrent && available?.available === true && !discovery.checking
-  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent, ...(parentReturnId ? { parentConversationId: parentReturnId } : {}) }, context?.host || "", onStart)
+  const preparation = usePreparedAgent(`${configurationKey}:${draftGeneration}`, preparing, agentId, { cwd: context?.folder, executable, customAgent, ...(parentReturnId ? { parentConversationId: parentReturnId } : {}) }, context?.host || "", startAgent)
   const prepared = allThreads.find(row => row.meta.id === preparation.id) || null
   const activeAgent = current || prepared
   const repositoryCwd = activeAgent?.cwd || current?.meta.folder || ""
