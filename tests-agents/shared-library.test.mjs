@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { discoverLibrary, mutateSharedLibrary, recordSharedWorker, registerSharedProject, reserveSharedChildSlot, sharedLibrary } from "../src-tauri/agent-host/shared-library.mjs"
+import { discoverLibrary, executionLineage, mutateSharedLibrary, recordSharedWorker, registerSharedProject, reserveSharedChildSlot, sharedLibrary } from "../src-tauri/agent-host/shared-library.mjs"
 
 const source = fileURLToPath(new URL("../src-tauri/agent-host/shared-library.mjs", import.meta.url))
 async function fixture(t, modifiedAt, overrides = {}) {
@@ -342,6 +342,25 @@ test("explicit same-provider recovery advances one execution generation while pr
   assert.equal(current.shared.readThroughSeq, 8)
   assert.equal(current.shared.values.pinned, true)
   assert.equal(sharedLibrary(f.home).rows[0].shared.generation, 2, "old worker discovery cannot rewind the selected generation")
+})
+
+test("lineage proves a multi-hop migration, is absent without one, and is bounded and cycle-safe", async t => {
+  const f = await fixture(t)
+  assert.equal("lineage" in f.row, false, "no migration means no lineage field")
+  const session = "original-provider-session"
+  for (const [id, replaces] of [["execution-b", "execution-a"], ["execution-c", "execution-b"]]) {
+    const directory = join(f.home, ".local/state/still/agents", id)
+    await mkdir(directory, { mode: 0o700 })
+    await writeFile(join(directory, "state.json"), JSON.stringify({ ...f.worker, executionId: id, replacesExecutionId: replaces, replacesAgentSessionId: session }), { mode: 0o600 })
+    assert.equal(sharedLibrary(f.home).rows[0].executionId, id)
+  }
+  const row = sharedLibrary(f.home).rows[0]
+  assert.deepEqual(row.lineage, [{ executionId: "execution-b", agentSessionId: session }, { executionId: "execution-a", agentSessionId: session }])
+  const chain = { executionId: "n0", executions: {} }
+  for (let i = 0; i < 100; i++) chain.executions[`n${i}`] = { executionId: `n${i}`, replacesExecutionId: `n${i + 1}`, agentSessionId: "s" }
+  assert.equal(executionLineage(chain).length, 64)
+  const loop = { executionId: "x", executions: { x: { replacesExecutionId: "y" }, y: { replacesExecutionId: "x" } } }
+  assert.deepEqual(executionLineage(loop).map(entry => entry.executionId), ["y"])
 })
 
 test("human and model-created children use the same account-serialized capacity boundary", async t => {

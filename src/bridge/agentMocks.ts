@@ -33,6 +33,7 @@ export const unavailableAgentBridge={
  agentRespondInput:async():Promise<void>=>{throw unavailable()},
  agentSnapshot:async(_id:string):Promise<AgentThreadSnapshot>=>{throw unavailable()},
  agentReconcile:async(_id:string):Promise<void>=>{throw unavailable()},
+ agentAdoptRemoteExecution:async():Promise<never>=>{throw unavailable()},
  agentAttach:async():Promise<AgentThreadSnapshot>=>{throw unavailable()},
  subscribeToAgent:async(_id:string,_callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>=>{throw unavailable()},
 }

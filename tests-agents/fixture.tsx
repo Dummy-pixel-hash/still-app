@@ -71,7 +71,7 @@ const h = {
   pendingGitStatuses: [] as Array<() => void>, pendingGitDiffs: [] as Array<() => void>,
   releaseGitStatus(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitStatuses[index]?.() },
   releaseGitDiff(from: number, count: number) { for (let index = from; index < from + count; index++) h.pendingGitDiffs[index]?.() },
-  trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], reconciles: [] as string[], reconcileActive: undefined as boolean | undefined, reconcileFail: false, deferStartup: false, startupFail: false,
+  trustCalls: 0, forgetCalls: 0, statusCalls: [] as string[], reconciles: [] as string[], adopts: [] as string[], remoteWarnings: [] as string[], remoteSkip: new Set<string>(), reconcileActive: undefined as boolean | undefined, reconcileFail: false, deferStartup: false, startupFail: false,
   releaseStartup: () => {}, startupError: "Agent startup was rejected",
   deferChecks: false,
   pendingChecks: [] as Array<() => void>,
@@ -130,6 +130,17 @@ const h = {
     h.emit(executionId, { type: "commands", commands: projectCommands, remoteCursor: conversationSeq })
     await syncRemoteAgentLibrary("ssh-fixture")
   },
+  /** Models a conversation whose execution migration is blocked: the native layer persisted the marker, the rest of the library syncs. */
+  async blockMigration(executionId: string, reason: string, warning: string) {
+    const data = library(), saved = data.rows.find((item: any) => item.executionId === executionId)
+    saved.meta = { ...saved.meta, migrationBlocked: { reason, remoteExecutionId: `${executionId}-server`, remoteGeneration: 2, detectedAt: Date.now() } }
+    saveLibrary(data)
+    for (const [id, row] of snapshots) h.shared.set(id, { serverAccountId: "acct-fixture", conversationId: row.conversationId!, executionId: id, generation: 1, revision: 1, catalogRevision: 1, fields: { title: 1, pinned: 1, archivedAt: 1, order: 1 },
+      values: { title: "", titleSource: "prompt", pinned: false, archivedAt: null, order: Date.now() }, readThroughSeq: 0, conversationSeq: 0, executionOffset: 0, projectId: "project-fixture" })
+    h.remoteSkip.add(executionId); h.remoteWarnings = [warning]; h.sharedMode = true
+    return syncRemoteAgentLibrary("ssh-fixture")
+  },
+  sync: () => syncRemoteAgentLibrary("ssh-fixture"),
   get current() { return [...snapshots.keys()].at(-1)! },
   finish() { h.emit(h.current, { type: "threadComplete", state: "working" }) },
   reconcile() {
@@ -307,10 +318,17 @@ registerNativeBridge({
     if (h.deferCancel) { await new Promise<void>(resolve => { h.releaseCancel = resolve }); return }
     h.emit(id, { type: "threadStopped", text: "Cancellation requested" }); await new Promise<void>(resolve => setTimeout(resolve, 0)); h.emit(id, { type: "threadComplete", state: "working" })
   },
+  agentAdoptRemoteExecution: async (_native, conversationId) => {
+    h.adopts.push(conversationId)
+    const data = library(), saved = data.rows.find((item: any) => item.conversationId === conversationId)
+    if (saved) { const { migrationBlocked: _cleared, ...meta } = saved.meta; saved.meta = meta; saveLibrary(data) }
+    h.remoteSkip.clear(); h.remoteWarnings = []
+    return { protocolVersion: 4, catalogVersion: 1, serverAccountId: "acct-fixture", revision: 1, hostKey: hostKey(session), projects: [], warnings: [], next: null, rows: [] }
+  },
   agentRemoteLibrary: async () => {
     if (!h.sharedMode) throw new Error("Remote library is unavailable in this fixture.")
-    return { protocolVersion: 1, catalogVersion: 1, serverAccountId: "acct-fixture", revision: 1, hostKey: hostKey(session), projects: [], warnings: [], next: null,
-      rows: [...h.shared.values()].map(shared => ({ conversationId: shared.conversationId, executionId: shared.executionId, cwd: "/srv/still", protocolVersion: 1, shared: structuredClone(shared) })) }
+    return { protocolVersion: 1, catalogVersion: 1, serverAccountId: "acct-fixture", revision: 1, hostKey: hostKey(session), projects: [], warnings: [...h.remoteWarnings], next: null,
+      rows: [...h.shared.values()].filter(shared => !h.remoteSkip.has(shared.executionId)).map(shared => ({ conversationId: shared.conversationId, executionId: shared.executionId, cwd: "/srv/still", protocolVersion: 1, shared: structuredClone(shared) })) }
   },
   agentSharedOperation: async (_native, operation) => {
     h.sharedOps.push(structuredClone(operation))

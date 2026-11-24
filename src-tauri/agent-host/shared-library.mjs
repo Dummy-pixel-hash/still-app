@@ -512,9 +512,23 @@ export function sharedLibrary(home, { after = "", limit = 100 } = {}) {
     const page = all.slice(0, limit)
     return { protocolVersion: 4, catalogVersion: 1, serverAccountId: state.serverAccountId, revision: state.revision,
       projects: Object.values(state.projects), tombstones: Object.values(state.conversations).filter(row => row.deleted).map(row => row.conversationId), legacyRecords, incompleteExecutions,
-      rows: page.map(row => { const { titleJournal: _index, ...execution } = row.executions[row.executionId]; return { ...execution, shared: shared(state, row) } }), warnings,
+      rows: page.map(row => { const { titleJournal: _index, ...execution } = row.executions[row.executionId]; const lineage = executionLineage(row); return { ...execution, ...(lineage.length ? { lineage } : {}), shared: shared(state, row) } }), warnings,
       next: all.length > limit ? page.at(-1).conversationId : null }
   })
+}
+
+/** Server-proven ancestry of the current execution, nearest ancestor first.
+    Bounded at 64 hops and cycle-safe. Older workers omit the field entirely. */
+export function executionLineage(row) {
+  const lineage = [], seen = new Set([row.executionId])
+  let child = row.executions[row.executionId]
+  while (child?.replacesExecutionId && lineage.length < 64 && !seen.has(child.replacesExecutionId)) {
+    const id = child.replacesExecutionId
+    seen.add(id)
+    lineage.push({ executionId: id, agentSessionId: row.executions[id]?.agentSessionId ?? child.replacesAgentSessionId ?? null })
+    child = row.executions[id]
+  }
+  return lineage
 }
 
 export function mutateSharedLibrary(home, input) {

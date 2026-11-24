@@ -12,7 +12,7 @@ import { conversation } from "../agents/transcript"
 import { agentsForHost, customLaunchOptions } from "../agents/customAgents"
 import CustomAgentSetup from "./CustomAgentSetup"
 import { attachmentId, loadAttachmentFile, removeAttachmentFile, saveAttachmentFile, validateAttachments, type AgentDraftAttachment } from "../agents/attachments"
-import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, orderSharedProjects, projectKey, readLibraryPreferences, sessionForHost, sharedProjectDeleted, sharedProjectNameDraft, sharedProjects, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
+import { agentServerProfile, folderName, hostKey, hostLabel, normalizeFolder, orderSharedProjects, projectKey, readLibraryPreferences, adoptableMigrationReasons, sessionForHost, sharedProjectDeleted, sharedProjectNameDraft, sharedProjects, type AgentLibraryPreferences, type AgentProject } from "../agents/workspace"
 import { useConversationScroll } from "../agents/useConversationScroll"
 import { useComposerOverlay } from "../agents/useComposerOverlay"
 import { useComposerMotion } from "../agents/useComposerMotion"
@@ -21,7 +21,7 @@ import { useAgentPopover } from "../agents/useAgentPopover"
 import { usePreparedAgent } from "../agents/usePreparedAgent"
 import { commandInventory } from "../agents/commands"
 import { loadAgentChangeHistory, loadAgentHistory, loadEarlierAgentHistory, loadLaterAgentHistory } from "../session/agentThreads"
-import { canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, markAgentThreadRead, reconcileAgentRequest, reconcileAgentThread, refreshAgentCommands, refreshAgentThread, removeSharedProject, reorderSharedProjects, respondAgentInput, respondAgentPermission, resumeAgentThread, retrySharedChanges, sendAgentMessage, setAgentConfig, sharedUnread, subscribeRemoteAgent, syncRemoteAgentLibrary, threadTitle, updateSharedProject, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
+import { adoptRemoteExecution, canChangeAgentHistory, changeAgentHistory, canResumeAgentThread, cancelAgentTurn, claimAgentThreads, clearAgentDraft, deleteAgentThread, loadAgentThreads, markAgentThreadRead, reconcileAgentRequest, reconcileAgentThread, refreshAgentCommands, refreshAgentThread, removeSharedProject, reorderSharedProjects, respondAgentInput, respondAgentPermission, resumeAgentThread, retrySharedChanges, sendAgentMessage, setAgentConfig, sharedUnread, subscribeRemoteAgent, syncRemoteAgentLibrary, threadTitle, updateSharedProject, updateThreadMeta, useAgentThreads, type AgentThreadRow } from "../session/agentThreads"
 import { agentDiscoverySelectionKey, discoverAgents, useAgentDiscovery } from "../session/agentDiscovery"
 import { flushAgentSaves, saveAgentWorkspace, useAgentStorage } from "../session/agentStorage"
 import { nativeBridge, readClipboardImageFile } from "../bridge/nativeBridge"
@@ -693,6 +693,10 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     setAttachmentProgress(old => { const next = { ...old }; delete next[id]; return next })
     void removeAttachmentFile(id).catch(failure => setAttachmentError(`Could not remove the local attachment: ${messageOf(failure)}`))
   }
+  const [adopting, setAdopting] = useState(false)
+  const adoptTrigger = useRef<HTMLButtonElement>(null), adoptCancel = useRef<HTMLButtonElement>(null)
+  useEffect(() => { if (adopting) adoptCancel.current?.focus() }, [adopting])
+  const closeAdopt = () => { setAdopting(false); requestAnimationFrame(() => adoptTrigger.current?.focus()) }
   const run = async (operation: () => Promise<unknown>) => { setBusy(true); setError(""); try { await operation() } catch (e) { setError(messageOf(e)) } finally { if (mounted.current) setBusy(false) } }
   const resumeSavedSession = () => {
     if (!current || !connectedHere || !transportId || !onStart || !canResumeAgentThread(current)) return
@@ -1104,6 +1108,25 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
 
       {(storage.error || storage.warnings.length > 0) && <div className="agent-storage-notice" role="alert"><span>{storage.error || storage.warnings[0]}</span>{storage.error && <button className="agent-button" onClick={() => { if (!hydrated) void hydrate(); else void flushAgentSaves() }}>{hydrated ? "Retry saving" : "Retry opening history"}</button>}</div>}
       {current?.meta.shared && (current.meta.sharedPending?.length || current.meta.sharedSyncError) ? <div className="agent-storage-notice" role="status"><span>{current.meta.sharedSyncError || "Saving organization changes to this account…"}</span>{!current.meta.sharedDeleted && <button className="agent-button" onClick={() => void retrySharedChanges(current.executionId)}>{current.meta.sharedConflict ? "Apply my saved changes" : "Retry sync"}</button>}</div> : null}
+      {current?.meta.migrationBlocked && (() => {
+        const blocked = current.meta.migrationBlocked
+        const adoptable = adoptableMigrationReasons.includes(blocked.reason)
+        const explanation = {
+          PendingMessage: "The server has a newer version of this conversation, but the last message on this device was not confirmed.",
+          RecoveryRequired: "The server has a newer version of this conversation, but this device's copy still needs recovery.",
+          UnconfirmedState: "The server has a newer version of this conversation, but this device has an unconfirmed operation.",
+          GenerationNotNewer: "The server's copy is not newer than this device's copy, so it was not applied.",
+          LineageUnproven: "The server could not prove how its copy continues this device's copy.",
+          ProviderSessionChanged: "The server's copy uses a different provider session than this device's copy.",
+          DifferentAccount: "The server's copy belongs to a different account.",
+        }[blocked.reason]
+        return <div className="agent-storage-notice agent-migration-notice" role="status"><span>{explanation} {adoptable ? "Your draft and this device's history are kept." : "This device's copy stays read-only and your draft is kept. It can be compared with the server's copy."}</span>
+          {adoptable && <span className="agent-inline-actions">
+            <button type="button" className="agent-button" disabled={busy || !connectedHere || !transportId} onClick={() => void run(async () => { await reconcileAgentThread(current.executionId); await syncRemoteAgentLibrary(transportId!) })}>Check remote status</button>
+            <button type="button" ref={adoptTrigger} className="agent-button" disabled={busy || !connectedHere || !transportId || current.turnActive} onClick={() => setAdopting(true)}>Use the server's version</button>
+          </span>}
+        </div>
+      })()}
       {syncNotice}
       {context && sharedProjectDeleted(context) && <div className="agent-storage-notice" role="status">This project was removed from the shared account. Your unfinished draft remains on this device. Add or choose a project before sending it.</div>}
       <div className="agent-workbody">
@@ -1234,6 +1257,7 @@ export default function AgentWorkspace({ presentation = "desktop", initialConver
     {folderOpen && <div className="agent-confirm-backdrop"><section className="agent-modal agent-folder-picker" role="dialog" aria-modal="true" aria-labelledby="agent-project-title"><div className="agent-modal-heading"><div><h2 id="agent-project-title">Choose a project</h2><p>A folder on the server where your agent will work.</p></div><button className="agent-icon-button" aria-label="Close project picker" onClick={closeFolder}><AgentIcon name="close" /></button></div>
       {addingServer ? <form onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); const port = Number(data.get("port")), hostname = String(data.get("hostname") || "").trim(), username = String(data.get("username") || "").trim(); if (!hostname || !username || !Number.isInteger(port) || port < 1 || port > 65535) return; const key = JSON.stringify([hostname.toLowerCase(), port, username]); const profile = sessionForHost(key, hosts); folderOperation.current++; setFolderHost(key); if (profile) onSelectHost?.({ ...profile, authMethod: data.get("auth") === "key" ? "key" : "ask" }); setAddingServer(false) }}><label className="agent-field">Host<input required name="hostname" placeholder="server.example.com" /></label><div className="agent-server-fields"><label className="agent-field">Username<input required name="username" placeholder="dev" /></label><label className="agent-field">Port<input required type="number" min={1} max={65535} name="port" defaultValue="22" /></label></div><label className="agent-field">Authentication<select name="auth"><option value="ask">Password or saved credential</option><option value="key">Private key</option></select></label><div className="agent-inline-actions"><button className="agent-primary">Use this server</button><button type="button" className="agent-button" onClick={() => setAddingServer(false)}>Back</button></div></form> : <form onSubmit={e => { e.preventDefault(); void openFolder() }}><label className="agent-field">Server<select aria-label="Project server" value={folderHost} disabled={busy} onChange={e => { folderOperation.current++; setFolderHost(e.target.value); if (e.target.value) selectHost(e.target.value) }}><option value="">Choose a server</option>{hosts.map(s => <option key={hostKey(s)} value={hostKey(s)}>{s.name} · {s.username}@{s.host}</option>)}</select></label><button type="button" className="agent-link-button" disabled={busy} onClick={() => setAddingServer(true)}>Add a server</button><label className="agent-field">Remote project folder<input required autoComplete="off" aria-label="Remote project folder" disabled={busy} value={folderPath} onChange={e => { folderOperation.current++; setFolderPath(e.target.value) }} placeholder="~/projects/my-app" /></label>{folderHost === host && connectionNotice}{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-primary" disabled={busy || !connected || folderHost !== host || !folderPath.trim()}>Open folder</button><button type="button" className="agent-button" onClick={closeFolder}>Cancel</button></div></form>}
     </section></div>}
+    {adopting && current?.meta.migrationBlocked && <div className="agent-confirm-backdrop"><section className="agent-modal agent-confirm" role="alertdialog" aria-modal="true" aria-labelledby="agent-adopt-title" onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); closeAdopt() } }}><h2 id="agent-adopt-title">Use the server's version?</h2><p>The last unconfirmed message won't be resent. Your draft and this device's history are kept.</p>{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button ref={adoptCancel} type="button" className="agent-button" onClick={closeAdopt}>Cancel</button><button type="button" className="agent-primary" disabled={busy || !transportId} onClick={() => void run(async () => { await adoptRemoteExecution(current.executionId, transportId!); closeAdopt() })}>{busy ? "Updating…" : "Use the server's version"}</button></div></section></div>}
     {deleting && <div className="agent-confirm-backdrop"><section className="agent-modal agent-confirm" role="alertdialog" aria-modal="true" aria-labelledby="agent-delete-title"><h2 id="agent-delete-title">Delete this conversation?</h2><p>“{threadTitle(deleting)}” will be removed from Still. Project files, terminal sessions, and the agent’s own saved history are kept.</p>{deleting.turnActive && <p>Stop the agent before deleting this conversation.</p>}{error && <p className="agent-error" role="alert">{error}</p>}<div className="agent-inline-actions"><button className="agent-button" onClick={() => setDeleting(null)}>Cancel</button>{deleting.turnActive ? <button className="agent-primary" disabled={busy} onClick={() => void run(async () => { await cancelAgentTurn(deleting.executionId); setDeleting(null) })}>Stop agent</button> : <button className="agent-danger" disabled={busy} onClick={() => void run(async () => { await deleteAgentThread(deleting.executionId); if (selected === deleting.meta.id) home(); setDeleting(null) })}>Delete conversation</button>}</div></section></div>}
   </section>
 }

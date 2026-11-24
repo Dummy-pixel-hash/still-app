@@ -36,7 +36,11 @@ export interface ConversationMeta {
   sharedDeleted?: boolean
   sharedLocalChanges?: Partial<SharedConversation["values"]>
   sharedAdoptionResolved?: boolean
+  migrationBlocked?: MigrationBlocked
 }
+export type MigrationBlockReason = "PendingMessage" | "RecoveryRequired" | "UnconfirmedState" | "GenerationNotNewer" | "LineageUnproven" | "ProviderSessionChanged" | "DifferentAccount"
+export interface MigrationBlocked { reason: MigrationBlockReason; remoteExecutionId: string; remoteGeneration: number; detectedAt: number }
+export const adoptableMigrationReasons: readonly MigrationBlockReason[] = ["PendingMessage", "RecoveryRequired", "UnconfirmedState"]
 export interface AgentWorkspacePreferences {
   selectedId?: string
   folder: string

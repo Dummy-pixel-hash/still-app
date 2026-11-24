@@ -543,11 +543,21 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
     const library = await nativeBridge.agentLibrary()
     for (const value of library.rows) {
       const saved = value as AgentThreadRow
-      if (!discovered.has(saved.executionId) || tombstones.has(saved.executionId)) continue
+      if (tombstones.has(saved.executionId)) continue
+      if (!discovered.has(saved.executionId)) {
+        // A blocked migration leaves this device's execution in place; surface the persisted marker.
+        const blocked = rows.get(saved.executionId)
+        if (blocked && saved.meta.migrationBlocked) { blocked.meta = { ...blocked.meta, migrationBlocked: saved.meta.migrationBlocked }; emit() }
+        continue
+      }
       if (rows.has(saved.executionId)) {
         const current = rows.get(saved.executionId)!
+        if (current.meta.migrationBlocked && !saved.meta.migrationBlocked) { const { migrationBlocked: _cleared, ...rest } = current.meta; current.meta = rest }
         if (saved.agentSessionId) {
-          if (current.agentSessionId && current.agentSessionId !== saved.agentSessionId) throw new Error("The saved provider session changed; the existing conversation and draft were kept.")
+          if (current.agentSessionId && current.agentSessionId !== saved.agentSessionId) {
+            warnings.push("A conversation's saved provider session changed; the existing conversation and draft were kept.")
+            continue
+          }
           current.agentSessionId = saved.agentSessionId
           if (saved.resumable) current.resumable = true
         }
@@ -560,7 +570,10 @@ export function syncRemoteAgentLibrary(nativeId: string): Promise<AgentLibrarySy
       }
       const previous = [...rows.values()].find(row => row.meta.id === saved.meta.id && row.executionId !== saved.executionId)
       if (previous) {
-        if (!saved.meta.shared || saved.meta.shared.generation <= (previous.meta.shared?.generation || 0)) throw new Error("This execution needs explicit generation recovery; its original cache was kept.")
+        if (!saved.meta.shared || saved.meta.shared.generation <= (previous.meta.shared?.generation || 0)) {
+          warnings.push("A conversation needs explicit generation recovery; its original cache was kept.")
+          continue
+        }
         subscriptions.get(previous.executionId)?.(); subscriptions.delete(previous.executionId)
         rows.delete(previous.executionId); restored.delete(previous.executionId); historyRevisions.delete(previous.executionId)
         todoRefreshRevisions.delete(previous.executionId)
@@ -835,6 +848,15 @@ export async function sendAgentMessage(id: string, message: string, duringHistor
     current.lastError = error instanceof Error ? error.message : "The prompt may have reached the server. Inspect it before retrying."
     emit(); throw error
   }
+}
+/** Explicit, user-confirmed move to the server's execution. The native command re-lists the
+ * library, refuses while the local run is live and never resends the unconfirmed prompt. */
+export async function adoptRemoteExecution(executionId: string, nativeId: string) {
+  const row = rows.get(executionId)
+  if (!row) throw new Error("Agent execution unavailable")
+  if (row.turnActive || ["running", "connecting"].includes(row.state)) throw new Error("Wait for the local run to stop before using the server's version.")
+  await nativeBridge.agentAdoptRemoteExecution(nativeId, row.meta.id)
+  return syncRemoteAgentLibrary(nativeId)
 }
 export async function reconcileAgentThread(id: string) {
   await nativeBridge.agentReconcile(id)

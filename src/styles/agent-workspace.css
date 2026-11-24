@@ -1367,3 +1367,5 @@ textarea.agent-question-input { min-height: 84px; resize: vertical; }
 .agent-workspace .agent-sidebar-panel--readable .agent-folder-threads { border-left: 1px solid rgba(255,255,255,.1); margin-left: 13px; padding-left: 9px; }
 .agent-workspace .agent-sidebar-panel--readable .agent-folder-heading { margin-top: 3px; }
 @media (max-width: 620px) { .agent-workspace .agent-sidebar-panel--readable .agent-folder-threads { margin-left: 8px; padding-left: 6px; } }
+.agent-storage-notice.agent-migration-notice { flex-wrap: wrap; }
+.agent-migration-notice .agent-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }

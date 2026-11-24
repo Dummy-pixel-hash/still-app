@@ -1320,6 +1320,9 @@ pub async fn still_agent_resolve_folder(args: FolderArgs) -> Result<String, Stil
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteLibraryArgs { native_session_id: String, after: Option<String> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptRemoteArgs { native_session_id: String, conversation_id: String }
 
 async fn shared_library_call(native_session_id: &str, request: Value) -> Result<Value, StillError> {
     let input = serde_json::to_vec(&request).map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
@@ -1366,6 +1369,30 @@ pub async fn still_agent_shared_operation(app: AppHandle, state: State<'_, AppSt
 /// changing their processes. Legacy workers are visible but never taken over.
 #[tauri::command]
 pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppState>, args: RemoteLibraryArgs) -> Result<Value, StillError> {
+    remote_library_page(app, state, args, None).await
+}
+
+/// Explicit, user-confirmed adoption of the server's execution for one blocked
+/// conversation. It re-lists the library for a fresh row, refuses while the local
+/// execution is live, and bypasses only pending/recovery/unconfirmed state. The
+/// unconfirmed prompt stays in the transcript and is never resent.
+#[tauri::command]
+pub async fn still_agent_adopt_remote_execution(app: AppHandle, state: State<'_, AppState>, args: AdoptRemoteArgs) -> Result<Value, StillError> {
+    let mut after: Option<String> = None;
+    for _ in 0..64 {
+        let page = remote_library_page(app.clone(), state.clone(), RemoteLibraryArgs { native_session_id: args.native_session_id.clone(), after: after.clone() }, Some(args.conversation_id.clone())).await?;
+        if page["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["conversationId"] == args.conversation_id.as_str())) { return Ok(page); }
+        if let Some(blocked) = page["blocked"].as_array().and_then(|items| items.iter().find(|item| item["conversationId"] == args.conversation_id.as_str())) {
+            return Err(StillError::friendly("agent_shared_migration", format!("The server's version cannot be used automatically: {}. This device's copy was kept.", blocked["detail"].as_str().unwrap_or("it could not be verified"))));
+        }
+        after = page["next"].as_str().filter(|next| !next.is_empty()).map(str::to_owned);
+        if after.is_none() { break; }
+    }
+    Err(StillError::friendly("agent_shared_migration", "The server no longer lists this conversation. This device's copy was kept."))
+}
+
+async fn remote_library_page(app: AppHandle, state: State<'_, AppState>, args: RemoteLibraryArgs, adopt: Option<String>) -> Result<Value, StillError> {
+    let explicit = adopt.is_some();
     let owner = state.sessions.lock().await.get(&args.native_session_id).cloned().ok_or_else(|| StillError::friendly("agent_session", "Connect and verify this server first."))?;
     let server = owner.lock().await;
     if server.status != SessionStatus::Live { return Err(StillError::friendly("agent_session", "Wait for the SSH connection.")); }
@@ -1380,7 +1407,10 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
     agent_store::bind_shared_account(&app, host_key.clone(), page["serverAccountId"].as_str().unwrap_or_default().to_owned(), page["revision"].clone(), page["projects"].clone()).await?;
     let remote_rows = page["rows"].as_array().ok_or_else(|| StillError::friendly("agent_library_remote", "Invalid remote conversation page."))?.clone();
     let mut imported = Vec::new();
+    let mut warnings: Vec<String> = page["warnings"].as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    let mut blocked_rows = Vec::new();
     for remote in remote_rows {
+        if adopt.as_deref().is_some_and(|only| remote["conversationId"].as_str() != Some(only)) { continue; }
         let id = remote["conversationId"].as_str().ok_or_else(|| StillError::friendly("agent_library_remote", "Missing conversation ID"))?;
         if remote["conversationId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 100 || id.chars().any(char::is_control))
             || remote["executionId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 160 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
@@ -1398,26 +1428,50 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
             "persistent":true,"continuity":remote["protocolVersion"]==4,"remoteImported":true,"configGeneration":0,"remoteCursor":0,
             "resumable":remote["resumable"],"historyCapabilities":{"revert":false,"retry":false}
         })).map_err(|e| StillError::friendly("agent_library_remote", e.to_string()))?;
-        if let Some(previous) = remote["replacesExecutionId"].as_str() {
+        // Every local execution this row supersedes: the direct predecessor and
+        // any server-proven ancestors. The check is non-destructive.
+        let mut ancestors: Vec<String> = remote["replacesExecutionId"].as_str().into_iter().map(str::to_owned).collect();
+        ancestors.extend(remote["lineage"].as_array().into_iter().flatten().take(64).filter_map(|entry| entry["executionId"].as_str().map(str::to_owned)));
+        let mut retired_threads = Vec::new();
+        let mut live_block: Option<&str> = None;
+        for previous in &ancestors {
             let retired = registry().lock().await.get(previous).cloned();
             if let Some(retired) = retired {
                 let mut old = retired.lock().await;
-                if old.transport_active || old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required {
-                    return Err(StillError::friendly("agent_shared_migration", "The previous local execution still needs catch-up or reconciliation. It was not replaced."));
-                }
+                if old.transport_active { live_block = Some("the previous local execution is still active"); }
+                else if !explicit && (old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required) { live_block = Some("the previous local execution still needs catch-up or reconciliation"); }
+                if live_block.is_some() { break; }
                 flush_history(&mut old).await?;
-                old.history_lease.take();
-                drop(old);
-                registry().lock().await.remove(previous);
+                retired_threads.push((previous.clone(), retired.clone()));
             }
         }
-        if let Some(saved) = agent_store::import_remote_snapshot(&app, snapshot, remote.clone()).await? {
-            if remote["shared"].is_object() {
-                agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
+        if let Some(reason) = live_block {
+            if explicit { return Err(StillError::friendly("agent_shared_migration", format!("Wait for the local run to stop first: {reason}. Nothing was replaced."))); }
+            warnings.push(format!("A shared conversation was not updated on this device because {reason}. It was not replaced."));
+            blocked_rows.push(json!({"conversationId":id,"detail":reason}));
+            continue;
+        }
+        match agent_store::import_remote_snapshot(&app, snapshot, remote.clone(), explicit).await? {
+            agent_store::ImportOutcome::Imported(saved) => {
+                for (previous, retired) in retired_threads {
+                    retired.lock().await.history_lease.take();
+                    registry().lock().await.remove(&previous);
+                }
+                if remote["shared"].is_object() {
+                    agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
+                }
+                imported.push(json!({"conversationId":id,"executionId":saved.execution_id,"cwd":saved.cwd,"protocolVersion":if saved.continuity {4} else {3},"shared":remote["shared"],"activityAt":remote["activityAt"]}));
             }
-            imported.push(json!({"conversationId":id,"executionId":saved.execution_id,"cwd":saved.cwd,"protocolVersion":if saved.continuity {4} else {3},"shared":remote["shared"],"activityAt":remote["activityAt"]}));
+            agent_store::ImportOutcome::Skipped => {}
+            agent_store::ImportOutcome::Blocked(block) => {
+                let detail = block.reason.label();
+                warnings.push(format!("A shared conversation could not be updated on this device: {detail}. This device's copy and draft were kept."));
+                blocked_rows.push(json!({"conversationId":id,"reason":block.reason.as_str(),"detail":detail,"remoteExecutionId":block.remote_execution_id,"remoteGeneration":block.remote_generation}));
+            }
         }
     }
+    if !warnings.is_empty() { page["warnings"] = json!(warnings); }
+    if !blocked_rows.is_empty() { page["blocked"] = json!(blocked_rows); }
     page["rows"] = json!(imported);
     page["hostKey"] = json!(host_key);
     if let Some(deleted) = page["tombstones"].as_array() {
