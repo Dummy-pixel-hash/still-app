@@ -3,7 +3,6 @@ import type { Session } from "../types"
 import type { AskSessionAuth } from "../session/connectRequest"
 import { nativeBridge } from "../bridge/nativeBridge"
 import { reattachAgentThread, startRemoteAgent, syncRemoteAgentLibrary, watchRemoteAgentLibrary, type AgentLibrarySyncStatus, type AgentThreadRow } from "../session/agentThreads"
-import AgentLibrarySyncNotice from "./AgentLibrarySyncNotice"
 import AgentWorkspace from "./AgentWorkspace"
 import { AgentConnectionNotice, useAgentConnection } from "./AgentConnection"
 import type { AgentProject } from "../agents/workspace"
@@ -33,7 +32,7 @@ export default function RemoteAgentWorkspace({ closing, session, sessions, onNee
   return <AgentWorkspace presentation={presentation} initialConversationId={initialConversationId} initialView={initialView} initialProject={initialProject} initialProjectPicker={initialProjectPicker} closing={closing} session={target} sessions={sessions} onSelectHost={setTarget}
     onReattach={reattach} transportId={connection.nativeId || undefined}
     connected={connection.state === "connected"} connectionNotice={target && <AgentConnectionNotice connection={connection} />}
-    syncNotice={<AgentLibrarySyncNotice status={syncStatus} compact />}
+    syncStatus={syncStatus}
     onClose={onClose} onOpenTerminal={target ? () => onOpenTerminal(target) : undefined}
     onStart={(agentId, options, onCreated) => startRemoteAgent(connection.nativeId || "", target?.id || "", agentId, options, target || undefined, onCreated)}
     onCheck={(agentId, executable, customAgent, testConnection) => nativeBridge.agentCheck(connection.nativeId || "", agentId, executable, customAgent, testConnection)}

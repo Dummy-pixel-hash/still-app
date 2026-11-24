@@ -633,7 +633,7 @@ export default function Workspace() {
       {drag.ghost && drag.dragId ? (
         <div
           aria-hidden
-          className="pointer-events-none fixed z-[80] -translate-x-1/2 -translate-y-1/2 rotate-2 rounded-2xl border border-[#ff4a4a]/40 bg-[#141416]/95 px-4 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.8),0_0_32px_-8px_rgba(255,74,74,0.5)] backdrop-blur-xl"
+          className="pointer-events-none fixed z-[80] -translate-x-1/2 -translate-y-1/2 rotate-2 rounded-2xl border border-white/25 bg-[#141416]/95 px-4 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.8),0_0_32px_-8px_rgba(255,255,255,0.18)] backdrop-blur-xl"
           style={{ left: drag.ghost.x, top: drag.ghost.y, width: drag.ghost.w }}
         >
           <p className="truncate text-[14px] font-medium text-fg">{drag.ghost.name}</p>

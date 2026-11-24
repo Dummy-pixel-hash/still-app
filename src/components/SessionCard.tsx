@@ -335,10 +335,10 @@ function SessionCard({
           cursor: dragging ? "grabbing" : undefined,
           opacity: dragging ? 0.35 : undefined,
           boxShadow: dropHighlight
-            ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,74,74,0.65), 0 18px 32px -18px rgba(0,0,0,0.8), 0 0 28px -8px rgba(255,74,74,0.4)"
+            ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,255,255,0.5), 0 18px 32px -18px rgba(0,0,0,0.8), 0 0 28px -8px rgba(255,255,255,0.15)"
             : "0 1px 0 rgba(255,255,255,0.06) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 14px 28px -18px rgba(0,0,0,0.75), 0 2px 5px rgba(0,0,0,0.4)",
         }}
-        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,90,90,0.18),0_20px_36px_-16px_rgba(0,0,0,0.9),0_0_40px_-20px_rgba(255,60,60,0.3)] focus-within:shadow-[0_0_0_2px_rgba(255,74,74,0.5)] forced-colors:border forced-colors:border-[CanvasText]"
+        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,255,255,0.14),0_20px_36px_-16px_rgba(0,0,0,0.9),0_0_40px_-20px_rgba(255,255,255,0.12)] focus-within:shadow-[0_0_0_2px_rgba(255,255,255,0.4)] forced-colors:border forced-colors:border-[CanvasText]"
       >
         {/* Full-card Open button. Its accessible name is the contract
             tests-terminal/reopen.spec.ts relies on. */}
@@ -455,9 +455,9 @@ function CardPreview({
       {/* Miniature window chrome: traffic dots + session title. */}
       {/* a11y-exempt: decorative mini-chrome, hidden from assistive tech */}
       <div aria-hidden className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
-        <span className="h-[7px] w-[7px] rounded-full bg-[#ff5f57]/80" />
-        <span className="h-[7px] w-[7px] rounded-full bg-[#febc2e]/70" />
-        <span className="h-[7px] w-[7px] rounded-full bg-[#28c840]/70" />
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
         <span className="ml-1.5 truncate text-[9px] tracking-wide text-faint">
           {session.tmuxSession}
           {!live ? " — snapshot" : ""}

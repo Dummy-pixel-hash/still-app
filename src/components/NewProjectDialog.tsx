@@ -2,7 +2,7 @@ import { useState } from "react"
 import { createProject } from "../session/store"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-white/30"
 
 /** Small dialog for creating a project from the main screen. */
 export default function NewProjectDialog({ onClose }: { onClose: () => void }) {

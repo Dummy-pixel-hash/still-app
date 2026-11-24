@@ -136,14 +136,14 @@ export default function ThemeEditor() {
                 aria-pressed={t.id === selected.id}
                 onClick={() => setSelectedId(t.id)}
                 className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[13px] transition ${
-                  t.id === selected.id ? "border-[#ff4a4a]/60 bg-white/[0.06] text-fg" : "border-white/10 text-dim hover:bg-white/[0.04] hover:text-fg"
+                  t.id === selected.id ? "border-white/30 bg-white/[0.06] text-fg" : "border-white/10 text-dim hover:bg-white/[0.04] hover:text-fg"
                 }`}
               >
                 <ThemeSwatch theme={t} />
                 <span className="min-w-0 flex-1 truncate">{t.name}</span>
                 {t.builtIn ? <span className="shrink-0 text-xs text-faint">Built-in</span> : null}
                 {t.id === defaultId ? (
-                  <span className="shrink-0 rounded-full border border-[#ff4a4a]/50 px-1.5 text-xs text-fg">Default</span>
+                  <span className="shrink-0 rounded-full border border-white/30 px-1.5 text-xs text-fg">Default</span>
                 ) : null}
               </button>
             </li>

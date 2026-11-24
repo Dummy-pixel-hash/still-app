@@ -56,7 +56,7 @@ export default function WorkspaceHeader({
             placeholder="Filter sessions…"
             aria-label="Search sessions"
             enterKeyHint="search"
-            className="h-9 w-full rounded-full border border-white/10 bg-black/40 pl-4 pr-9 text-[13px] text-fg transition placeholder:text-faint focus:border-[#ff4a4a]/50"
+            className="h-9 w-full rounded-full border border-white/10 bg-black/40 pl-4 pr-9 text-[13px] text-fg transition placeholder:text-faint focus:border-white/30"
           />
           <kbd aria-hidden className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-xs text-faint">/</kbd>
         </div>
@@ -64,7 +64,7 @@ export default function WorkspaceHeader({
           value={sort}
           onChange={(e) => setSort(e.target.value as Sort)}
           aria-label="Sort sessions"
-          className="h-9 rounded-full border border-white/10 bg-black/40 px-3 text-[13px] text-dim transition hover:text-fg focus:border-[#ff4a4a]/50"
+          className="h-9 rounded-full border border-white/10 bg-black/40 px-3 text-[13px] text-dim transition hover:text-fg focus:border-white/30"
         >
           <option value="manual" className="bg-[#121214]">Manual</option>
           <option value="recent" className="bg-[#121214]">Recent</option>

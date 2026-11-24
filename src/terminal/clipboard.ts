@@ -162,7 +162,7 @@ function showImagePreview(host: HTMLElement, blob: Blob, caption: string, action
     const btn = document.createElement("button")
     btn.type = "button"
     btn.textContent = action.label
-    btn.style.cssText = "display:block;width:calc(100% - 20px);margin:0 10px 10px;padding:6px 0;border-radius:999px;border:0;background:#ff4a4a;color:#fff;font:12px ui-monospace,monospace;font-weight:600;cursor:pointer"
+    btn.style.cssText = "display:block;width:calc(100% - 20px);margin:0 10px 10px;padding:6px 0;border-radius:999px;border:0;background:#3a3a40;color:#f2eef4;font:12px ui-monospace,monospace;font-weight:600;cursor:pointer"
     btn.addEventListener("click", (e) => {
       e.stopPropagation()
       btn.setAttribute("disabled", "")

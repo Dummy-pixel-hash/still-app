@@ -68,7 +68,7 @@ export default function AuthDialog({
               stored ? "Password (blank = use remembered)" : "Password"
             }
             aria-label="Password"
-            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-white/30"
             onKeyDown={(e) => {
               if (e.key === "Enter")
                 onResolve({ secret: secret || undefined, remember })
@@ -84,7 +84,7 @@ export default function AuthDialog({
             rows={4}
             spellCheck={false}
             autoComplete="off"
-            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg focus:border-white/30"
           />
         )}
         <label className="mt-3 flex items-center gap-2 text-[12px] text-dim">
@@ -92,7 +92,7 @@ export default function AuthDialog({
             type="checkbox"
             checked={remember}
             onChange={(e) => setRemember(e.target.checked)}
-            className="accent-[#ff4a4a]"
+            className="accent-[#d8d2dc]"
           />
           Remember on this device{" "}
           <span className="font-mono text-xs text-faint">

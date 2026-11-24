@@ -115,7 +115,7 @@ export default function SettingsPage({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search settings…"
             autoComplete="off"
-            className="h-9 w-full max-w-xs rounded-full border border-white/10 bg-black/40 px-4 text-[13px] text-fg transition placeholder:text-faint focus:border-[#ff4a4a]/50"
+            className="h-9 w-full max-w-xs rounded-full border border-white/10 bg-black/40 px-4 text-[13px] text-fg transition placeholder:text-faint focus:border-white/30"
           />
           <button
             type="button"

@@ -221,12 +221,12 @@ html.still-mobile, .still-mobile body, .still-mobile #root { height: 100%; min-h
 .mobile-app .agent-workspace--mobile .agent-modal h2 { font: 550 24px/1.2 "Still Display", sans-serif; letter-spacing: -.02em; }
 .mobile-app .agent-workspace--mobile .agent-confirm-backdrop:has(.agent-folder-picker) { padding: 0; align-items: stretch; background: #080809; backdrop-filter: none; -webkit-backdrop-filter: none; }
 .mobile-app .agent-workspace--mobile .agent-modal.agent-folder-picker { width: 100%; height: 100%; max-height: 100%; border: 0; border-radius: 0; padding: 22px 20px; background: #0d0a10; backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: none; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice { max-height: none; padding: 16px; margin: 15px 0; background: #211820; border: 1px solid #795263; backdrop-filter: none; -webkit-backdrop-filter: none; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice code { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; color: #eee0e9; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice strong { font-size: 16px; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice p { font-size: 14px; line-height: 1.5; color: #d1bccc; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice .agent-inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice [role="alert"] { color: #ffd2df; padding-top: 8px; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) { max-height: none; padding: 16px; margin: 15px 0; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .12); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) code { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; color: #eee0e9; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) strong { font-size: 16px; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) p { font-size: 14px; line-height: 1.5; color: #d1bccc; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) .agent-inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.mobile-app .agent-workspace--mobile .agent-folder-picker .agent-connection-notice:not(.agent-notice-row) [role="alert"] { color: var(--ag-dim, #b0b0b0); padding-top: 8px; }
 
 @media (prefers-reduced-motion: no-preference) {
   .mobile-app > .agent-workspace--mobile { animation: mobile-detail-enter 160ms ease-out both; }

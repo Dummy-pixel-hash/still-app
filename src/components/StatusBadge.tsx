@@ -9,7 +9,7 @@ export type CardConn = ConnState | "never"
  * forced-colours mode.
  */
 const META: Record<CardConn, { label: string; tone: string; pulse: boolean }> = {
-  connected: { label: "Connected", tone: "text-[#ff6b6b]", pulse: true },
+  connected: { label: "Connected", tone: "text-[#7fc4a0]", pulse: false },
   connecting: { label: "Connecting", tone: "text-[#d6d1cd]", pulse: true },
   error: { label: "Error", tone: "text-[#ff8a8a]", pulse: false },
   disconnected: { label: "Detached", tone: "text-[#a9a3ad]", pulse: false },

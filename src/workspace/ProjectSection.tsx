@@ -54,7 +54,7 @@ export default function ProjectSection({
       data-project={project.id}
       aria-labelledby={`project-${project.id}`}
       className={`mt-7 rounded-[20px] p-2 transition-shadow ${
-        lit ? "shadow-[0_0_0_1px_rgba(255,74,74,0.45),0_0_40px_-12px_rgba(255,74,74,0.35)]" : "shadow-[0_0_0_1px_transparent]"
+        lit ? "shadow-[0_0_0_1px_rgba(255,255,255,0.3),0_0_40px_-12px_rgba(255,255,255,0.18)]" : "shadow-[0_0_0_1px_transparent]"
       }`}
     >
       <header className="mb-3 flex items-baseline justify-between gap-3">
@@ -71,7 +71,7 @@ export default function ProjectSection({
             type="button"
             aria-label={`New session in ${project.name}`}
             onClick={() => onNewSession(project.id)}
-            className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 font-mono text-[14px] text-dim transition hover:border-[#ff4a4a]/50 hover:text-fg"
+            className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 font-mono text-[14px] text-dim transition hover:border-white/30 hover:text-fg"
           >
             +
           </button>
@@ -101,7 +101,7 @@ export default function ProjectSection({
       {sessions.length === 0 ? (
         <p
           className={`rounded-2xl border border-dashed px-4 py-6 text-center text-[13px] transition ${
-            lit ? "border-[#ff4a4a]/60 bg-[#ff4a4a]/[0.06] text-fg" : "border-white/10 text-faint"
+            lit ? "border-white/40 bg-white/[0.05] text-fg" : "border-white/10 text-faint"
           }`}
         >
           {/* Distinguish an empty project from a filtered one: a no-match
@@ -115,7 +115,7 @@ export default function ProjectSection({
             return (
               <Fragment key={s.id}>
                 {lit && dropBefore === s.id ? (
-                  <div data-drop-indicator aria-hidden className="col-span-full h-[3px] rounded-full bg-[#ff4a4a]/80 shadow-[0_0_16px_rgba(255,74,74,0.6)]" />
+                  <div data-drop-indicator aria-hidden className="col-span-full h-[3px] rounded-full bg-white/70 shadow-[0_0_16px_rgba(255,255,255,0.35)]" />
                 ) : null}
                 <SessionCard
                   session={s}
@@ -145,7 +145,7 @@ export default function ProjectSection({
             )
           })}
           {lit && (dropBefore == null || !sessions.some((s) => s.id === dropBefore)) ? (
-            <div data-drop-indicator aria-hidden className="col-span-full h-[3px] rounded-full bg-[#ff4a4a]/80 shadow-[0_0_16px_rgba(255,74,74,0.6)]" />
+            <div data-drop-indicator aria-hidden className="col-span-full h-[3px] rounded-full bg-white/70 shadow-[0_0_16px_rgba(255,255,255,0.35)]" />
           ) : null}
         </div>
       )}

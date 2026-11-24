@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from "react"
 
 export const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-white/30"
 
 export const buttonClass =
   "rounded-full bg-white/[0.08] px-4 py-1.5 text-[13px] text-fg transition hover:bg-white/[0.14] disabled:opacity-40"
@@ -55,7 +55,7 @@ export function Toggle({
           checked={checked}
           aria-describedby={hintId}
           onChange={(e) => onChange(e.target.checked)}
-          className="accent-[#ff4a4a]"
+          className="accent-[#d8d2dc]"
         />
         {label}
       </label>

@@ -3,7 +3,7 @@ import type { Project, SessionDraft } from "../types"
 import { loadPresets, presetDetail, savePresets, upsertPreset, type SessionPreset } from "../session/presets"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-white/30"
 
 function Field({
   label,
@@ -229,7 +229,7 @@ export default function NewSessionWizard({
           <span
             key={s}
             className={`h-1 flex-1 rounded-full transition-colors ${
-              i <= step ? "bg-[#ff4a4a]/70" : "bg-white/10"
+              i <= step ? "bg-white/50" : "bg-white/10"
             }`}
           />
         ))}
@@ -262,7 +262,7 @@ export default function NewSessionWizard({
                     type="button"
                     onClick={() => applyPreset(p)}
                     title={presetDetail(p)}
-                    className="group flex w-full items-baseline justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left transition hover:border-[#ff4a4a]/50"
+                    className="group flex w-full items-baseline justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left transition hover:border-white/30"
                   >
                     <span className="truncate text-[13px] text-fg">{p.name}</span>
                     <span className="shrink-0 font-mono text-xs text-faint group-hover:text-dim">
@@ -437,7 +437,7 @@ export default function NewSessionWizard({
                     aria-pressed={resolveProjectId() === p.id}
                     className={`flex items-baseline justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
                       resolveProjectId() === p.id
-                        ? "border-[#ff4a4a]/60 bg-[#ff4a4a]/[0.08]"
+                        ? "border-white/30 bg-white/[0.07]"
                         : "border-white/10 bg-black/40 hover:border-white/20"
                     }`}
                   >

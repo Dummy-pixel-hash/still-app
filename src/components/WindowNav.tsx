@@ -27,7 +27,7 @@ export default function WindowNav() {
   }
 
   const btn =
-    "group flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/55 text-still-dim shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur transition-all duration-200 hover:scale-[1.06] hover:border-[#ff4a4a]/50 hover:text-still-fg hover:shadow-[0_0_18px_rgba(255,74,74,0.25)] active:scale-95"
+    "group flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/55 text-still-dim shadow-[0_2px_16px_rgba(0,0,0,0.5)] backdrop-blur transition-all duration-200 hover:scale-[1.06] hover:border-white/30 hover:text-still-fg hover:shadow-[0_0_18px_rgba(255,255,255,0.1)] active:scale-95"
 
   const icon =
     "h-[18px] w-[18px] transition-transform duration-200 group-hover:scale-110"

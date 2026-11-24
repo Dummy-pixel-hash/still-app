@@ -1,4 +1,5 @@
 import { memo, useEffect, useId, useRef, useState } from "react"
+import { splitErrorText } from "../bridge/errors"
 import { toolLabel, type TranscriptItem } from "../agents/transcript"
 import type { AgentHistoryCapabilities, AgentPlanEntry } from "../agents/types"
 import AgentIcon from "./AgentIcon"
@@ -33,9 +34,17 @@ function ToolRow({ item, collapsed = false }: { item: TranscriptItem; collapsed?
     ? <details className={className} data-timeline-id={`detail:${item.id}`}><summary className="agent-tool-heading">{heading}</summary>{body}</details>
     : <article className={className} data-timeline-id={`detail:${item.id}`}><header className="agent-tool-heading">{heading}</header>{body}</article>
 }
+function ErrorNotice({ item, repeat }: { item: TranscriptItem; repeat: number }) {
+  const failure = splitErrorText(item.text)
+  return <div className="agent-notice is-error" data-timeline-id={item.id}>
+    <div className="agent-notice-summary"><span className="agent-notice-mark" aria-hidden="true" /><span className="agent-notice-line-text">{item.title && <strong>{item.title}: </strong>}{failure.summary}</span>{repeat > 1 && <span className="agent-notice-repeat" aria-label={`Repeated ${repeat} times`}>×{repeat}</span>}</div>
+    {failure.detail && <details className="agent-notice-details"><summary>Details</summary><pre tabIndex={0}>{failure.detail}</pre></details>}
+  </div>
+}
 type MessageActions = { capabilities?: AgentHistoryCapabilities; enabled: boolean; act: (message: TranscriptItem, retry: boolean) => void }
 export const AgentTimeline = memo(function AgentTimeline({ items, agentName, agentId, plan, actions, requests, turnActive = false }: { items: TranscriptItem[]; agentName: string; agentId?: string; plan?: AgentPlanEntry[]; actions?: MessageActions; requests?: AgentRequestActions; turnActive?: boolean }) {
   const groups: TimelineGroup[] = []
+  const repeats = new Map<string, number>()
   let activity: ActivityGroup | undefined
   for (const item of items) {
     if (item.kind === "reasoning" || item.kind === "tool") {
@@ -48,6 +57,9 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
     }
     if (item.kind === "notice" && item.status === "error" && activity) activity.failed = true
     activity = undefined
+    const previous = groups[groups.length - 1]
+    // A provider that repeats the same failure should not repeat the same line.
+    if (item.kind === "notice" && previous?.kind === "notice" && previous.status === item.status && previous.title === item.title && previous.text === item.text) { repeats.set(previous.id, (repeats.get(previous.id) || 1) + 1); continue }
     groups.push(item)
   }
   const lastUserIndex = groups.reduce((last, group, index) => group.kind === "user" ? index : last, -1)
@@ -57,17 +69,17 @@ export const AgentTimeline = memo(function AgentTimeline({ items, agentName, age
     const group = groups[index]
     if (group.kind === "activity-group") group.active = turnActive
   }
+  // Failed groups stay collapsed: the summary already says "N failed". Only live work opens itself.
   const automaticGroup = groups.slice(lastUserIndex + 1).reverse().find(group => group.kind === "activity-group" && (
-    group.active || group.failed || group.items.some(item => item.kind === "tool" && (
-      ["failed", "error"].includes(item.status || "") || !["completed", "failed", "error", "cancelled", "interrupted"].includes(item.status || "")
-    ))
+    group.active || group.items.some(item => item.kind === "tool" && !["completed", "failed", "error", "cancelled", "interrupted"].includes(item.status || ""))
   ))
   const automaticGroupId = automaticGroup?.id || null
   const [expandedActivityId, setExpandedActivityId] = useState<string | null>(automaticGroupId)
   useEffect(() => { setExpandedActivityId(automaticGroupId) }, [automaticGroupId])
   return <>{groups.map(group => {
     if (group.kind === "activity-group") return <Activity key={group.id} group={group} expanded={expandedActivityId === group.id} onToggle={() => setExpandedActivityId(value => value === group.id ? null : group.id)} />
-    if (group.kind === "notice") return <p className={`agent-notice ${group.status === "error" ? "is-error" : ""}`} data-timeline-id={group.id} key={group.id}>{group.title && <strong>{group.title}: </strong>}{group.text}</p>
+    if (group.kind === "notice") return group.status === "error" ? <ErrorNotice key={group.id} item={group} repeat={repeats.get(group.id) || 1} />
+      : <p className="agent-notice" data-timeline-id={group.id} key={group.id}>{group.title && <strong>{group.title}: </strong>}{group.text}</p>
     if (group.kind === "tool") return <ToolRow key={group.id} item={group} />
     if (group.kind === "request") return requests?.expandedId === group.id ? <div key={group.id} data-timeline-id={group.id} className="agent-request-placeholder">Request opened in expanded view</div> : <AgentRequest key={group.id} item={group} actions={requests} />
     return <Message key={group.id} item={group} author={group.kind === "user" ? group.source === "parentAgent" ? "Parent agent" : "You" : agentName} agentId={agentId || agentName} actions={actions} />
@@ -104,14 +116,18 @@ function Activity({ group, expanded, onToggle }: { group: ActivityGroup; expande
 }
 
 function ActivityBlock({ group, items, groupCount, expanded, onToggle }: { group: ActivityGroup; items: TranscriptItem[]; groupCount: number; expanded: boolean; onToggle: () => void }) {
-  const failed = group.failed || items.some(item => item.status === "failed" || item.status === "error")
-  const wasExpanded = useRef(expanded)
+  const failedCount = items.filter(item => item.kind === "tool" && (item.status === "failed" || item.status === "error")).length || (group.failed ? 1 : 0)
+  const failed = failedCount > 0
+  const handoff = useRef(false)
   const rail = useRef<HTMLButtonElement>(null)
-  const content = useRef<HTMLDivElement>(null)
+  const summaryButton = useRef<HTMLButtonElement>(null)
   const contentId = useId()
+  // The rail only exists while expanded and the summary only while collapsed, so
+  // keyboard focus moves to the control that exists after the toggle has rendered.
   useEffect(() => {
-    if (wasExpanded.current && !expanded && content.current?.contains(document.activeElement)) rail.current?.focus({ preventScroll: true })
-    wasExpanded.current = expanded
+    if (!handoff.current) return
+    handoff.current = false
+    ;(expanded ? rail.current : summaryButton.current)?.focus({ preventScroll: true })
   }, [expanded])
   const lastTool = [...items].reverse().find(item => item.kind === "tool")
   const label = lastTool ? toolLabel(lastTool) : undefined
@@ -119,18 +135,13 @@ function ActivityBlock({ group, items, groupCount, expanded, onToggle }: { group
     ? [label.action, label.detail].filter(Boolean).join(" · ")
     : items.find(item => item.kind === "reasoning")?.text.replace(/\s+/g, " ").trim().slice(0, 160) || "Agent activity"
   const groupedSummary = groupCount > 1 ? `${groupCount} activity groups · ${activitySummary}` : activitySummary
-  const summary = failed ? `Failed · ${groupedSummary}` : groupedSummary
-  const toggle = () => {
-    // The collapsed summary is removed on expand; keep keyboard focus on the
-    // persistent rail instead of dropping it back to the document.
-    if (!expanded) rail.current?.focus({ preventScroll: true })
-    onToggle()
-  }
+  const summary = failed ? `${failedCount} failed · ${groupedSummary}` : groupedSummary
+  const toggle = () => { handoff.current = true; onToggle() }
   return <section className={`agent-activity-block ${expanded ? "is-expanded" : "is-collapsed"}${failed ? " is-failed" : ""}`} data-timeline-id={`activity:${group.id}:${items[0]?.id || "empty"}`}>
     <button ref={rail} type="button" className={`agent-activity-rail${expanded ? " is-open" : ""}`} aria-label={`${expanded ? "Collapse" : "Expand"} activity: ${summary}`} aria-expanded={expanded} aria-controls={contentId} onClick={toggle}><span aria-hidden="true" /></button>
     <div className="agent-activity-content">
-      {!expanded && <button type="button" className="agent-activity-summary" aria-expanded={false} aria-controls={contentId} aria-label={`Expand activity: ${summary}`} title={summary} onClick={toggle}><AgentIcon name="chevron" size={12} /><span>{summary}</span></button>}
-      <div ref={content} id={contentId} hidden={!expanded}>
+      {!expanded && <button ref={summaryButton} type="button" className="agent-activity-summary" aria-expanded={false} aria-controls={contentId} aria-label={`Expand activity: ${summary}`} title={summary} onClick={toggle}><AgentIcon name="chevron" size={12} />{failed && <i className="agent-activity-fail-dot" aria-hidden="true" />}<span>{summary}</span></button>}
+      <div id={contentId} hidden={!expanded}>
         {expanded && <div className="agent-activity-event-list">{items.map(item => item.kind === "reasoning"
           ? <details className="agent-activity-reasoning" data-timeline-id={`detail:${item.id}`} key={item.id}><summary><AgentIcon name="chevron" size={12} /><h3>Reasoning</h3></summary><div className="agent-activity-reasoning-body"><AgentMessage text={item.text} /></div></details>
           : <ToolRow key={item.id} item={item} collapsed />)}</div>}

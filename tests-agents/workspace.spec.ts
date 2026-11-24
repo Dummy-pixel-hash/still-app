@@ -621,7 +621,7 @@ test("tools, supplied diffs, plan and the full command catalog are accessible", 
   await connect(page)
   await page.evaluate(() => (window as any).agentFixture.populate())
   await expect(page.locator(".agent-message-assistant h2")).toHaveText("Reconnect behavior")
-  await page.locator(".agent-activity-rail").last().click()
+  await page.locator(".agent-activity-summary").last().click()
   await page.locator(".agent-tool").first().locator("summary").first().click()
   await expect(page.locator(".agent-tool-body").first()).toContainText("connectSession(id)")
   await page.locator(".agent-tool").nth(1).locator("summary").first().click()
@@ -1961,4 +1961,68 @@ test("a migration that cannot be proven offers no adoption", async ({ page }) =>
   const notice = page.locator(".agent-migration-notice")
   await expect(notice).toContainText("could not prove how its copy continues")
   await expect(notice.getByRole("button")).toHaveCount(0)
+})
+
+// Calm pass: every error or notice is one line, and the transcript keeps its room.
+test("several top notices collapse into one row with a +N popover that overlays the transcript", async ({ page }) => {
+  await connect(page, "opencode", "Several notices")
+  const id = await fixture(page, f => f.current as string)
+  await fixture(page, (f, id) => f.blockMigration(id, "LineageUnproven", "A shared conversation could not be updated."), id)
+  await page.evaluate(() => { (window as any).agentFixture.failSave = true })
+  await page.getByLabel("Message agent").fill("Cannot be saved")
+  await expect(page.getByRole("alert").filter({ hasText: "could not be saved" })).toBeVisible()
+  const bar = page.locator(".agent-notice-bar")
+  await expect(bar.locator(".agent-notice-bar-row .agent-notice-row")).toHaveCount(1)
+  const more = bar.getByRole("button", { name: "+1 more" })
+  await expect(more).toBeVisible()
+  expect((await bar.boundingBox())!.height).toBeLessThan(44)
+  const before = (await page.locator(".agent-chat").boundingBox())!
+  await more.click()
+  const popover = bar.getByRole("dialog", { name: "More notices" })
+  await expect(popover.locator(".agent-migration-notice")).toContainText("could not prove how its copy continues")
+  // The popover floats over the transcript instead of pushing it down.
+  const after = (await page.locator(".agent-chat").boundingBox())!
+  expect(after.y).toBe(before.y)
+  expect(after.height).toBe(before.height)
+  await page.keyboard.press("Escape")
+  await expect(popover).toHaveCount(0)
+  await expect(more).toBeFocused()
+})
+
+test("the composer dock stays within 60% of the chat in a short window", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 520 })
+  await page.goto("/tests-agents/fixture.html?demo&scenario=todos")
+  await expect(page.locator(".agent-todos-dock")).toBeVisible()
+  await page.evaluate(() => { const h = (window as any).agentFixture; h.failSave = true; h.rejectSend = true })
+  await page.getByLabel("Message agent").fill("This will not be sent")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-error")).toBeVisible()
+  const chat = (await page.locator(".agent-chat").boundingBox())!
+  const dock = (await page.locator(".agent-composer-area").boundingBox())!
+  expect(dock.height / chat.height).toBeLessThanOrEqual(0.6)
+  // Controls never wrap into a second row.
+  const toolbar = page.locator(".agent-composer:not(.is-collapsed) .agent-composer-toolbar")
+  const rows = await toolbar.evaluate(el => new Set([...el.querySelectorAll("button")].filter(b => b.offsetParent).map(b => Math.round(b.getBoundingClientRect().top / 8))).size)
+  expect(rows).toBe(1)
+})
+
+test("a long multi-line stderr is one summary line with the raw text behind Details", async ({ page }) => {
+  await connect(page, "opencode", "Break the thread")
+  const id = await fixture(page, f => f.current as string)
+  const stderr = "Error: spawn /usr/bin/opencode failed (os error 2)\n    at spawn (node:child_process:1)\n    at start (/srv/agent/run.js:42:11)\n" + "stderr: extra diagnostic line\n".repeat(30)
+  await fixture(page, (f, a) => f.emit(a.id, { type: "threadError", text: a.stderr, state: "error" }), { id, stderr })
+  const notice = page.locator(".agent-error")
+  const summary = notice.locator(".agent-notice-text")
+  await expect(summary).toBeVisible()
+  await expect(summary).not.toContainText("at spawn")
+  expect((await summary.boundingBox())!.height).toBeLessThan(24)
+  const detail = notice.locator(".agent-notice-detail")
+  await expect(detail).toBeHidden()
+  await notice.getByRole("button", { name: "Details", exact: true }).click()
+  await expect(detail).toBeVisible()
+  await expect(detail).toContainText("at start (/srv/agent/run.js:42:11)")
+  expect((await detail.locator("pre").boundingBox())!.height).toBeLessThanOrEqual(161)
+  // The transcript shows the same failure as a dot and one line, never raw text.
+  const transcript = page.locator(".agent-notice.is-error").first()
+  if (await transcript.count()) await expect(transcript.locator(".agent-notice-line-text")).not.toContainText("at spawn")
 })

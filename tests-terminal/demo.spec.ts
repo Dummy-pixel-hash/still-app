@@ -77,3 +77,17 @@ test("native runtimes ignore the browser preview flag", async ({ page }) => {
   await expect(page.locator("[data-card]")).toHaveCount(0)
   expect(await page.evaluate(key => localStorage.getItem(key), previewStoreKey)).toBeNull()
 })
+
+test("controls pill stays one short line at 560x420", async ({ page }) => {
+  await page.setViewportSize({ width: 560, height: 420 })
+  await page.goto(previewUrl)
+  await page.getByRole("button", { name: /^Open /i }).first().click()
+  await page.keyboard.press("F6")
+  const pill = page.locator("[data-overlay-pill]")
+  await expect(pill).toHaveCount(1)
+  await expect(pill).toBeVisible()
+  const box = await pill.boundingBox()
+  expect(box!.height).toBeLessThanOrEqual(44)
+  expect(box!.x).toBeGreaterThanOrEqual(0)
+  expect(box!.x + box!.width).toBeLessThanOrEqual(560)
+})

@@ -57,7 +57,7 @@ const statusOf = (row: AgentThreadRow, stopRequested: boolean) => {
               : "Ready"
   return stopRequested ? `Stop requested · ${base}` : base
 }
-const dotClass = (row: AgentThreadRow) => row.pendingPermission || row.pendingInput ? " is-attention" : ["error", "submissionUnknown"].includes(row.state) ? " is-error" : row.turnActive ? " is-working" : ""
+const dotClass = (row: AgentThreadRow) => row.pendingPermission || row.pendingInput || row.state === "submissionUnknown" ? " is-attention" : row.state === "error" ? " is-error" : row.turnActive ? " is-working" : ""
 
 export default function AgentSubagents({ children, onOpen, onCreate }: {
   children: AgentThreadRow[]

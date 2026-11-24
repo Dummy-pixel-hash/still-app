@@ -61,7 +61,7 @@ export default function TempDock({
         <button
           type="button"
           onClick={() => void dock.killTemp(temp.id)}
-          className="rounded border border-white/10 px-1.5 py-0.5 text-xs uppercase tracking-wide hover:border-[#ff4a4a]/50 hover:text-still-fg"
+          className="rounded border border-white/10 px-1.5 py-0.5 text-xs uppercase tracking-wide hover:border-white/30 hover:text-still-fg"
         >
           Kill
         </button>

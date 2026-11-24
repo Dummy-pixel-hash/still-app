@@ -7,7 +7,7 @@ import {
 import { useStore, validateDraft } from "../session/store"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-white/30"
 
 function Field({
   label,
@@ -197,7 +197,7 @@ export default function SessionForm({
               onClick={() => set("authMethod", value)}
               className={`rounded-lg border px-2 py-2 text-[12px] transition ${
                 draft.authMethod === value
-                  ? "border-[#ff4a4a]/60 bg-[#ff4a4a]/[0.08] text-fg"
+                  ? "border-white/30 bg-white/[0.07] text-fg"
                   : "border-white/10 bg-black/40 text-dim hover:border-white/20 hover:text-fg"
               }`}
             >
@@ -262,7 +262,7 @@ export default function SessionForm({
             type="checkbox"
             checked={draft.remember}
             onChange={(e) => set("remember", e.target.checked)}
-            className="accent-[#ff4a4a]"
+            className="accent-[#d8d2dc]"
           />
           Remember on this device <span className="font-mono text-xs text-faint">(OS keyring, native only)</span>
         </label>

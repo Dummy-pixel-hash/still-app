@@ -62,7 +62,7 @@ ok("UI shows the fingerprint and both actions",
   overlay.includes("Trust this server") &&
   overlay.includes("Reject"));
 ok("changed keys cannot be trusted from the dialog",
-  overlay.includes("{!hostPrompt.changed && (") && overlay.includes("HOST KEY CHANGED"));
+  overlay.includes("{!hostPrompt.changed && (") && overlay.includes("Host key changed"));
 
 // INVARIANT: exactly one verification path (connect/reconnect/reattach).
 ok("single verified handshake in the worker",

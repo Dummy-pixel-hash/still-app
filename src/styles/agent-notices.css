@@ -1,0 +1,105 @@
+/* One calm line for every error or notice. The tone lives in a 6px dot only: no tinted
+   fills, no tinted borders, no coloured body text. Raw text sits behind "Details". */
+.agent-notice-row {
+  --notice-dot: var(--ag-faint, #969696);
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--ag-dim, #b0b0b0);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.agent-notice-row.is-error { --notice-dot: var(--ag-red, #ed7780); }
+.agent-notice-row.is-attention { --notice-dot: #edc18b; }
+.agent-notice-row.is-working { --notice-dot: #7eb1ff; }
+.agent-notice-row.is-ok { --notice-dot: #6ebc98; }
+.agent-notice-row.is-info { --notice-dot: var(--ag-faint, #969696); }
+.agent-notice-line { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 32px; }
+.agent-notice-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--notice-dot); }
+.agent-notice-row.is-working .agent-notice-dot { animation: agent-breathe 1600ms ease-in-out infinite; }
+.agent-notice-text { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ag-text, #ededed); text-overflow: ellipsis; white-space: nowrap; }
+.agent-notice-actions { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 4px; white-space: nowrap; }
+.agent-notice-row .agent-notice-actions :is(button, .agent-button) {
+  min-height: 26px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .06);
+  color: var(--ag-text, #ededed);
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.agent-notice-row .agent-notice-actions :is(button, .agent-button):hover:not(:disabled) { background: rgba(255, 255, 255, .11); }
+.agent-notice-row .agent-notice-actions .agent-notice-dismiss { display: inline-flex; align-items: center; justify-content: center; width: 26px; padding: 0; background: none; color: var(--ag-dim, #b0b0b0); }
+.agent-notice-note {
+  margin: 0 0 4px 15px;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  color: var(--ag-dim, #b0b0b0);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.agent-notice-detail { position: relative; margin: 2px 0 6px 15px; }
+.agent-notice-detail[hidden] { display: none; }
+.agent-notice-detail > pre {
+  max-height: 160px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--ag-line, rgba(255, 255, 255, .09));
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .03);
+  color: var(--ag-dim, #b0b0b0);
+  font: 11px/1.55 var(--font-mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  scrollbar-width: thin !important;
+  scrollbar-color: #5a5a5f transparent !important;
+}
+.agent-notice-detail > pre::-webkit-scrollbar { display: block !important; width: 8px !important; height: 8px !important; }
+.agent-notice-detail > pre::-webkit-scrollbar-thumb { border-radius: 4px; background: #55555a; }
+.agent-notice-row .agent-notice-detail > .agent-notice-copy {
+  position: absolute; top: 5px; right: 14px;
+  min-height: 22px; padding: 1px 7px; border-radius: 5px; background: rgba(30, 30, 33, .92); color: var(--ag-dim, #b0b0b0); font-size: 11px !important;
+}
+
+/* The only top-of-conversation notice surface. */
+.agent-notice-bar { position: relative; z-index: 30; flex: 0 0 auto; min-width: 0; padding: 0 16px; border-bottom: 1px solid var(--ag-line, rgba(255, 255, 255, .09)); background: transparent; }
+.agent-notice-bar-row { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 34px; }
+.agent-notice-bar-row > .agent-notice-row { flex: 1 1 auto; min-width: 0; }
+.agent-notice-bar-row > .agent-notice-row > .agent-notice-line { min-height: 34px; }
+.agent-notice-bar-row > .agent-notice-row > :is(.agent-notice-detail, .agent-notice-note) { max-width: 100%; }
+.agent-notice-bar .agent-notice-more {
+  flex: 0 0 auto; min-height: 26px; padding: 3px 9px; border-radius: 6px;
+  background: rgba(255, 255, 255, .06); color: var(--ag-dim, #b0b0b0); font-size: 12px !important; white-space: nowrap;
+}
+.agent-notice-bar .agent-notice-more:hover, .agent-notice-bar .agent-notice-more[aria-expanded="true"] { background: rgba(255, 255, 255, .11); color: var(--ag-text, #ededed); }
+.agent-notice-popover {
+  position: absolute; top: 100%; left: 12px; right: 12px; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px 12px 8px; border: 1px solid var(--ag-chrome-edge, rgba(255, 255, 255, .075)); border-radius: 10px;
+  background: #121214; box-shadow: 0 14px 38px rgba(0, 0, 0, .55);
+  scrollbar-width: thin !important; scrollbar-color: #55555a transparent !important;
+}
+.agent-notice-popover::-webkit-scrollbar { display: block !important; width: 8px !important; }
+.agent-notice-popover::-webkit-scrollbar-thumb { border-radius: 4px; background: #55555a; }
+.agent-notice-popover .agent-notice-row + .agent-notice-row { border-top: 1px solid var(--ag-line, rgba(255, 255, 255, .09)); }
+.agent-notice-popover .agent-notice-line { align-items: flex-start; padding-block: 7px; }
+.agent-notice-popover .agent-notice-dot { margin-top: 5px; }
+.agent-notice-popover .agent-notice-text { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.agent-notice-popover .agent-notice-actions { flex-wrap: wrap; justify-content: flex-end; white-space: normal; }
+
+/* Notices in the composer dock keep their old class names and sit on a quiet neutral sheet. */
+.agent-notice-row.agent-notice-row:is(.agent-error, .agent-preparation, .agent-model-error, .agent-attachment-error, .agent-connection-notice) {
+  margin: 0 0 4px; padding: 0 10px; max-height: none; overflow: visible; border: 0; border-radius: 9px; background: rgba(255, 255, 255, .035); color: var(--ag-dim, #b0b0b0); font-size: 12px;
+}
+.agent-notice-row.agent-notice-row:is(.agent-error, .agent-preparation, .agent-model-error, .agent-attachment-error, .agent-connection-notice) .agent-notice-line { min-height: 34px; }
+.agent-notice-row.agent-model-error { flex-shrink: 0; }

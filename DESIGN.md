@@ -31,7 +31,7 @@ The user selected **B · Smoked glass** from `../orb-mockups/`. That approved ma
 
 ## Colors
 
-The frontmatter records the existing tokens in `src/styles/tokens.css` and `theme.css`. The red accent remains the workspace interaction colour. Orb light colours are state-specific and live in `src/orb/glassRenderer.ts`: cool blue/violet for observed output, amber for attention, red/pink for errors, and quiet neutral light for unknown/idle. The renderer also supports a green completion appearance, but a connection does not establish agent completion.
+The frontmatter records the existing tokens in `src/styles/tokens.css` and `theme.css`. Red is reserved for the brand (mark, ambient workspace glow, aurora), destructive actions and genuine failures. Ordinary interaction states are neutral: focus rings (`--ring`, `--ag-focus`), text selection, input focus borders, hover glows, drop indicators and selected options use off-white washes. Connected is calm green, working is blue, attention and uncertain states are amber. Orb light colours are state-specific and live in `src/orb/glassRenderer.ts`: cool blue/violet for observed output, amber for attention, red/pink for errors, and quiet neutral light for unknown/idle. The renderer also supports a green completion appearance, but a connection does not establish agent completion.
 
 ## Typography
 
@@ -50,6 +50,16 @@ The default theme, font size, cursor, blink, minimum contrast, screen-reader mod
 Themes colour **terminal surfaces and card previews only** (the overlay background, xterm, the card's preview well and its fade) through `--term-bg`, `--term-fg`, `--term-preview-fg` and `--term-cursor`. They never recolour workspace chrome, the Agents surface or the orb, and the overlay's footers and controls pill stay dark on purpose. Themes are renderer-only data and never enter `ConnectRequest`. Minimum contrast defaults to "automatic": 1 (unchanged look) unless the OS asks for more contrast (4.5). Cursor blink "automatic" stops under reduced motion.
 
 Inside xterm, Ctrl+/ and Ctrl+K belong to the shell (undo, kill-line). App shortcuts that act inside a terminal use Ctrl+Shift+letter or F6 (find Ctrl+Shift+F, palette Ctrl+Shift+K, shortcut help Ctrl+Shift+/, controls pill F6). One registry, `src/ui/shortcuts.ts`, drives the overlay's capture gate, xterm's key backstop, the help dialog and the Settings list.
+
+## Errors and notices
+
+Errors must never dominate the screen. Every error, warning or status notice, in the terminal and in Agents, is **one line**: a 6px tone dot, one short plain sentence in normal or dim text, and at most a couple of non-wrapping actions. Tone lives only in the dot: rose for a real failure, amber for attention or uncertainty, blue for working, neutral for information. There are no tinted red backgrounds or borders and no red body text.
+
+Raw technical text (stderr, OS error chains, stack traces, JSON, full public keys) is never the headline. `splitErrorText` in `src/bridge/errors.ts` derives the visible sentence; the untouched original sits behind a **Details** disclosure in mono with a capped, scrollable height so it can still be copied. The helper is display-only: stored values such as `lastError` keep their `[code]` prefixes for logic.
+
+One problem is stated once, in its primary place; elsewhere it appears only as a status dot. Agents shows at most one notice row beneath the topbar, with a "+N more" popover that overlays rather than pushes the transcript. Composer notices are capped at about three rows, and the composer dock never covers more than 60% of the conversation. Consecutive identical transcript errors collapse into one row with a count; failed activity groups stay collapsed with a failure count. Host-key verification is the deliberate exception: it remains a full card because it is a security decision, though its full key is disclosed on demand.
+
+Pills and capsules never wrap: the terminal controls pill and composer controls truncate text instead, so their height is constant at every window size.
 
 ## Elevation & Depth
 

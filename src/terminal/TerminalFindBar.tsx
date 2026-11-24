@@ -120,7 +120,7 @@ export default function TerminalFindBar({ terminal, onClose }: { terminal: Termi
         Next
       </button>
       <label className="flex items-center gap-1 text-dim">
-        <input type="checkbox" checked={caseSensitive} onChange={(e) => setCaseSensitive(e.target.checked)} className="accent-[#ff4a4a]" />
+        <input type="checkbox" checked={caseSensitive} onChange={(e) => setCaseSensitive(e.target.checked)} className="accent-[#d8d2dc]" />
         Match case
       </label>
       <button type="button" className={btn} onClick={onClose}>

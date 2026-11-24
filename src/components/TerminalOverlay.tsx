@@ -18,6 +18,7 @@ import {
   useConnections,
   type ConnectRequest,
 } from "../session/connections"
+import { splitErrorText } from "../bridge/errors"
 import { nativeBridge } from "../bridge/nativeBridge"
 import { setSessionAppearance } from "../session/store"
 import { FONT_DEFAULT, clampFontSize } from "../terminal/appearance"
@@ -48,6 +49,31 @@ interface AuthPrompt {
  * reverses the transition. Leaving is NOT a disconnect — the worker keeps
  * running; only explicit Disconnect drops the SSH channel (tmux survives).
  */
+function ErrorLine({ raw, fallback }: { raw: string | null | undefined; fallback: string }) {
+  const [open, setOpen] = useState(false)
+  const { summary, detail } = splitErrorText(raw, fallback)
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2">
+        <p className="min-w-0 flex-1 truncate font-mono text-xs text-dim" title={summary}>{summary}</p>
+        {detail ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="shrink-0 font-mono text-xs text-faint transition hover:text-fg"
+          >
+            Details
+          </button>
+        ) : null}
+      </div>
+      {detail && open ? (
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-black/40 p-2 font-mono text-xs text-dim">{detail}</pre>
+      ) : null}
+    </div>
+  )
+}
+
 export default function TerminalOverlay({
   open,
   imageInsertStyle,
@@ -546,11 +572,11 @@ export default function TerminalOverlay({
                 role="alertdialog"
                 aria-labelledby={`${uid}-hk-title`}
                 aria-describedby={`${uid}-hk-desc`}
-                className="flex shrink-0 flex-col gap-2 border-t border-amber-400/30 bg-amber-950/40 px-4 py-3"
+                className="flex max-h-[50%] shrink-0 flex-col gap-2 overflow-y-auto border-t border-amber-400/30 bg-amber-950/40 px-4 py-3"
               >
                 <p id={`${uid}-hk-title`} className="font-mono text-[13px] font-semibold text-amber-200">
                   {hostPrompt.changed
-                    ? "⚠ HOST KEY CHANGED — possible attack. Connection refused."
+                    ? "Host key changed — this may be an attack. Connection refused."
                     : "Unknown SSH host — verify before trusting."}
                 </p>
                 <div id={`${uid}-hk-desc`} className="flex flex-col gap-2">
@@ -560,7 +586,10 @@ export default function TerminalOverlay({
                   <p className="break-all font-mono text-[13px] text-fg" data-testid="host-fingerprint">
                     {hostPrompt.fingerprint}
                   </p>
-                  <p className="break-all font-mono text-xs text-dim">{hostPrompt.opensshKey}</p>
+                  <details className="font-mono text-xs text-dim">
+                    <summary className="cursor-pointer select-none">Show full key</summary>
+                    <p className="mt-1 break-all">{hostPrompt.opensshKey}</p>
+                  </details>
                   {!hostPrompt.changed && (
                     <p className="font-mono text-xs text-dim">
                       Compare with the server admin out-of-band. Trust stores this key on this device only.
@@ -616,11 +645,11 @@ export default function TerminalOverlay({
                 role={state === "error" ? "alert" : "status"}
                 className="flex shrink-0 flex-col gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-3"
               >
-                <p className="font-mono text-xs text-dim">
-                  {state === "error"
-                    ? (lastError ?? "Connection failed.")
-                    : "Not connected. Remote tmux persists server-side."}
-                </p>
+                {state === "error" ? (
+                  <ErrorLine raw={lastError} fallback="Connection failed." />
+                ) : (
+                  <p className="font-mono text-xs text-dim">Not connected. Remote tmux persists server-side.</p>
+                )}
                 {session && session.authMethod === "password" && (
                   <div className="flex flex-col gap-1">
                     <label htmlFor={`${uid}-pw`} className="text-xs text-dim">
@@ -639,7 +668,7 @@ export default function TerminalOverlay({
                           remember: p?.remember ?? session.remember,
                         }))
                       }
-                      className="w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-[#ff4a4a]/50"
+                      className="w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-white/30"
                     />
                     <p id={`${uid}-pw-hint`} className="text-xs text-dim">
                       Used for this connection only. Tick “Remember on this device” to keep it in the OS keyring.
@@ -732,7 +761,7 @@ export default function TerminalOverlay({
         ) : null}
       </div>
 
-      {full &&
+      {full && slot !== "right" &&
         createPortal(
           <div
             ref={pillRef}
@@ -740,7 +769,7 @@ export default function TerminalOverlay({
             data-overlay-pill={localId}
             role="toolbar"
             aria-label={`${session?.name ?? "Terminal"} controls`}
-            className="fixed left-1/2 top-3 z-[65] flex items-center gap-3 rounded-full bg-[#121214]/80 py-1.5 pl-4 pr-1.5 text-[13px] shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl transition-all duration-500"
+            className="fixed left-1/2 top-3 z-[65] flex w-max max-w-[calc(100vw-1.5rem)] items-center gap-3 whitespace-nowrap rounded-full bg-[#121214]/80 py-1.5 pl-4 pr-1.5 text-[13px] shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl transition-all duration-500"
             style={{
               opacity: chrome || pillFocus ? 1 : 0,
               transform: `translate(-50%, ${chrome || pillFocus ? 0 : -10}px)`,
@@ -754,23 +783,23 @@ export default function TerminalOverlay({
             }}
           >
           <span aria-hidden className="font-mono text-dim">›_</span>
-          <span className="font-medium text-fg">{session?.name}</span>
-          <span className="hidden font-mono text-dim sm:inline">
+          <span className="min-w-0 truncate font-medium text-fg">{session?.name}</span>
+          <span className="hidden max-w-[16rem] truncate font-mono text-dim md:inline">
             {session?.host}
           </span>
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
-            className="ml-1 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
+            className="ml-1 shrink-0 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
           >
             Shortcuts
           </button>
           <button
             onClick={onClose}
-            className="flex items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
+            className="flex shrink-0 items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
           >
             Workspace
-            <kbd className="font-mono text-xs text-faint">Ctrl .</kbd>
+            <kbd className="hidden font-mono text-xs text-faint sm:inline">Ctrl .</kbd>
           </button>
         </div>,
         document.body,
