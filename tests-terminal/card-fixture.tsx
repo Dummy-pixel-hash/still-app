@@ -14,19 +14,22 @@ import {
   disconnectSession,
   frozenPreview,
   noteSurfaceDims,
-  noteSurfaceFontSize,
   previewDimsFor,
   snapshotPreviewScreen,
   subscribeSessionData,
   useConnections,
 } from "../src/session/connections"
 import type { Session } from "../src/types"
+import { DEFAULT_TERMINAL_PREFS, resolveTerminalAppearance } from "../src/terminal/appearance"
+
+const appearanceFor = (px: number, themeId?: string) => resolveTerminalAppearance({ fontSize: px, terminalTheme: themeId }, { terminal: DEFAULT_TERMINAL_PREFS })
 
 let sink: ((event: NativeSessionEvent) => void) | undefined
 let generation = 0
 let root: ReturnType<typeof createRoot>
 let remounts = 0
 let fontSize = 14
+let themeId: string | undefined
 let visible = true
 // ?no-boot=1 skips the startup emit and skips connecting: the card then shows
 // only what persisted (the frozen snapshot), exactly like a real reload.
@@ -100,7 +103,6 @@ function initReference() {
   subscribeSessionData(session.id, (data) => {
     reference?.write(Uint8Array.from(data))
   })
-  noteSurfaceFontSize(14)
   noteSurfaceDims(session.id, REFERENCE_COLS, REFERENCE_ROWS)
 }
 
@@ -119,9 +121,12 @@ const h = {
   status: (status: "disconnected" | "error") => sink?.({ type: "status", status }),
   dims: () => previewDimsFor(session.id),
   surface: (cols: number, rows: number) => noteSurfaceDims(session.id, cols, rows),
+  theme: (id: string | undefined) => {
+    themeId = id
+    renderFixture()
+  },
   font: (px: number) => {
     fontSize = px
-    noteSurfaceFontSize(px)
     renderFixture()
   },
   /** Parsed frozen snapshot (same reader the card uses after a reload). */
@@ -144,7 +149,7 @@ const h = {
         screenRect.left >= hostRect.left - 1 && screenRect.top >= hostRect.top - 1 &&
         screenRect.right <= hostRect.right + 1 && screenRect.bottom <= hostRect.bottom + 1,
       cardText: rows?.textContent ?? screen?.textContent ?? "",
-      snapshotText: (snapshotPreviewScreen(session.id, fontSize) ?? []).join("\n"),
+      snapshotText: (snapshotPreviewScreen(session.id, fontSize, appearanceFor(fontSize, themeId).xtermTheme) ?? []).join("\n"),
       referenceText: referenceText(),
       cols: previewDimsFor(session.id).cols,
       rows: previewDimsFor(session.id).rows,
@@ -174,7 +179,7 @@ function Fixture() {
             session={session}
             conn={connectionState(session.id)}
             index={0}
-            fontSize={fontSize}
+            appearance={appearanceFor(fontSize, themeId)}
             dragging={false}
             dropHighlight={false}
             menuOpen={false}
@@ -191,7 +196,7 @@ function Fixture() {
             session={{ ...session, id: `idle-${i}`, name: `Idle ${i}` }}
             conn="never"
             index={0}
-            fontSize={fontSize}
+            appearance={appearanceFor(fontSize, themeId)}
             dragging={false}
             dropHighlight={false}
             menuOpen={false}

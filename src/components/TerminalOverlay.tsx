@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import SessionTerminal from "../terminal/SessionTerminal"
+import ShortcutHelp from "../ui/ShortcutHelp"
+import { isEditableTarget, matchTerminalShortcut, shortcutDef, type ShortcutId } from "../ui/shortcuts"
 import {
   TERMINAL_CELL_W_RATIO,
   TERMINAL_LINE_HEIGHT,
@@ -17,8 +19,10 @@ import {
   type ConnectRequest,
 } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
-import { updateTerminalPrefs } from "../session/store"
-import type { ImageInsertStyle, Session, TerminalPrefs } from "../types"
+import { setSessionAppearance } from "../session/store"
+import { FONT_DEFAULT, clampFontSize } from "../terminal/appearance"
+import { terminalCssVars, useTerminalAppearance } from "../terminal/useTerminalAppearance"
+import type { ImageInsertStyle, Session } from "../types"
 
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 /** Card→fullscreen morph duration. Kept in one place: the CSS transition,
@@ -46,16 +50,15 @@ interface AuthPrompt {
  */
 export default function TerminalOverlay({
   open,
-  prefs,
   imageInsertStyle,
   keyTextFor,
   onClose,
   onNeedAuth,
   slot,
   dockStyle,
+  onOpenPalette,
 }: {
   open: OpenState | null
-  prefs: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
   keyTextFor: (keyId: string) => string | null
   // slot docks an overlay beside main ("left"); temp tiles keep "right" for
@@ -66,6 +69,8 @@ export default function TerminalOverlay({
   // gate and the main overlay's "left" half.
   dockStyle?: React.CSSProperties
   onClose: () => void
+  /** Ctrl+Shift+K inside the terminal: the workspace owns the palette. */
+  onOpenPalette?: (sessionId: string) => void
   onNeedAuth: (
     session: Session,
   ) => Promise<{ secret?: string; remember: boolean } | null>
@@ -104,11 +109,40 @@ export default function TerminalOverlay({
   const [footerOpen, setFooterOpen] = useState(false)
   const session = open?.session ?? null
   const localId = session?.id ?? ""
+  // Resolve from the LIVE store: `open.session` is a snapshot taken when the
+  // overlay opened and goes stale as soon as the theme or zoom changes.
+  const appearance = useTerminalAppearance(localId, session)
+  const appearanceRef = useRef(appearance)
+  appearanceRef.current = appearance
+  const [zoomNote, setZoomNote] = useState("")
+  const zoomTimer = useRef(0)
+  const zoomTo = useCallback((delta: number | "reset") => {
+    const id = localIdRef.current
+    if (!id) return
+    const cur = appearanceRef.current.fontSize
+    const next = delta === "reset" ? undefined : clampFontSize(cur + delta)
+    // This session only: the global default is changed in Settings.
+    setSessionAppearance(id, { fontSize: next })
+    setZoomNote(`Font ${next ?? FONT_DEFAULT}px${next === undefined ? " (default)" : ""}`)
+    window.clearTimeout(zoomTimer.current)
+    zoomTimer.current = window.setTimeout(() => setZoomNote(""), 2200)
+  }, [])
+  useEffect(() => () => window.clearTimeout(zoomTimer.current), [])
   const state = session ? connectionState(session.id) : "disconnected"
   const lastError = session ? connectionError(session.id) : null
   // M5: pending untrusted-host prompt (fingerprint Trust/Reject). The worker
   // refused BEFORE auth; trust is an explicit user action, persisted by Rust.
   const hostPrompt = session ? hostKeyPromptFor(session.id) : null
+  const uid = useId()
+  const rejectRef = useRef<HTMLButtonElement | null>(null)
+  // The prompt is a decision, not a notification: focus lands on the SAFE
+  // action (Reject) so a stray Enter can never trust a server.
+  const hostPromptKey = hostPrompt ? `${hostPrompt.host}:${hostPrompt.port}:${hostPrompt.fingerprint}` : ""
+  useEffect(() => {
+    if (!hostPromptKey) return
+    const raf = requestAnimationFrame(() => rejectRef.current?.focus())
+    return () => cancelAnimationFrame(raf)
+  }, [hostPromptKey])
   const [trustBusy, setTrustBusy] = useState(false)
   const [forgetBusy, setForgetBusy] = useState(false)
   const trustHost = useCallback(async () => {
@@ -154,12 +188,76 @@ export default function TerminalOverlay({
     return () => window.clearTimeout(hide.current)
   }, [full, show])
 
-  const prefsRef = useRef(prefs)
-  prefsRef.current = prefs
+  const localIdRef = useRef(localId)
+  localIdRef.current = localId
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const [findOpen, setFindOpen] = useState(false)
+  const findOpenRef = useRef(false)
+  findOpenRef.current = findOpen
+  const [helpOpen, setHelpOpen] = useState(false)
+  // The controls pill is revealed by hover/mouse-near-top, and ALSO whenever
+  // keyboard focus is inside it or F6 moves focus there.
+  const [pillFocus, setPillFocus] = useState(false)
+  const pillRef = useRef<HTMLDivElement | null>(null)
+  const onClosePaletteRef = useRef(onOpenPalette)
+  onClosePaletteRef.current = onOpenPalette
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const focusTerminal = useCallback(() => {
+    document.getElementById(`still-term-${localIdRef.current}`)?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
+  }, [])
+  // Collapse transient surfaces whenever the overlay closes or switches session.
+  useEffect(() => {
+    if (!full) {
+      setFindOpen(false)
+      setHelpOpen(false)
+      setPillFocus(false)
+    }
+  }, [full])
+
+  /** One dispatcher for the gate below and SessionTerminal's key backstop. */
+  const runShortcut = useCallback(
+    (id: ShortcutId) => {
+      switch (id) {
+        case "close":
+          onCloseRef.current()
+          break
+        case "zoomIn":
+          zoomTo(1)
+          break
+        case "zoomOut":
+          zoomTo(-1)
+          break
+        case "zoomReset":
+          zoomTo("reset")
+          break
+        case "find":
+          if (findOpenRef.current)
+            rootRef.current?.querySelector<HTMLInputElement>("[data-terminal-find] input")?.focus()
+          else setFindOpen(true)
+          break
+        case "palette":
+          onClosePaletteRef.current?.(localIdRef.current)
+          break
+        case "help":
+          setHelpOpen(true)
+          break
+        case "controls":
+          show(9000)
+          setPillFocus(true)
+          requestAnimationFrame(() => pillRef.current?.querySelector<HTMLElement>("button")?.focus())
+          break
+      }
+    },
+    [show, zoomTo],
+  )
+  const runShortcutRef = useRef(runShortcut)
+  runShortcutRef.current = runShortcut
+
   // Single capture-phase gate: runs before xterm sees the key, so app
   // shortcuts never leak bytes into the PTY. Backstop lives in
-  // SessionTerminal's attachCustomKeyEventHandler for focused-terminal.
+  // SessionTerminal's attachCustomKeyEventHandler for focused-terminal;
+  // both match through src/ui/shortcuts.ts.
   // Two overlays mounted? A key inside the other overlay isn't ours.
   useEffect(() => {
     if (!full) return
@@ -170,56 +268,42 @@ export default function TerminalOverlay({
       // Temp dock controls are siblings, not part of any overlay. Escape
       // there must not close every overlay in the dock at once.
       if (t?.closest?.("[data-temp-dock]")) return
+      // The find bar, shortcut help and palette own their keys (Escape,
+      // Enter, typing): the gate must not close the overlay under them.
+      if (t?.closest?.("[data-terminal-find],[data-key-scope='modal']")) return
+      const pill = t?.closest?.("[data-overlay-pill]") as HTMLElement | null
+      if (pill && pill.dataset.overlayPill !== localIdRef.current) return
       // Plain Escape (no modifiers) closes the overlay. The terminal only
       // sees this when it is not the focused surface: xterm exits its own
       // mouse/focus modes with Escape and needs to keep receiving it.
       if (e.key === "Escape" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (pill) {
+          // Escape on the controls pill goes back to the terminal.
+          e.preventDefault()
+          focusTerminal()
+          return
+        }
         if (t?.closest?.(".xterm")) return
         e.preventDefault()
         onClose()
         return
       }
-      if (!e.ctrlKey || e.metaKey || e.altKey) return
-      const k = e.key.toLowerCase()
-      const isClose = e.code === "Period" || k === "." || k === ">"
-      const isReset =
-        k === "0" || e.code === "Digit0" || e.code === "Numpad0"
-      const isZoomOut =
-        k === "-" ||
-        k === "_" ||
-        e.code === "Minus" ||
-        e.code === "NumpadSubtract"
-      const isZoomIn =
-        k === "=" ||
-        k === "+" ||
-        e.code === "Equal" ||
-        e.code === "NumpadAdd"
-      if (!isClose && !isReset && !isZoomOut && !isZoomIn) return
-      const inXterm = !!t && !!t.classList?.contains("xterm-helper-textarea")
-      const inField =
-        !!t &&
-        !inXterm &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.tagName === "SELECT" ||
-          t.isContentEditable)
-      // Close works everywhere (even mid-auth); zoom skips text fields.
-      if (inField && !isClose) return
+      const id = matchTerminalShortcut(e)
+      if (!id) return
+      const def = shortcutDef(id)
+      // Only the overlay that owns the focus reacts, except Close which has
+      // always worked from anywhere (even mid-auth).
+      const own = !!t && (!!rootRef.current?.contains(t) || !!pill)
+      if (id !== "close" && !own) return
+      // Close works everywhere; zoom skips text fields.
+      if (isEditableTarget(t) && !def?.worksInFields) return
       e.preventDefault()
       e.stopPropagation()
-      if (isClose) {
-        onClose()
-        return
-      }
-      const cur = prefsRef.current.fontSize
-      if (isReset) updateTerminalPrefs({ fontSize: 14 })
-      else if (isZoomOut)
-        updateTerminalPrefs({ fontSize: Math.max(10, cur - 1) })
-      else updateTerminalPrefs({ fontSize: Math.min(24, cur + 1) })
+      runShortcutRef.current(id)
     }
     window.addEventListener("keydown", onKey, { capture: true })
     return () => window.removeEventListener("keydown", onKey, { capture: true })
-  }, [full, onClose])
+  }, [full, onClose, focusTerminal])
 
   // Wrap the auth dialog so the overlay can pause terminal input for
   // exactly the dialog's lifetime (mount -> resolve/cancel), never longer.
@@ -250,8 +334,8 @@ export default function TerminalOverlay({
       // Geist Mono 14px = 8.4x19 cells, minus the 6px custom-scrollbar
       // lane it subtracts when scrollback > 0. Cell metrics scale ~linearly
       // with the configured font size.
-      const fontPx = prefs.fontSize
-      noteSurfaceFontSize(fontPx)
+      const fontPx = appearanceRef.current.fontSize
+      noteSurfaceFontSize(s.id, fontPx)
       const cellW = TERMINAL_CELL_W_RATIO * fontPx
       const cellH = TERMINAL_LINE_HEIGHT * fontPx
       dims = {
@@ -321,7 +405,7 @@ export default function TerminalOverlay({
         remember: ans.remember,
       }
     },
-    [askAuth, keyTextFor, prompt, prefs],
+    [askAuth, keyTextFor, prompt],
   )
 
   const doConnect = useCallback(async () => {
@@ -391,7 +475,7 @@ export default function TerminalOverlay({
     <div
       ref={rootRef}
       data-overlay-root={slot ?? "solo"}
-      className={`fixed z-50 overflow-hidden bg-[#08080a] transition-[top,left,width,height,border-radius,opacity] duration-[650ms] ${
+      className={`fixed z-50 overflow-hidden bg-[var(--term-bg,#08080a)] transition-[top,left,width,height,border-radius,opacity] duration-[650ms] ${
         !open ? "hidden" : ""
       }`}
       role={open ? "dialog" : undefined}
@@ -400,6 +484,7 @@ export default function TerminalOverlay({
       aria-hidden={!open}
       style={{
         ...style,
+        ...terminalCssVars(appearance),
         transitionTimingFunction: EASE,
         // 1px edge definition in both states: on a transparent rounded
         // window the terminal surface would otherwise melt into the
@@ -443,62 +528,64 @@ export default function TerminalOverlay({
               <SessionTerminal
                 key={`${open.session.id}-${open.session.updatedAt}`}
                 localId={open.session.id}
-                prefs={prefs}
+                appearance={appearance}
                 imageInsertStyle={imageInsertStyle}
-                paused={authOpen}
+                // Input is held while ANY prompt owns the screen: the auth
+                // dialog or the host-key decision. No keystroke may reach
+                // the PTY while the user is judging a fingerprint.
+                paused={authOpen || Boolean(hostPrompt)}
                 onClose={onClose}
-                onZoom={(d) =>
-                  updateTerminalPrefs({
-                    fontSize:
-                      d === "reset"
-                        ? 14
-                        : Math.min(24, Math.max(10, prefs.fontSize + d)),
-                  })
-                }
+                onZoom={zoomTo}
+                onShortcut={runShortcut}
+                findOpen={findOpen}
+                onFindClose={() => setFindOpen(false)}
               />
             </div>
             {hostPrompt && (
               <div
                 role="alertdialog"
-                aria-label={hostPrompt.changed ? "Host key changed" : "Unknown host key"}
+                aria-labelledby={`${uid}-hk-title`}
+                aria-describedby={`${uid}-hk-desc`}
                 className="flex shrink-0 flex-col gap-2 border-t border-amber-400/30 bg-amber-950/40 px-4 py-3"
               >
-                <p className="font-mono text-[12px] font-semibold text-amber-200">
+                <p id={`${uid}-hk-title`} className="font-mono text-[13px] font-semibold text-amber-200">
                   {hostPrompt.changed
                     ? "⚠ HOST KEY CHANGED — possible attack. Connection refused."
                     : "Unknown SSH host — verify before trusting."}
                 </p>
-                <p className="font-mono text-[11px] text-dim">
-                  {hostPrompt.host}:{hostPrompt.port} · {hostPrompt.keyType}
-                </p>
-                <p className="break-all font-mono text-[12px] text-fg" data-testid="host-fingerprint">
-                  {hostPrompt.fingerprint}
-                </p>
-                <p className="break-all font-mono text-[10px] text-dim">{hostPrompt.opensshKey}</p>
-                {!hostPrompt.changed && (
-                  <p className="font-mono text-[11px] text-dim">
-                    Compare with the server admin out-of-band. Trust stores this key on this device only.
+                <div id={`${uid}-hk-desc`} className="flex flex-col gap-2">
+                  <p className="font-mono text-xs text-dim">
+                    {hostPrompt.host}:{hostPrompt.port} · {hostPrompt.keyType}
                   </p>
-                )}
-                {hostPrompt.changed && (
-                  <p className="font-mono text-[11px] text-amber-200/90">
-                    A different key is already trusted for this host. Still will NOT overwrite it.
-                    Contact the server admin out-of-band before doing anything.
+                  <p className="break-all font-mono text-[13px] text-fg" data-testid="host-fingerprint">
+                    {hostPrompt.fingerprint}
                   </p>
-                )}
-                {hostPrompt.changed && (
-                  <p className="font-mono text-[11px] text-amber-200/90">
-                    If you verified the change out-of-band, remove the stored key,
-                    then Retry to review the new key as unknown — Trust is still required.
-                  </p>
-                )}
+                  <p className="break-all font-mono text-xs text-dim">{hostPrompt.opensshKey}</p>
+                  {!hostPrompt.changed && (
+                    <p className="font-mono text-xs text-dim">
+                      Compare with the server admin out-of-band. Trust stores this key on this device only.
+                    </p>
+                  )}
+                  {hostPrompt.changed && (
+                    <p className="font-mono text-xs text-amber-200/90">
+                      A different key is already trusted for this host. Still will NOT overwrite it.
+                      Contact the server admin out-of-band before doing anything.
+                    </p>
+                  )}
+                  {hostPrompt.changed && (
+                    <p className="font-mono text-xs text-amber-200/90">
+                      If you verified the change out-of-band, remove the stored key,
+                      then Retry to review the new key as unknown — Trust is still required.
+                    </p>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   {!hostPrompt.changed && (
                     <button
                       type="button"
                       disabled={trustBusy}
                       onClick={() => void trustHost()}
-                      className="rounded-full bg-amber-400 px-4 py-1.5 text-[12px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
+                      className="rounded-full bg-amber-400 px-4 py-1.5 text-[13px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
                     >
                       {trustBusy ? "Trusting…" : "Trust this server"}
                     </button>
@@ -508,15 +595,16 @@ export default function TerminalOverlay({
                       type="button"
                       disabled={forgetBusy}
                       onClick={() => void forgetStoredKey()}
-                      className="rounded-full bg-amber-400 px-4 py-1.5 text-[12px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
+                      className="rounded-full bg-amber-400 px-4 py-1.5 text-[13px] font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
                     >
                       {forgetBusy ? "Removing…" : "Remove stored key"}
                     </button>
                   )}
                   <button
+                    ref={rejectRef}
                     type="button"
                     onClick={() => session && clearHostKeyPrompt(session.id)}
-                    className="rounded-full bg-white/[0.08] px-4 py-1.5 text-[12px] text-fg transition hover:bg-white/[0.14]"
+                    className="rounded-full bg-white/[0.08] px-4 py-1.5 text-[13px] text-fg transition hover:bg-white/[0.14]"
                   >
                     Reject
                   </button>
@@ -524,35 +612,46 @@ export default function TerminalOverlay({
               </div>
             )}
             {!hostPrompt && (state === "disconnected" || state === "error") && (
-              <div className="flex shrink-0 flex-col gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-3">
-                <p className="font-mono text-[11px] text-dim">
+              <div
+                role={state === "error" ? "alert" : "status"}
+                className="flex shrink-0 flex-col gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-3"
+              >
+                <p className="font-mono text-xs text-dim">
                   {state === "error"
                     ? (lastError ?? "Connection failed.")
                     : "Not connected. Remote tmux persists server-side."}
                 </p>
                 {session && session.authMethod === "password" && (
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={prompt?.password ?? ""}
-                    onChange={(e) =>
-                      setPrompt((p) => ({
-                        password: e.target.value,
-                        keyText: p?.keyText ?? "",
-                        remember: p?.remember ?? session.remember,
-                      }))
-                    }
-                    placeholder="Password (per-connect only, never stored)"
-                    aria-label="Password"
-                    className="w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg outline-none focus:border-[#ff4a4a]/50"
-                  />
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor={`${uid}-pw`} className="text-xs text-dim">
+                      Password
+                    </label>
+                    <input
+                      id={`${uid}-pw`}
+                      type="password"
+                      autoComplete="off"
+                      value={prompt?.password ?? ""}
+                      aria-describedby={`${uid}-pw-hint`}
+                      onChange={(e) =>
+                        setPrompt((p) => ({
+                          password: e.target.value,
+                          keyText: p?.keyText ?? "",
+                          remember: p?.remember ?? session.remember,
+                        }))
+                      }
+                      className="w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-[#ff4a4a]/50"
+                    />
+                    <p id={`${uid}-pw-hint`} className="text-xs text-dim">
+                      Used for this connection only. Tick “Remember on this device” to keep it in the OS keyring.
+                    </p>
+                  </div>
                 )}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     disabled={busy || !session}
                     onClick={() => void doConnect()}
-                    className="rounded-full bg-white/[0.08] px-4 py-1.5 text-[12px] text-fg transition hover:bg-white/[0.14] disabled:opacity-50"
+                    className="rounded-full bg-white/[0.08] px-4 py-1.5 text-[13px] text-fg transition hover:bg-white/[0.14] disabled:opacity-50"
                   >
                     {busy
                       ? "Connecting…"
@@ -561,7 +660,7 @@ export default function TerminalOverlay({
                         : "Connect"}
                   </button>
                   {session && session.authMethod === "password" && (
-                    <label className="flex items-center gap-1.5 font-mono text-[11px] text-dim">
+                    <label className="flex items-center gap-1.5 font-mono text-xs text-dim">
                       <input
                         type="checkbox"
                         checked={prompt?.remember ?? session.remember}
@@ -580,77 +679,103 @@ export default function TerminalOverlay({
               </div>
             )}
             {state === "connecting" && (
-              <div className="flex shrink-0 items-center gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-2">
+              <div role="status" className="flex shrink-0 items-center gap-2 border-t border-white/[0.07] bg-black/60 px-4 py-2">
                 <button
                   type="button"
                   onClick={() => setFooterOpen((v) => !v)}
-                  aria-label={footerOpen ? "Collapse status bar" : "Expand status bar"}
-                  className="flex items-center gap-2 rounded-full px-1 py-0.5 outline-none transition hover:bg-white/[0.06]"
+                  aria-expanded={footerOpen}
+                  aria-controls={`${uid}-conn-actions`}
+                  className="flex items-center gap-2 rounded-full px-2 py-0.5 transition hover:bg-white/[0.06]"
                 >
                   <span
+                    aria-hidden
                     className="h-[7px] w-[7px] animate-pulse rounded-full bg-[#e8c4a0]"
                   />
-                  <span className="font-mono text-[11px] text-dim">
+                  <span className="font-mono text-xs text-dim">
                     {hostPrompt
                       ? "waiting for approval…"
                       : "connecting…"}
                   </span>
-                  <span className="font-mono text-[10px] text-faint">
-                    {footerOpen ? "▾" : "▸"}
+                  <span className="font-mono text-xs text-faint">
+                    {footerOpen ? "Hide actions" : "Show actions"}
                   </span>
                 </button>
-                {footerOpen && (
-                  <span className="ml-auto flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void doConnect()}
-                      className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
-                    >
-                      Reconnect
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (session) void disconnectSession(session.id)
-                      }}
-                      className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-[11px] text-dim transition hover:bg-white/[0.12] hover:text-fg"
-                    >
-                      Disconnect
-                    </button>
-                  </span>
-                )}
+                <span id={`${uid}-conn-actions`} hidden={!footerOpen} className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void doConnect()}
+                    className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-xs text-dim transition hover:bg-white/[0.12] hover:text-fg"
+                  >
+                    Reconnect
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (session) void disconnectSession(session.id)
+                    }}
+                    className="rounded-full bg-white/[0.06] px-3 py-1 font-mono text-xs text-dim transition hover:bg-white/[0.12] hover:text-fg"
+                  >
+                    Disconnect
+                  </button>
+                </span>
               </div>
             )}
           </div>
         ) : null}
       </div>
 
+      <div role="status" aria-live="polite" className="pointer-events-none absolute bottom-3 right-4 z-30 text-[12px]">
+        {zoomNote ? (
+          <span data-testid="zoom-status" className="inline-block rounded-md bg-[#17171a] px-3 py-1.5 font-mono text-fg shadow-[0_0_0_1px_rgba(255,255,255,0.09)]">
+            {zoomNote}
+          </span>
+        ) : null}
+      </div>
+
       {full &&
         createPortal(
           <div
+            ref={pillRef}
             data-tauri-drag-region
-            className="fixed left-1/2 top-3 z-[65] flex items-center gap-3 rounded-full bg-[#121214]/80 py-1.5 pl-4 pr-1.5 text-[12px] shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl transition-all duration-500"
+            data-overlay-pill={localId}
+            role="toolbar"
+            aria-label={`${session?.name ?? "Terminal"} controls`}
+            className="fixed left-1/2 top-3 z-[65] flex items-center gap-3 rounded-full bg-[#121214]/80 py-1.5 pl-4 pr-1.5 text-[13px] shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl transition-all duration-500"
             style={{
-              opacity: chrome ? 1 : 0,
-              transform: `translate(-50%, ${chrome ? 0 : -10}px)`,
-              pointerEvents: chrome ? "auto" : "none",
+              opacity: chrome || pillFocus ? 1 : 0,
+              transform: `translate(-50%, ${chrome || pillFocus ? 0 : -10}px)`,
+              pointerEvents: chrome || pillFocus ? "auto" : "none",
+            }}
+            // Revealed while focus is anywhere inside it (Tab or F6), so the
+            // controls are never an invisible tab stop.
+            onFocus={() => setPillFocus(true)}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setPillFocus(false)
             }}
           >
-          <span className="font-mono text-dim">›_</span>
+          <span aria-hidden className="font-mono text-dim">›_</span>
           <span className="font-medium text-fg">{session?.name}</span>
           <span className="hidden font-mono text-dim sm:inline">
             {session?.host}
           </span>
           <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            className="ml-1 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
+          >
+            Shortcuts
+          </button>
+          <button
             onClick={onClose}
-            className="ml-1 flex items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
+            className="flex items-center gap-2 rounded-full bg-white/[0.07] px-3 py-1 text-dim transition hover:bg-white/[0.12] hover:text-fg"
           >
             Workspace
-            <kbd className="font-mono text-[10px] text-faint">Ctrl .</kbd>
+            <kbd className="font-mono text-xs text-faint">Ctrl .</kbd>
           </button>
         </div>,
         document.body,
         )}
+      {helpOpen && full ? <ShortcutHelp onClose={() => setHelpOpen(false)} /> : null}
     </div>
   )
 }

@@ -15,7 +15,7 @@ type UpdateState = {
   allowCellular?: boolean
 }
 
-function platform(): "android" | "windows" | null {
+export function platform(): "android" | "windows" | null {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return null
   if (/Android/i.test(navigator.userAgent)) return "android"
   return /Windows/i.test(navigator.userAgent) ? "windows" : null

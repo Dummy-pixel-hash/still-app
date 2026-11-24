@@ -40,7 +40,7 @@ export default function WindowNav() {
         aria-hidden
       />
       {action ? (
-        <span className="pointer-events-auto font-mono text-[10px] uppercase tracking-[0.2em] text-still-faint">
+        <span className="pointer-events-auto font-mono text-xs uppercase tracking-[0.2em] text-still-faint">
           {action}…
         </span>
       ) : null}

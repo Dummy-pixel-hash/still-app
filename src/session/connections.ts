@@ -6,7 +6,7 @@
 // NOT a disconnect: the worker keeps running until explicit Disconnect.
 
 import { useCallback, useSyncExternalStore } from "react"
-import { Terminal } from "@xterm/xterm"
+import { Terminal, type ITheme } from "@xterm/xterm"
 import { Unicode11Addon } from "@xterm/addon-unicode11"
 import { ByteRing } from "./byteRing"
 import {
@@ -16,6 +16,7 @@ import {
   type HostKeyPrompt,
   type StatusResult,
 } from "../bridge/nativeBridge"
+import { FONT_DEFAULT, STILL_THEME, buildXtermTheme } from "../terminal/appearance"
 import { diagFail, diagOk, diagRecord, diagWatchdogHangSnapshot } from "./diag"
 import type { ConnState } from "../types"
 
@@ -117,12 +118,16 @@ interface PreviewTerminalState {
   previous?: PreviewTerminalState
 }
 
+const STILL_XTERM_THEME: ITheme = buildXtermTheme(STILL_THEME.colors)
+
 /** Latest surface geometry per session (capped), persisted for reloads. */
 const surfaceDims = new Map<string, PreviewDims>()
 let previewDimsLoaded = false
-/** Last known main-surface font size; previews render at the same metrics
+/** Per-session main-surface font size; previews render at the same metrics
  *  so cell aspect (and therefore scale math) matches the real terminal. */
-let previewFontPx = 14
+const previewFontPx = new Map<string, number>()
+/** Per-session xterm theme for the preview emulator (patched in place). */
+const previewThemes = new Map<string, ITheme>()
 const previewTerminals = new Map<string, PreviewTerminalState>()
 
 function loadPersistedDims() {
@@ -171,7 +176,7 @@ export function noteSurfaceDims(localId: string, cols: number, rows: number) {
   if (prev && sameDims(prev, dims)) return
   surfaceDims.set(localId, dims)
   persistDimsSoon()
-  syncPreviewTerminal(localId, previewFontSize(localId))
+  syncPreviewTerminal(localId)
   requestPreviewUpdate(localId)
 }
 
@@ -181,13 +186,39 @@ export function previewDimsFor(localId: string): PreviewDims {
   return surfaceDims.get(localId) ?? { cols: PREVIEW_COLS, rows: PREVIEW_ROWS }
 }
 
-/** Remember the main surface's font size for preview cell metrics. */
-export function noteSurfaceFontSize(px: number) {
-  if (Number.isFinite(px) && px >= 6 && px <= 40) previewFontPx = px
+/** Remember a session's font size for its preview's cell metrics. */
+export function noteSurfaceFontSize(localId: string, px: number) {
+  if (Number.isFinite(px) && px >= 6 && px <= 40 && previewFontPx.get(localId) !== px) {
+    previewFontPx.set(localId, px)
+    // An existing emulator only needs its option patched: the next sync
+    // rebuilds nothing unless the grid itself changed.
+    const state = previewTerminals.get(localId)
+    if (state) state.terminal.options.fontSize = px
+  }
 }
 
-function previewFontSize(_localId: string): number {
-  return previewFontPx
+/**
+ * Remember a session's terminal theme for its preview emulator. The theme is
+ * patched into the existing emulator (no rebuild, no replay): colours are
+ * resolved at paint time, so the buffer is untouched.
+ */
+export function noteSurfaceTheme(localId: string, theme: ITheme | undefined) {
+  if (!theme) return
+  if (previewThemes.get(localId) === theme) return
+  previewThemes.set(localId, theme)
+  const state = previewTerminals.get(localId)
+  if (state) {
+    state.terminal.options.theme = theme
+    if (state.previous) state.previous.terminal.options.theme = theme
+  }
+}
+
+function previewFontSize(localId: string): number {
+  return previewFontPx.get(localId) ?? FONT_DEFAULT
+}
+
+function previewTheme(localId: string): ITheme {
+  return previewThemes.get(localId) ?? STILL_XTERM_THEME
 }
 
 function emit() {
@@ -327,7 +358,7 @@ function emitTranscript(localId: string) {
   transcriptListeners.get(localId)?.forEach((l) => l())
 }
 
-function newPreviewTerminal(dims: PreviewDims, fontSize: number): Terminal {
+function newPreviewTerminal(dims: PreviewDims, fontSize: number, theme: ITheme): Terminal {
   // Same palette as the main surface so mounted previews match it.
   const terminal = new Terminal({
     cols: dims.cols,
@@ -342,28 +373,7 @@ function newPreviewTerminal(dims: PreviewDims, fontSize: number): Terminal {
     fontSize,
     lineHeight: TERMINAL_LINE_HEIGHT,
     allowProposedApi: true,
-    theme: {
-      background: "#08080a",
-      foreground: "#ded9dd",
-      cursor: "#ff5a5a",
-      cursorAccent: "#08080a",
-      black: "#08080a",
-      brightBlack: "#777078",
-      red: "#ff5a5a",
-      brightRed: "#ff7777",
-      green: "#91b587",
-      brightGreen: "#acd19f",
-      yellow: "#d5aa82",
-      brightYellow: "#e7bf98",
-      blue: "#9a96b8",
-      brightBlue: "#b3afd0",
-      magenta: "#b89ab8",
-      brightMagenta: "#cdb0cd",
-      cyan: "#8eadb2",
-      brightCyan: "#a5c4c9",
-      white: "#d7d2d6",
-      brightWhite: "#f4f0f2",
-    },
+    theme,
   })
   // Same Unicode 11 width rules as the live surface: keeps preview cells
   // aligned with what the real terminal renders (emoji are 2 cells).
@@ -390,11 +400,10 @@ function disposePreviewTerminal(localId: string) {
  * A rebuild also runs whenever the ring changed under the emulator (see
  * below), so replay correctness never depends on incremental bookkeeping.
  */
-function syncPreviewTerminal(
-  localId: string,
-  fontSize = 14,
-): PreviewTerminalState | null {
+function syncPreviewTerminal(localId: string): PreviewTerminalState | null {
   try {
+    const fontSize = previewFontSize(localId)
+    const theme = previewTheme(localId)
     const dims = previewDimsFor(localId)
     const bytes = transcriptSnapshot(localId)
     const total = transcripts.get(localId)?.totalBytes ?? 0
@@ -407,6 +416,7 @@ function syncPreviewTerminal(
       if (state.terminal.options.fontSize !== fontSize) {
         state.terminal.options.fontSize = fontSize
       }
+      if (state.terminal.options.theme !== theme) state.terminal.options.theme = theme
     }
 
     // The ring's first byte has this absolute transcript offset. If the
@@ -419,7 +429,7 @@ function syncPreviewTerminal(
       state.queuedTotal < retainedStart ||
       state.queuedTotal > total
     ) {
-      const terminal = newPreviewTerminal(dims, fontSize)
+      const terminal = newPreviewTerminal(dims, fontSize, theme)
       const previous = state?.ready ? state : state?.previous
       if (state) {
         if (state !== previous) state.terminal.dispose()
@@ -486,10 +496,13 @@ function syncPreviewTerminal(
 export function openPreview(
   localId: string,
   host: HTMLElement,
-  fontSize = 14,
+  fontSize = FONT_DEFAULT,
+  theme?: ITheme,
 ): boolean {
   try {
-    const current = syncPreviewTerminal(localId, fontSize)
+    noteSurfaceFontSize(localId, fontSize)
+    noteSurfaceTheme(localId, theme)
+    const current = syncPreviewTerminal(localId)
     const state = current?.ready ? current : current?.previous
     if (!state) return false
     const moved = state.terminal.element?.parentElement !== host
@@ -602,7 +615,7 @@ function pushTranscript(localId: string, data: number[]) {
   // Keep the headless emulator in lockstep with the raw stream. Its callback
   // is the point at which the active buffer is safe to read; card listeners
   // are notified there rather than displaying a half-parsed frame.
-  syncPreviewTerminal(localId, previewFontSize(localId))
+  syncPreviewTerminal(localId)
   requestPreviewUpdate(localId)
 }
 
@@ -619,10 +632,13 @@ export function transcriptSnapshot(localId: string): Uint8Array {
  */
 export function snapshotPreviewScreen(
   localId: string,
-  fontSize = 14,
+  fontSize = FONT_DEFAULT,
+  theme?: ITheme,
 ): string[] | null {
   try {
-    const state = syncPreviewTerminal(localId, fontSize)
+    noteSurfaceFontSize(localId, fontSize)
+    noteSurfaceTheme(localId, theme)
+    const state = syncPreviewTerminal(localId)
     if (!state) return null
     // Keep this session's last complete frame during a rebuild, never an
     // unrelated persisted snapshot or a not-yet-parsed blank screen.
@@ -1209,6 +1225,8 @@ export async function releaseSession(localId: string): Promise<void> {
   // Explicit removal drops the remembered geometry too. Plain disconnects
   // keep it: the frozen card must still render at the last real layout.
   surfaceDims.delete(localId)
+  previewFontPx.delete(localId)
+  previewThemes.delete(localId)
   persistDimsSoon()
   transcriptVersions.delete(localId)
   transcriptListeners.delete(localId)

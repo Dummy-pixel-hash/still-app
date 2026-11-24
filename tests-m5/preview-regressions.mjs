@@ -35,7 +35,7 @@ ok("surface records its real grid for previews",
   conns.includes("export function noteSurfaceDims") &&
   (surface.match(/noteSurfaceDims\(/g) || []).length >= 1);
 ok("attach-time dims estimate scales with the font size",
-  readFileSync("src/components/TerminalOverlay.tsx", "utf8").includes("noteSurfaceFontSize(fontPx)") &&
+  readFileSync("src/components/TerminalOverlay.tsx", "utf8").includes("noteSurfaceFontSize(s.id, fontPx)") &&
   /const cellW = TERMINAL_CELL_W_RATIO \* fontPx/.test(readFileSync("src/components/TerminalOverlay.tsx", "utf8")) &&
   // The ratio must come from the shared constant so the live surface, the
   // preview emulator and this estimate cannot drift apart.

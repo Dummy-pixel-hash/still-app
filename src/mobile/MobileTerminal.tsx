@@ -5,10 +5,12 @@ import { buildConnectRequest, type AskSessionAuth } from "../session/connectRequ
 import { connectionError, connectionState, hostKeyPromptFor, isConnectPending, nativeSessionId, reconnectSession, terminalForSession, useConnections, writeSession } from "../session/connections"
 import { nativeBridge } from "../bridge/nativeBridge"
 import type { AppSettings, Session } from "../types"
+import { useTerminalAppearance } from "../terminal/useTerminalAppearance"
 import MobileIcon from "./MobileIcon"
 
 export default function MobileTerminal({ session, settings, askAuth, onBack }: { session: Session; settings: AppSettings; askAuth: AskSessionAuth; onBack: () => void }) {
   useConnections()
+  const appearance = useTerminalAppearance(session.id, session)
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [paste, setPaste] = useState<string | null>(null)
   const mounted = useRef(true), connecting = useRef(false)
   const connect = useCallback(async () => {
@@ -27,7 +29,7 @@ export default function MobileTerminal({ session, settings, askAuth, onBack }: {
   return <section className="mobile-terminal" aria-label={`${session.name} terminal`}>
     <header className="mobile-detail-bar"><button className="mobile-icon-button" onClick={onBack} aria-label="Back to terminals"><MobileIcon name="back" /></button><div><h1>{session.name}</h1><p><span className={`mobile-status-dot ${state === "connected" ? "is-connected" : ""}`} />{session.username}@{session.host}</p></div><button className="mobile-icon-button" aria-label="Show terminal keyboard" onClick={() => terminalForSession(session.id).focus()}><MobileIcon name="keyboard" /></button></header>
     {state !== "connected" && <AgentConnectionNotice connection={{ localId: session.id, state, busy, error: error || connectionError(session.id), nativeId: nativeSessionId(session.id), hostPrompt: hostKeyPromptFor(session.id), connect }} />}
-    <div className="mobile-terminal-canvas"><SessionTerminal localId={session.id} prefs={settings.terminal} imageInsertStyle={settings.imageInsertStyle} paused={state !== "connected"} /></div>
+    <div className="mobile-terminal-canvas"><SessionTerminal localId={session.id} appearance={appearance} imageInsertStyle={settings.imageInsertStyle} paused={state !== "connected"} /></div>
     {error && <p className="mobile-error" role="alert">{error}</p>}
     <div className="mobile-terminal-keys" aria-label="Terminal keys">
       <button disabled={state !== "connected"} onClick={() => key("\x03")}>Ctrl+C</button><button disabled={state !== "connected"} onClick={() => key("\x1b")}>Esc</button><button disabled={state !== "connected"} onClick={() => key("\t")}>Tab</button>

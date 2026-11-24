@@ -9,6 +9,20 @@ import { useCallback, useEffect, useState } from "react"
 import { DEFAULT_ORB_PREFERENCES, normalizeOrbPreferences } from "../orb/state"
 import { isTerminalPreview, TERMINAL_PREVIEW_STORE_KEY } from "../preview/mode"
 import {
+  CUSTOM_PREFIX,
+  DEFAULT_TERMINAL_PREFS,
+  MAX_CUSTOM_THEMES,
+  STILL_THEME_ID,
+  normalizeCustomThemes,
+  normalizeSessionAppearance,
+  normalizeTerminalPrefs,
+  normalizeTheme,
+  presetTheme,
+  type SessionAppearance,
+  type TerminalPalette,
+  type TerminalTheme,
+} from "../terminal/appearance"
+import {
   blankDraft,
   newSessionId,
   tmuxNameFor,
@@ -33,9 +47,10 @@ interface StoreShape {
 
 const DEFAULT_SETTINGS: AppSettings = {
   confirmRemove: true,
-  terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 },
+  terminal: { ...DEFAULT_TERMINAL_PREFS },
   imageInsertStyle: "path",
   orb: { ...DEFAULT_ORB_PREFERENCES },
+  customThemes: [],
 }
 
 function seed(): StoreShape {
@@ -95,8 +110,12 @@ function load(): StoreShape {
             void _legacyKind
             // Existing sessions were all SSH sessions, including localhost
             // entries. Never infer local execution from a hostname.
+            const { terminalTheme: _t, fontSize: _f, ...plain } = rest
+            void _t
+            void _f
             return {
-              ...rest,
+              ...plain,
+              ...normalizeSessionAppearance(rest),
               transport: rest.transport === "local" ? "local" : "ssh",
             } as unknown as StoreShape["sessions"][number]
           })
@@ -106,7 +125,8 @@ function load(): StoreShape {
       settings: {
         ...DEFAULT_SETTINGS,
         ...(parsed.settings ?? {}),
-        terminal: { ...DEFAULT_SETTINGS.terminal, ...parsed.settings?.terminal, scrollback: terminalScrollback(parsed.settings?.terminal?.scrollback) },
+        terminal: normalizeTerminalPrefs(parsed.settings?.terminal),
+        customThemes: normalizeCustomThemes(parsed.settings?.customThemes),
         // Deleted legacy orb settings never re-enable the new companion.
         orb: normalizeOrbPreferences(parsed.settings?.orb),
       },
@@ -358,7 +378,8 @@ export function removeKey(id: string) {
 export function updateSettings(patch: Partial<AppSettings>) {
   const store = getStore()
   const settings = { ...store.settings, ...patch }
-  if ("terminal" in patch) settings.terminal = { ...settings.terminal, scrollback: terminalScrollback(settings.terminal.scrollback) }
+  if ("terminal" in patch) settings.terminal = normalizeTerminalPrefs(settings.terminal)
+  if ("customThemes" in patch) settings.customThemes = normalizeCustomThemes(patch.customThemes)
   if ("orb" in patch) settings.orb = normalizeOrbPreferences(patch.orb)
   persist({ ...store, settings })
   notify()
@@ -366,6 +387,124 @@ export function updateSettings(patch: Partial<AppSettings>) {
 
 export function updateTerminalPrefs(patch: Partial<AppSettings["terminal"]>) {
   updateSettings({ terminal: { ...getStore().settings.terminal, ...patch } })
+}
+
+// --- terminal themes -----------------------------------------------------------
+
+// Temp (`temp-*`) sessions are memory-only and never in the store: their
+// overrides live here and vanish with the page.
+const tempAppearance = new Map<string, SessionAppearance>()
+
+export function tempAppearanceFor(id: string): SessionAppearance | undefined {
+  return tempAppearance.get(id)
+}
+
+export function forgetTempAppearance(id: string) {
+  tempAppearance.delete(id)
+}
+
+let themeSeq = 0
+function newThemeId(): string {
+  themeSeq += 1
+  return `${CUSTOM_PREFIX}${Date.now().toString(36)}-${themeSeq}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+/** Create a custom theme (optionally duplicating `from`). Returns null at the cap. */
+export function createCustomTheme(name: string, from?: Pick<TerminalTheme, "colors" | "kind" | "id" | "previewForeground" | "basedOn">): TerminalTheme | null {
+  const store = getStore()
+  if (store.settings.customThemes.length >= MAX_CUSTOM_THEMES) return null
+  const source = from ?? presetTheme(STILL_THEME_ID)!
+  const theme = normalizeTheme({
+    id: newThemeId(),
+    name,
+    kind: source.kind,
+    colors: source.colors,
+    basedOn: presetTheme(source.id) ? source.id : source.basedOn,
+    previewForeground: source.previewForeground,
+  })
+  if (!theme) return null
+  updateSettings({ customThemes: [...store.settings.customThemes, theme] })
+  return theme
+}
+
+export function updateCustomTheme(
+  id: string,
+  patch: { name?: string; colors?: Partial<TerminalPalette>; kind?: TerminalTheme["kind"] },
+) {
+  const store = getStore()
+  const existing = store.settings.customThemes.find((t) => t.id === id)
+  if (!existing) return
+  const next = normalizeTheme({
+    ...existing,
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.kind ? { kind: patch.kind } : {}),
+    colors: { ...existing.colors, ...(patch.colors ?? {}) },
+  })
+  if (!next) return
+  updateSettings({ customThemes: store.settings.customThemes.map((t) => (t.id === id ? next : t)) })
+}
+
+export function setDefaultTheme(id: string) {
+  updateTerminalPrefs({ themeId: id })
+}
+
+/** Remove a custom theme; sessions using it fall back to the default. */
+export function deleteCustomTheme(id: string) {
+  const store = getStore()
+  if (!store.settings.customThemes.some((t) => t.id === id)) return
+  const sessions = store.sessions.map((s) => {
+    if (s.terminalTheme !== id) return s
+    const { terminalTheme: _gone, ...rest } = s
+    void _gone
+    return rest as Session
+  })
+  for (const [tid, a] of tempAppearance) if (a.terminalTheme === id) tempAppearance.set(tid, { ...a, terminalTheme: undefined })
+  const terminal = store.settings.terminal.themeId === id ? { ...store.settings.terminal, themeId: STILL_THEME_ID } : store.settings.terminal
+  persist({
+    ...store,
+    sessions,
+    settings: { ...store.settings, terminal, customThemes: store.settings.customThemes.filter((t) => t.id !== id) },
+  })
+  notify()
+}
+
+/** Number of saved sessions whose override uses this theme. */
+export function sessionsUsingTheme(id: string): number {
+  return getStore().sessions.filter((s) => s.terminalTheme === id).length
+}
+
+/**
+ * Set or clear (value `undefined`) a session's theme / font override. Never
+ * bumps `updatedAt`: that would remount the terminal (it is part of the
+ * surface key) and reorder "recent".
+ */
+export function setSessionAppearance(id: string, patch: { terminalTheme?: string | undefined; fontSize?: number | undefined }) {
+  const hasTheme = "terminalTheme" in patch
+  const hasFont = "fontSize" in patch
+  if (id.startsWith("temp-")) {
+    const cur = tempAppearance.get(id) ?? {}
+    const next: SessionAppearance = { ...cur }
+    if (hasTheme) next.terminalTheme = patch.terminalTheme
+    if (hasFont) next.fontSize = patch.fontSize
+    tempAppearance.set(id, normalizeSessionAppearance(next))
+    notify()
+    return
+  }
+  const store = getStore()
+  const existing = store.sessions.find((s) => s.id === id)
+  if (!existing) return
+  const next = { ...existing } as Session
+  if (hasTheme) {
+    if (patch.terminalTheme) next.terminalTheme = patch.terminalTheme
+    else delete next.terminalTheme
+  }
+  if (hasFont) {
+    const font = normalizeSessionAppearance({ fontSize: patch.fontSize }).fontSize
+    if (font !== undefined) next.fontSize = font
+    else delete next.fontSize
+  }
+  persist({ ...store, sessions: store.sessions.map((s) => (s.id === id ? next : s)) })
+  notify()
 }
 
 export { blankDraft }

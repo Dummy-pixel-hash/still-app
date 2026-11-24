@@ -10,6 +10,8 @@ import { registerNativeBridge, type NativeSessionEvent } from "../src/bridge/nat
 import { connectSession, disconnectSession, releaseSession, transcriptSnapshot, isTuiActive, terminalForSession } from "../src/session/connections"
 import { writeBrowserClipboard } from "../src/bridge/browserClipboard"
 import type { Session } from "../src/types"
+import { DEFAULT_TERMINAL_PREFS, resolveTerminalAppearance } from "../src/terminal/appearance"
+import { setDefaultTheme, setSessionAppearance, updateTerminalPrefs, createCustomTheme, updateCustomTheme, deleteCustomTheme } from "../src/session/store"
 
 const sinks = new Map<string, (event: NativeSessionEvent) => void>()
 const sessions: Session[] = ["A", "B"].map(name => ({
@@ -19,6 +21,7 @@ const sessions: Session[] = ["A", "B"].map(name => ({
 }))
 const terminals = new Map<string, Terminal>()
 const workspace = new URLSearchParams(location.search).has("workspace")
+const emptyWorkspace = new URLSearchParams(location.search).has("empty")
 let generation = 0
 let mounts = 0
 let terminal: Terminal
@@ -60,6 +63,14 @@ const h = {
     await new Promise<void>(resolve => terminalForSession(id).write("", resolve))
   },
   terminal: (id: string) => terminals.get(`still-term-${id}`),
+  /** Raise the host-key decision prompt on a workspace-mode session. */
+  hostKeyPrompt: (id: string, changed = false) => sinks.get(id)?.({
+    type: "hostKeyPrompt",
+    prompt: { host: "fixture.invalid", port: 22, keyType: "ssh-ed25519", fingerprint: "SHA256:fixtureFingerprint0123456789abcdefghijklmnop", opensshKey: "ssh-ed25519 AAAAfixturekey", changed },
+  }),
+  /** Put a workspace-mode session into the error state with a typed message. */
+  fail: (id: string, message = "connection refused") => sinks.get(id)?.({ type: "error", error: { code: "connect_failed", message } }),
+  setStatus: (id: string, status: "connecting" | "connected" | "disconnected" | "error") => sinks.get(id)?.({ type: "status", status }),
   snapshot: () => new TextDecoder().decode(transcriptSnapshot("fixture")),
   tuiActive: () => isTuiActive("fixture"),
   baselineWheel: async () => {
@@ -78,6 +89,12 @@ const h = {
   },
   browserCopy: writeBrowserClipboard,
   tauriBridge,
+  setDefaultTheme,
+  setSessionAppearance,
+  updateTerminalPrefs,
+  createCustomTheme,
+  updateCustomTheme,
+  deleteCustomTheme,
 }
 // Test-only instrumentation: production components expose no debug globals.
 const originalOpen = Terminal.prototype.open
@@ -122,14 +139,14 @@ const connect = () => connectSession({ localId: "fixture", host: "fixture.invali
 // fallback→webfont swap changes glyph height independently of the font size.
 await document.fonts.load('14px "Geist Mono"')
 if (workspace) {
-  localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{ id: "fixture", name: "Terminals", note: "", order: 0 }], sessions, order: { fixture: sessions.map(s => s.id) }, keys: [], settings: { confirmRemove: true, terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 } } }))
-  await Promise.all(sessions.map(s => connectSession({ localId: s.id, tmuxSession: s.tmuxSession, host: s.host, port: s.port, username: s.username, authKind: "password" })))
+  localStorage.setItem("still.m2.store.v1", JSON.stringify({ projects: [{ id: "fixture", name: "Terminals", note: "", order: 0 }], sessions: emptyWorkspace ? [] : sessions, order: { fixture: emptyWorkspace ? [] : sessions.map(s => s.id) }, keys: [], settings: { confirmRemove: true, terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 } } }))
+  if (!emptyWorkspace) await Promise.all(sessions.map(s => connectSession({ localId: s.id, tmuxSession: s.tmuxSession, host: s.host, port: s.port, username: s.username, authKind: "password" })))
 } else await connect()
 function Surface() {
-  const [prefs, setPrefs] = useState({ fontSize: 14, cursorStyle: "block" as const, scrollback: 5000 })
+  const [fontSize, setFontSize] = useState(14)
   const [paused, setPaused] = useState(false)
   h.setPaused = setPaused
-  return <SessionTerminal localId="fixture" prefs={prefs} imageInsertStyle="path" paused={paused} onClose={() => h.closes++} onZoom={delta => setPrefs(p => ({ ...p, fontSize: delta === "reset" ? 14 : Math.max(10, Math.min(24, p.fontSize + delta)) }))} />
+  return <SessionTerminal localId="fixture" appearance={resolveTerminalAppearance({ fontSize }, { terminal: DEFAULT_TERMINAL_PREFS })} imageInsertStyle="path" paused={paused} onClose={() => h.closes++} onZoom={delta => setFontSize(p => delta === "reset" ? 14 : Math.max(10, Math.min(24, p + delta)))} />
 }
 const root = createRoot(document.getElementById("root")!)
 root.render(<React.StrictMode>{workspace ? <Workspace /> : <Surface />}</React.StrictMode>)

@@ -3,7 +3,7 @@ import type { Project, SessionDraft } from "../types"
 import { loadPresets, presetDetail, savePresets, upsertPreset, type SessionPreset } from "../session/presets"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
 
 function Field({
   label,
@@ -16,12 +16,12 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+      <span className="mb-1 block font-mono text-xs uppercase tracking-[0.18em] text-faint">
         {label}
       </span>
       {children}
       {error ? (
-        <span className="mt-1 block text-[11px] text-[#ff8080]">{error}</span>
+        <span className="mt-1 block text-xs text-[#ff8080]">{error}</span>
       ) : null}
     </label>
   )
@@ -220,7 +220,7 @@ export default function NewSessionWizard({
     <div>
       <div className="flex items-baseline justify-between gap-3">
         <h2 className="font-serif text-3xl text-fg">New session</h2>
-        <span className="font-mono text-[11px] text-faint">
+        <span className="font-mono text-xs text-faint">
           {step + 1} / {STEPS.length} · {STEPS[step]}
         </span>
       </div>
@@ -265,7 +265,7 @@ export default function NewSessionWizard({
                     className="group flex w-full items-baseline justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-left transition hover:border-[#ff4a4a]/50"
                   >
                     <span className="truncate text-[13px] text-fg">{p.name}</span>
-                    <span className="shrink-0 font-mono text-[11px] text-faint group-hover:text-dim">
+                    <span className="shrink-0 font-mono text-xs text-faint group-hover:text-dim">
                       {p.host ? `${p.username ? `${p.username}@` : ""}${p.host}:${p.port}` : "blank"}
                     </span>
                   </button>
@@ -278,7 +278,7 @@ export default function NewSessionWizard({
                       }}
                       aria-label={`Delete preset ${p.name}`}
                       title={`Delete preset ${p.name}`}
-                      className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-white/15 bg-[#17171a] text-[9px] leading-none text-dim hover:text-[#ff8080] group-hover/preset:flex"
+                      className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full border border-white/15 bg-[#17171a] text-xs leading-none text-dim hover:text-[#ff8080] group-hover/preset:flex"
                     >
                       ×
                     </button>
@@ -337,7 +337,7 @@ export default function NewSessionWizard({
                 className={inputClass}
               />
             </Field>
-            <p className="font-mono text-[11px] leading-relaxed text-faint">
+            <p className="font-mono text-xs leading-relaxed text-faint">
               {appliedName
                 ? `Preset “${appliedName}” applied — review each step and continue.`
                 : "What you’ll call this card on the workspace."}
@@ -377,7 +377,7 @@ export default function NewSessionWizard({
                 />
               </Field>
             </div>
-            <p className="font-mono text-[11px] leading-relaxed text-faint">
+            <p className="font-mono text-xs leading-relaxed text-faint">
               The SSH server this session attaches to.
             </p>
             <WizardFooter onBack={() => go(1, -1)} nextLabel="Continue →" />
@@ -415,7 +415,7 @@ export default function NewSessionWizard({
                 />
               </Field>
             </div>
-            <p className="font-mono text-[11px] leading-relaxed text-faint">
+            <p className="font-mono text-xs leading-relaxed text-faint">
               You’ll sign in after connecting — nothing secret lives here.
             </p>
             <WizardFooter onBack={() => go(2, -1)} nextLabel="Continue →" />
@@ -424,7 +424,7 @@ export default function NewSessionWizard({
 
         {step === 4 ? (
           <form className="mt-5 flex flex-col gap-3" onSubmit={finish}>
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+            <span className="font-mono text-xs uppercase tracking-[0.18em] text-faint">
               Project
             </span>
             {projects.length > 0 && !showNewProject ? (
@@ -443,7 +443,7 @@ export default function NewSessionWizard({
                   >
                     <span className="truncate text-[13px] text-fg">{p.name}</span>
                     {p.note ? (
-                      <span className="shrink-0 font-mono text-[11px] text-faint">
+                      <span className="shrink-0 font-mono text-xs text-faint">
                         {p.note}
                       </span>
                     ) : null}

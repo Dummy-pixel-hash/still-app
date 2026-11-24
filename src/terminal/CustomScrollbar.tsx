@@ -200,7 +200,7 @@ export default function CustomScrollbar({ terminal }: { terminal: Terminal | nul
     >
       <div
         ref={thumbRef}
-        className="absolute right-[3px] w-[6px] rounded-full bg-white/25 hover:bg-white/40"
+        className="absolute right-[3px] w-[6px] rounded-full bg-[var(--term-thumb,rgba(255,255,255,0.25))] hover:bg-[var(--term-thumb-hover,rgba(255,255,255,0.4))]"
         style={{ height: 28, transform: "translateY(0px)" }}
       />
     </div>

@@ -17,7 +17,14 @@ async function seed(page: Page, enabled = false) {
 }
 async function settings(page: Page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click()
-  return page.getByRole("dialog", { name: "Settings", exact: true })
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true })
+  // Settings is a full page with categories; the orb controls live in Companion.
+  await dialog.waitFor()
+  const tab = dialog.getByRole("tab", { name: "Companion" })
+  // Below 640px the categories collapse into a select.
+  if (await tab.isVisible()) await tab.click()
+  else await dialog.getByLabel("Category").selectOption("companion")
+  return dialog
 }
 async function connectFixture(page: Page) {
   await page.evaluate(async () => {
@@ -130,7 +137,7 @@ test("settings enable a browser-only preview; menu preferences, drag, nudge and 
   await dialog.getByRole("button", { name: "Reset position", exact: true }).click()
   await expect(dialog).toContainText("Position reset.")
   await page.screenshot({ path: `${screenshots}/settings-desktop.png` })
-  await dialog.getByRole("button", { name: "Done", exact: true }).click()
+  await dialog.getByRole("button", { name: "Close", exact: true }).click()
   await expect(orb(page)).toHaveAccessibleName(/No active connections/)
   const start = await orb(page).boundingBox()
   await page.mouse.move(start!.x + 48, start!.y + 48)
@@ -238,7 +245,7 @@ test("settings and preview menu fit a 390px viewport", async ({ page }) => {
   await dialog.getByLabel("Enable orb companion").check()
   await dialog.getByLabel("Orb size").selectOption("96")
   await page.screenshot({ path: `${screenshots}/settings-mobile.png` })
-  await dialog.getByRole("button", { name: "Done", exact: true }).click()
+  await dialog.getByRole("button", { name: "Close", exact: true }).click()
   await orb(page).click({ button: "right" })
   const bounds = await page.getByRole("menu", { name: "Orb controls" }).boundingBox()
   expect(bounds!.x).toBeGreaterThanOrEqual(0)

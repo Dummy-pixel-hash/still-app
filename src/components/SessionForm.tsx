@@ -7,7 +7,7 @@ import {
 import { useStore, validateDraft } from "../session/store"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
 
 function Field({
   label,
@@ -20,12 +20,12 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+      <span className="mb-1 block font-mono text-xs uppercase tracking-[0.18em] text-faint">
         {label}
       </span>
       {children}
       {error ? (
-        <span className="mt-1 block text-[11px] text-[#ff8080]">{error}</span>
+        <span className="mt-1 block text-xs text-[#ff8080]">{error}</span>
       ) : null}
     </label>
   )
@@ -33,7 +33,7 @@ function Field({
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-faint">
+    <p className="font-mono text-xs uppercase tracking-[0.22em] text-faint">
       {children}
     </p>
   )
@@ -244,14 +244,14 @@ export default function SessionForm({
               </select>
             )}
             {errors.keyId ? (
-              <span className="mt-1 block text-[11px] text-[#ff8080]">
+              <span className="mt-1 block text-xs text-[#ff8080]">
                 {errors.keyId}
               </span>
             ) : null}
           </div>
         )}
         {draft.authMethod === "ask" && (
-          <p className="font-mono text-[11px] text-faint">
+          <p className="font-mono text-xs text-faint">
             You’ll be asked for a password or key each time you connect,
             unless a remembered secret exists for this endpoint.
           </p>
@@ -264,7 +264,7 @@ export default function SessionForm({
             onChange={(e) => set("remember", e.target.checked)}
             className="accent-[#ff4a4a]"
           />
-          Remember on this device <span className="font-mono text-[10px] text-faint">(OS keyring, native only)</span>
+          Remember on this device <span className="font-mono text-xs text-faint">(OS keyring, native only)</span>
         </label>
       </section>
 

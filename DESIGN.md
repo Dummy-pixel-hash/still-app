@@ -39,7 +39,17 @@ Keep the existing Geist/system UI stack for controls and explanatory text, the m
 
 ## Layout
 
-Preserve project/card organization and the card-origin terminal transition. Settings extend the existing scrollable sheet; controls wrap rather than forcing horizontal scrolling. The standalone native orb is a separate, compact webview, not a scaled-down workspace.
+Preserve project/card organization and the card-origin terminal transition. Settings is a **full page**: a portalled, full-screen dialog with a header (title, search, Close), a vertical category tablist on the left (Up/Down/Home/End; a select below 640px) and the active category's panel on the right. Categories are General, Terminal, Themes, Accessibility, Keyboard shortcuts, SSH keys, Companion and Updates. Search lists every matching setting grouped by category with a count on each tab; Escape clears the search first, then closes and returns focus to the opener. Controls wrap rather than forcing horizontal scrolling, and no text on the page is smaller than 12px. The standalone native orb is a separate, compact webview, not a scaled-down workspace.
+
+## Terminal themes
+
+Every terminal draws from a **theme**: 21 colour slots (background, foreground, cursor, cursor text, selection and the 16 ANSI colours). Six built-in presets ship, all with original names: **Still** (the exact shipped palette and the default), **Still high contrast** (every colour at least 7:1), **Paper** (light), **Tide**, **Moss** and **Dusk**. Presets are read-only; duplicating one creates a custom theme (up to 50) that can be renamed, recoloured with a picker plus hex field, and deleted. Contrast warnings are advisory (text 4.5:1, ANSI colours and cursor 3:1) and announced in a status region.
+
+The default theme, font size, cursor, blink, minimum contrast, screen-reader mode and visual bell live in Settings. A single terminal may override only **theme** and **font size**: zooming (Ctrl +, -, 0) and the command palette write to that session and never to the global default, and clearing an override falls back to the default. Resolution order is session override, then default, then the Still preset, so a deleted theme can never leave a terminal unthemed.
+
+Themes colour **terminal surfaces and card previews only** (the overlay background, xterm, the card's preview well and its fade) through `--term-bg`, `--term-fg`, `--term-preview-fg` and `--term-cursor`. They never recolour workspace chrome, the Agents surface or the orb, and the overlay's footers and controls pill stay dark on purpose. Themes are renderer-only data and never enter `ConnectRequest`. Minimum contrast defaults to "automatic": 1 (unchanged look) unless the OS asks for more contrast (4.5). Cursor blink "automatic" stops under reduced motion.
+
+Inside xterm, Ctrl+/ and Ctrl+K belong to the shell (undo, kill-line). App shortcuts that act inside a terminal use Ctrl+Shift+letter or F6 (find Ctrl+Shift+F, palette Ctrl+Shift+K, shortcut help Ctrl+Shift+/, controls pill F6). One registry, `src/ui/shortcuts.ts`, drives the overlay's capture gate, xterm's key backstop, the help dialog and the Settings list.
 
 ## Elevation & Depth
 

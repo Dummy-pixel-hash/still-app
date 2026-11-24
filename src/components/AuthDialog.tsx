@@ -48,7 +48,7 @@ export default function AuthDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-serif text-2xl text-fg">Connect</h2>
-        <p className="mt-1 font-mono text-[11px] text-faint">
+        <p className="mt-1 font-mono text-xs text-faint">
           {session.username}@{session.host}:{session.port}{purpose !== "agent" && <> · tmux {session.tmuxSession}</>}
         </p>
         {stored ? (
@@ -68,7 +68,7 @@ export default function AuthDialog({
               stored ? "Password (blank = use remembered)" : "Password"
             }
             aria-label="Password"
-            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg outline-none focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-[#ff4a4a]/50"
             onKeyDown={(e) => {
               if (e.key === "Enter")
                 onResolve({ secret: secret || undefined, remember })
@@ -84,7 +84,7 @@ export default function AuthDialog({
             rows={4}
             spellCheck={false}
             autoComplete="off"
-            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg outline-none focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg focus:border-[#ff4a4a]/50"
           />
         )}
         <label className="mt-3 flex items-center gap-2 text-[12px] text-dim">
@@ -95,7 +95,7 @@ export default function AuthDialog({
             className="accent-[#ff4a4a]"
           />
           Remember on this device{" "}
-          <span className="font-mono text-[10px] text-faint">
+          <span className="font-mono text-xs text-faint">
             (OS keyring, native only)
           </span>
         </label>
