@@ -82,6 +82,7 @@ function usePreviewFit(prepare?: (host: HTMLElement) => void) {
   })
   return hostRef
 }
+const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
 /**
  * Card preview state: rows from a headless xterm screen emulator while live,
@@ -294,6 +295,7 @@ function SessionCard({
 
   return (
     <article
+      style={{ perspective: 900 }}
       className="rise relative"
       data-card={session.id}
       aria-labelledby={titleId}
@@ -307,18 +309,34 @@ function SessionCard({
           if (t.closest("[data-menu],[data-menu-button],a,input,select,textarea")) return
           onCardPointerDown(e, session, e.currentTarget)
         }}
+        onMouseMove={(e) => {
+          const el = e.currentTarget
+          const r = el.getBoundingClientRect()
+          const x = (e.clientX - r.left) / r.width
+          const y = (e.clientY - r.top) / r.height
+          el.style.setProperty("--ry", `${(x - 0.5) * 7}deg`)
+          el.style.setProperty("--rx", `${(0.5 - y) * 7}deg`)
+          el.style.setProperty("--mx", `${x * 100}%`)
+          el.style.setProperty("--my", `${y * 100}%`)
+        }}
+        onMouseLeave={(e) => {
+          const el = e.currentTarget
+          el.style.setProperty("--ry", "0deg")
+          el.style.setProperty("--rx", "0deg")
+        }}
         style={{
           animationDelay: `${index * 55}ms`,
-          transition: `opacity 300ms, box-shadow 400ms`,
+          transform: "rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg))",
+          transition: `transform 500ms ${EASE}, opacity 300ms, box-shadow 400ms`,
           // Drag source dims slightly while the floating ghost follows the
           // pointer; drop targets light up instead.
           cursor: dragging ? "grabbing" : undefined,
           opacity: dragging ? 0.35 : undefined,
           boxShadow: dropHighlight
             ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,255,255,0.5), 0 18px 32px -18px rgba(0,0,0,0.8), 0 0 28px -8px rgba(255,255,255,0.15)"
-            : "0 0 0 1px rgba(255,255,255,0.06), 0 14px 28px -18px rgba(0,0,0,0.75)",
+            : "0 1px 0 rgba(255,255,255,0.06) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 14px 28px -18px rgba(0,0,0,0.75), 0 2px 5px rgba(0,0,0,0.4)",
         }}
-        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_0_0_1px_rgba(255,255,255,0.14),0_20px_36px_-16px_rgba(0,0,0,0.9)] focus-within:shadow-[0_0_0_2px_rgba(255,255,255,0.4)] forced-colors:border forced-colors:border-[CanvasText]"
+        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,255,255,0.14),0_20px_36px_-16px_rgba(0,0,0,0.9),0_0_40px_-20px_rgba(255,255,255,0.12)] focus-within:shadow-[0_0_0_2px_rgba(255,255,255,0.4)] forced-colors:border forced-colors:border-[CanvasText]"
       >
         {/* Full-card Open button. Its accessible name is the contract
             tests-terminal/reopen.spec.ts relies on. */}
@@ -331,6 +349,13 @@ function SessionCard({
           onFocus={() => onCardFocus?.(session.id)}
           onClick={(e) => onOpen(session, e.currentTarget.closest<HTMLElement>("[data-card]") ?? e.currentTarget)}
           className="absolute inset-0 z-10 cursor-pointer rounded-[20px]"
+        />
+        <span
+          className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+          style={{
+            background:
+              "radial-gradient(260px circle at var(--mx,50%) var(--my,0%), rgba(255,255,255,0.07), transparent 60%)",
+          }}
         />
         <div className="pointer-events-none flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5">

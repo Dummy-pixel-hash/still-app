@@ -446,11 +446,11 @@ export default function Workspace() {
     : null
 
   const commands = useMemo<PaletteCommand[]>(() => {
-    const list: PaletteCommand[] = store.sessions.map((s) => ({
+    const list: PaletteCommand[] = [...store.sessions].sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0)).map((s) => ({
       id: `session-${s.id}`,
       group: "Sessions",
       label: s.name,
-      hint: s.host,
+      hint: s.host ? `${s.username}@${s.host}` : undefined,
       keywords: `open jump ${s.username}`,
       run: () => {
         setQ("")
@@ -464,6 +464,11 @@ export default function Workspace() {
       { id: "agents", group: "Actions", label: "Agents", hint: "Ctrl+Shift+A", run: openAgents },
       { id: "shortcuts", group: "Actions", label: "Keyboard shortcuts", hint: "Ctrl+Shift+/", run: () => setHelpOpen(true) },
       { id: "temp", group: "Actions", label: "New temp terminal", hint: "Ctrl+Shift+T", run: dock.toggleTemp },
+      ...(["manual", "recent", "name"] as const).map((value) => ({
+        id: `sort-${value}`, group: "View" as const, label: `Sort: ${value[0].toUpperCase()}${value.slice(1)}`,
+        hint: sort === value ? "current" : undefined, run: () => setSort(value),
+      })),
+      { id: "filter", group: "View", label: "Filter sessions", hint: "/", run: () => requestAnimationFrame(() => searchRef.current?.focus()) },
     )
     if (paletteSession) {
       const sid = paletteSession.id
@@ -475,7 +480,7 @@ export default function Workspace() {
       )
     }
     return list
-  }, [store.sessions, store.settings.customThemes, paletteSession, openSession, newSessionInFirst, openAgents, dock.toggleTemp])
+  }, [store.sessions, store.settings.customThemes, paletteSession, openSession, newSessionInFirst, openAgents, dock.toggleTemp, sort])
 
   return (
     <div className="grain relative flex h-full flex-col overflow-hidden rounded-lg bg-ink text-fg ring-1 ring-white/10">
@@ -504,7 +509,7 @@ export default function Workspace() {
         // screen. pointerEvents:none alone still lets Tab reach the grid.
         inert={open ? true : undefined}
       >
-        <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-14 sm:px-6" onKeyDown={rover.onKeyDown}>
+        <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-20 sm:px-6" onKeyDown={rover.onKeyDown}>
           <WorkspaceHeader
             q={q}
             setQ={setQ}
@@ -514,7 +519,6 @@ export default function Workspace() {
             onPalette={() => openPalette(null)}
             onAgents={openAgents}
             onSettings={() => setShowSettings(true)}
-            onNewProject={() => setShowNewProject(true)}
             onNewSession={newSessionInFirst}
           />
 

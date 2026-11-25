@@ -1,6 +1,6 @@
 // Pure data + fuzzy matching for the command palette (no React).
 
-export type PaletteGroup = "Sessions" | "Actions" | "Appearance"
+export type PaletteGroup = "Sessions" | "Actions" | "View" | "Appearance"
 
 export interface PaletteCommand {
   id: string
@@ -33,7 +33,7 @@ export function fuzzyScore(query: string, text: string): number | null {
   return score
 }
 
-const ORDER: PaletteGroup[] = ["Sessions", "Actions", "Appearance"]
+const ORDER: PaletteGroup[] = ["Sessions", "Actions", "View", "Appearance"]
 
 /** Filter and rank; groups keep a fixed order, best match first within each. */
 export function filterCommands(commands: PaletteCommand[], query: string): PaletteCommand[] {
