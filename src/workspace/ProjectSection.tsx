@@ -63,10 +63,6 @@ export default function ProjectSection({
           {project.note ? <p className="truncate font-mono text-xs text-faint">{project.note}</p> : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-xs text-faint">
-            {sessions.length}
-            <span className="sr-only"> sessions</span>
-          </span>
           <button
             type="button"
             aria-label={`New session in ${project.name}`}

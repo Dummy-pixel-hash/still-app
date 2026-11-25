@@ -37,9 +37,8 @@ export default function WorkspaceHeader({
           </h1>
           {isTerminalPreview() ? <p className="mt-1 font-mono text-xs text-faint">Terminal preview · local simulation</p> : null}
         </div>
-        <button type="button" onClick={onPalette} className={`${pill} flex items-center gap-2`}>
+        <button type="button" onClick={onPalette} className={pill}>
           Commands
-          <kbd className="font-mono text-xs text-faint">Ctrl K</kbd>
         </button>
         <div className="relative min-w-[11rem] flex-1 md:max-w-sm">
           <input

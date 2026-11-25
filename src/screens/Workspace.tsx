@@ -43,7 +43,6 @@ import type { Project, Session, SessionDraft } from "../types"
 import CommandPalette from "../workspace/CommandPalette"
 import EmptyState from "../workspace/EmptyState"
 import ProjectSection from "../workspace/ProjectSection"
-import RecentSessions from "../workspace/RecentSessions"
 import TempDock from "../workspace/TempDock"
 import WorkspaceDialogs from "../workspace/WorkspaceDialogs"
 import WorkspaceHeader, { type Sort } from "../workspace/WorkspaceHeader"
@@ -518,10 +517,6 @@ export default function Workspace() {
             onNewProject={() => setShowNewProject(true)}
             onNewSession={newSessionInFirst}
           />
-
-          {!empty && !filtering && store.sessions.length >= 3 ? (
-            <RecentSessions sessions={store.sessions.map((s) => s)} onOpen={handleCardOpen} />
-          ) : null}
 
           {empty ? (
             <EmptyState hasProjects={store.projects.length > 0} onNewSession={newSessionInFirst} />
