@@ -178,11 +178,13 @@ impl TmuxPlan {
     /// abort the command queue):
     /// - `allow-passthrough on` (server, tmux >= 3.3): lets inner programs
     ///   reach the outer terminal through DCS tmux; sequences.
-    /// - `terminal-features ',xterm*:sync'` (server, tmux >= 3.4): makes tmux
+    /// - `terminal-features ',xterm*:sync:hyperlinks'` (server, tmux >= 3.4): makes tmux
     ///   forward DECSET 2026 synchronized-output frames to the outer
     ///   terminal. Without it, fullscreen TUIs (coding agents) that wrap
     ///   each frame in `?2026h...?2026l` tear: tmux flushes every
     ///   intermediate draw and the screen visibly breaks into lines.
+    ///   `hyperlinks` (tmux >= 3.4) makes tmux forward OSC 8 links to the
+    ///   outer terminal; Still's link handler opens only http(s).
     /// - `terminal-overrides ',xterm*:Tc'` (server): report truecolor so
     ///   agents render their exact palettes through tmux.
     /// - `aggressive-resize on` (window-global): follow the smallest ACTIVE
@@ -207,7 +209,7 @@ impl TmuxPlan {
             .map(|d| format!(" -c {}", shell_quote(d)))
             .unwrap_or_default();
         format!(
-            "tmux -u new-session -A -s {n}{d} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n",
+            "tmux -u new-session -A -s {n}{d} -x {c} -y {r} \\; set-option -t {n} status off \\; set-option -t {n} mouse on \\; set-option -t {n} history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync:hyperlinks' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n",
             n = self.session_name,
             d = start_dir,
             c = cols,
@@ -397,7 +399,7 @@ mod tests {   use super::*;
         let p = TmuxPlan::new("still");
         assert_eq!(
             p.attach_command(80, 24),
-            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -t still mouse on \\; set-option -t still history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n"
+            "tmux -u new-session -A -s still -x 80 -y 24 \\; set-option -t still status off \\; set-option -t still mouse on \\; set-option -t still history-limit 10000 \\; set-option -sq extended-keys on \\; set-option -sq extended-keys-format csi-u \\; set-option -sq set-clipboard on \\; set-option -sq allow-passthrough on \\; set-option -asq terminal-features ',xterm*:sync:hyperlinks' \\; set-option -asq terminal-overrides ',xterm*:Tc' \\; set-option -gw aggressive-resize on \\; bind -T copy-mode WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode WheelDownPane send -X -N 1 scroll-down \\; bind -T copy-mode-vi WheelUpPane send -X -N 1 scroll-up \\; bind -T copy-mode-vi WheelDownPane send -X -N 1 scroll-down\n"
         );
     }
 
