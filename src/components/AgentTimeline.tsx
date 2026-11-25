@@ -1,6 +1,6 @@
 import { memo, useEffect, useId, useRef, useState } from "react"
 import { splitErrorText } from "../bridge/errors"
-import { toolLabel, type TranscriptItem } from "../agents/transcript"
+import { toolLabel, toolSummary, type TranscriptItem } from "../agents/transcript"
 import type { AgentHistoryCapabilities, AgentPlanEntry } from "../agents/types"
 import AgentIcon from "./AgentIcon"
 import { AgentMessage, AgentToolResult } from "./AgentMessage"
@@ -97,25 +97,13 @@ const Message = memo(function Message({ item, author, agentId, actions }: { item
     </div>}
   </article>
 }, (before, after) => before.item.id === after.item.id && before.item.kind === after.item.kind && before.item.text === after.item.text && before.item.messageId === after.item.messageId && before.item.checkpoint === after.item.checkpoint && before.author === after.author && before.agentId === after.agentId && before.actions === after.actions)
-type ActivityBatch = { items: TranscriptItem[]; groups: number }
 function Activity({ group, expanded, onToggle }: { group: ActivityGroup; expanded: boolean; onToggle: () => void }) {
-  let batches: ActivityBatch[] = []
-  for (let index = 0; index < group.items.length; index += 5) batches.push({ items: group.items.slice(index, index + 5), groups: 1 })
-  while (batches.length > 1) {
-    const parents: ActivityBatch[] = []
-    for (let index = 0; index < batches.length; index += 5) {
-      const children = batches.slice(index, index + 5)
-      parents.push({ items: children.flatMap(child => child.items), groups: children.reduce((count, child) => count + child.groups, 0) })
-    }
-    batches = parents
-  }
-  const root = batches[0]
   return <div className="agent-activity-layout agent-activity-layout--timeline" data-timeline-id={group.id}>
-    {root && <ActivityBlock group={group} items={root.items} groupCount={root.groups} expanded={expanded} onToggle={onToggle} />}
+    {group.items.length > 0 && <ActivityBlock group={group} items={group.items} expanded={expanded} onToggle={onToggle} />}
   </div>
 }
 
-function ActivityBlock({ group, items, groupCount, expanded, onToggle }: { group: ActivityGroup; items: TranscriptItem[]; groupCount: number; expanded: boolean; onToggle: () => void }) {
+function ActivityBlock({ group, items, expanded, onToggle }: { group: ActivityGroup; items: TranscriptItem[]; expanded: boolean; onToggle: () => void }) {
   const failedCount = items.filter(item => item.kind === "tool" && (item.status === "failed" || item.status === "error")).length || (group.failed ? 1 : 0)
   const failed = failedCount > 0
   const handoff = useRef(false)
@@ -129,18 +117,20 @@ function ActivityBlock({ group, items, groupCount, expanded, onToggle }: { group
     handoff.current = false
     ;(expanded ? rail.current : summaryButton.current)?.focus({ preventScroll: true })
   }, [expanded])
-  const lastTool = [...items].reverse().find(item => item.kind === "tool")
+  const tools = items.filter(item => item.kind === "tool")
+  const lastTool = tools[tools.length - 1]
   const label = lastTool ? toolLabel(lastTool) : undefined
-  const activitySummary = label
-    ? [label.action, label.detail].filter(Boolean).join(" · ")
-    : items.find(item => item.kind === "reasoning")?.text.replace(/\s+/g, " ").trim().slice(0, 160) || "Agent activity"
-  const groupedSummary = groupCount > 1 ? `${groupCount} activity groups · ${activitySummary}` : activitySummary
-  const summary = failed ? `${failedCount} failed · ${groupedSummary}` : groupedSummary
+  const reasoning = items.find(item => item.kind === "reasoning")?.text.replace(/\s+/g, " ").trim()
+  const reasoningSummary = reasoning ? (reasoning.length > 80 ? `${reasoning.slice(0, 79).trimEnd()}…` : reasoning) : "Agent activity"
+  // Collapsed rows read like a sentence ("Ran npm test and 4 more"); the exact call stays in the tooltip and the expanded entry.
+  const activitySummary = lastTool ? `${toolSummary(lastTool)}${tools.length > 1 ? ` and ${tools.length - 1} more` : ""}` : reasoningSummary
+  const fullSummary = label ? [label.action, label.detail].filter(Boolean).join(" · ") : reasoning || activitySummary
+  const summary = failed ? `${failedCount} failed · ${activitySummary}` : activitySummary
   const toggle = () => { handoff.current = true; onToggle() }
   return <section className={`agent-activity-block ${expanded ? "is-expanded" : "is-collapsed"}${failed ? " is-failed" : ""}`} data-timeline-id={`activity:${group.id}:${items[0]?.id || "empty"}`}>
     <button ref={rail} type="button" className={`agent-activity-rail${expanded ? " is-open" : ""}`} aria-label={`${expanded ? "Collapse" : "Expand"} activity: ${summary}`} aria-expanded={expanded} aria-controls={contentId} onClick={toggle}><span aria-hidden="true" /></button>
     <div className="agent-activity-content">
-      {!expanded && <button ref={summaryButton} type="button" className="agent-activity-summary" aria-expanded={false} aria-controls={contentId} aria-label={`Expand activity: ${summary}`} title={summary} onClick={toggle}><AgentIcon name="chevron" size={12} />{failed && <i className="agent-activity-fail-dot" aria-hidden="true" />}<span>{summary}</span></button>}
+      {!expanded && <button ref={summaryButton} type="button" className="agent-activity-summary" aria-expanded={false} aria-controls={contentId} aria-label={`Expand activity: ${summary}`} title={fullSummary} onClick={toggle}><AgentIcon name="chevron" size={12} />{failed && <i className="agent-activity-fail-dot" aria-hidden="true" />}<span>{summary}</span></button>}
       <div id={contentId} hidden={!expanded}>
         {expanded && <div className="agent-activity-event-list">{items.map(item => item.kind === "reasoning"
           ? <details className="agent-activity-reasoning" data-timeline-id={`detail:${item.id}`} key={item.id}><summary><AgentIcon name="chevron" size={12} /><h3>Reasoning</h3></summary><div className="agent-activity-reasoning-body"><AgentMessage text={item.text} /></div></details>

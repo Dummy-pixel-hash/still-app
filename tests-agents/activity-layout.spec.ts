@@ -109,7 +109,7 @@ test("activity groups bundle recursively and expand to a flat list of collapsed 
   await expect(page.locator(".agent-activity-block")).toHaveCount(2)
   await page.evaluate(() => (window as any).agentFixture.finish())
   const summary = root.locator(".agent-activity-summary")
-  await expect(summary).toContainText("25 activity groups")
+  await expect(summary).toContainText("Edited file-124.ts and 99 more")
   await summary.click()
   const eventList = root.locator(".agent-activity-event-list")
   await expect(eventList.locator(":scope > details")).toHaveCount(125)
