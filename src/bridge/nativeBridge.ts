@@ -188,6 +188,7 @@ export interface NativeBridge extends OrbBridge {
   agentRespondInput(executionId:string,requestId:string|number,answers:Record<string,unknown>|null):Promise<void>
   agentSnapshot(executionId:string):Promise<AgentThreadSnapshot>
   agentReconcile(executionId:string):Promise<void>
+  agentAdoptRemoteExecution(nativeSessionId: string, conversationId: string): Promise<SharedLibraryPage>
   subscribeToAgent(executionId:string,callback:(event:AgentThreadEvent)=>void):Promise<Unsubscribe>
 
   /** Open an http(s) URL in the OS default browser. */

@@ -12,7 +12,7 @@
   --accent: #ff4a4a;
   --accent-foreground: #08080a;
   --border: #242126;
-  --ring: #ff4a4a;
+  --ring: #d8d2dc;
   --radius: 0.5rem;
 }
 
@@ -32,4 +32,33 @@
   --color-border: var(--border);
   --color-ring: var(--ring);
   --radius-lg: var(--radius);
+}
+
+/* Increase contrast: lift the dim/faint text and borders. */
+@media (prefers-contrast: more) {
+  :root {
+    --muted-foreground: #c4bdca;
+    --border: #5a5560;
+    /* Tailwind utilities read these theme variables at runtime. */
+    --color-dim: #c8c1cd;
+    --color-faint: #b0a8b5;
+    --color-still-dim: #c8c1cd;
+    --color-still-faint: #b0a8b5;
+  }
+}
+
+/* Forced colours: surfaces lose their fills, so give them real borders. */
+@media (forced-colors: active) {
+  [data-card] > div,
+  [data-menu],
+  [data-overlay-pill],
+  [role="dialog"],
+  [role="menu"],
+  [role="listbox"],
+  #temp-pill {
+    border: 1px solid CanvasText;
+  }
+  :where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline-color: Highlight;
+  }
 }

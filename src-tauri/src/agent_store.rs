@@ -262,15 +262,70 @@ pub async fn load_snapshot(app: &AppHandle, id: String) -> Result<Snapshot, Stil
     Ok(snapshot)
 }
 
-/// Missing, deleted and damaged caches are different outcomes. Discovery must
-/// never replace a damaged journal or resurrect a device-local tombstone.
-pub async fn import_remote_snapshot(app: &AppHandle, snapshot: Snapshot, remote: Value) -> Result<Option<Snapshot>, StillError> {
-    disk(app, move |root| import_remote_snapshot_at(root, snapshot, remote)).await
+/// Why a discovered execution migration was not applied. Only the first three
+/// may be bypassed by an explicit user adoption; the rest protect identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockReason { PendingMessage, RecoveryRequired, UnconfirmedState, GenerationNotNewer, LineageUnproven, ProviderSessionChanged, DifferentAccount }
+impl BlockReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingMessage => "PendingMessage", Self::RecoveryRequired => "RecoveryRequired", Self::UnconfirmedState => "UnconfirmedState",
+            Self::GenerationNotNewer => "GenerationNotNewer", Self::LineageUnproven => "LineageUnproven",
+            Self::ProviderSessionChanged => "ProviderSessionChanged", Self::DifferentAccount => "DifferentAccount",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PendingMessage => "a message here was not confirmed by the server",
+            Self::RecoveryRequired => "this device's copy needs recovery",
+            Self::UnconfirmedState => "this device's copy has an unconfirmed state",
+            Self::GenerationNotNewer => "the server's version is not newer than this device's copy",
+            Self::LineageUnproven => "the server could not prove how it moved from this device's copy",
+            Self::ProviderSessionChanged => "the provider session differs from this device's copy",
+            Self::DifferentAccount => "the server's copy belongs to a different account",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct MigrationBlock { pub reason: BlockReason, pub remote_execution_id: String, pub remote_generation: u64 }
+pub enum ImportOutcome { Imported(Snapshot), Skipped, Blocked(MigrationBlock) }
+
+/// Server-provided ancestry (nearest ancestor first, at most 64 entries). It
+/// proves a multi-hop migration only when `saved` appears in it and every hop
+/// between it and the current execution kept the saved provider session.
+fn lineage_proves(remote: &Value, saved_execution: &str, saved_session: &Option<String>) -> bool {
+    if remote["replacesExecutionId"].as_str() == Some(saved_execution) { return true; }
+    let Some(chain) = remote["lineage"].as_array().filter(|chain| chain.len() <= 64) else { return false };
+    let mut seen = HashSet::new();
+    let current = remote["executionId"].as_str().unwrap_or("");
+    for entry in chain {
+        let Some(id) = entry["executionId"].as_str() else { return false };
+        if id == current || !seen.insert(id.to_owned()) { return false; }
+        if entry["agentSessionId"].as_str().map(str::to_owned) != *saved_session || saved_session.is_none() && !entry["agentSessionId"].is_null() { return false; }
+        if id == saved_execution { return true; }
+    }
+    false
 }
 
-fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> Result<Option<Snapshot>, String> {
+fn clear_block(path: &Path, cached_meta: &Value) -> Result<(), String> {
+    if cached_meta.get("migrationBlocked").is_some_and(|v| !v.is_null()) {
+        let mut meta = cached_meta.clone();
+        if let Some(object) = meta.as_object_mut() { object.remove("migrationBlocked"); }
+        append(path, &Record::Metadata { meta })?;
+    }
+    Ok(())
+}
+
+/// Missing, deleted and damaged caches are different outcomes. Discovery must
+/// never replace a damaged journal or resurrect a device-local tombstone.
+/// `explicit` (user adoption) may bypass only pending/recovery/unconfirmed state.
+pub async fn import_remote_snapshot(app: &AppHandle, snapshot: Snapshot, remote: Value, explicit: bool) -> Result<ImportOutcome, StillError> {
+    disk(app, move |root| import_at(root, snapshot, remote, explicit)).await
+}
+
+fn import_at(root: &Path, snapshot: Snapshot, remote: Value, explicit: bool) -> Result<ImportOutcome, String> {
         let id = &snapshot.conversation_id;
-        if file(root, id, "deleted")?.exists() { return Ok(None); }
+        if file(root, id, "deleted")?.exists() { return Ok(ImportOutcome::Skipped); }
         let path = file(root, id, "jsonl")?;
         if path.exists() {
             let row = summary(&path, &mut Vec::new())?;
@@ -280,18 +335,32 @@ fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> 
                 return Err("Discovered conversation conflicts with the saved account, project or provider".into());
             }
             if saved.execution_id != snapshot.execution_id {
-                if remote["replacesExecutionId"] != saved.execution_id || snapshot.agent_session_id != saved.agent_session_id
-                    || remote["shared"]["generation"].as_u64().unwrap_or(0) <= cached_meta["shared"]["generation"].as_u64().unwrap_or(0)
-                    || saved.pending_message_id.is_some() || saved.recovery_required || matches!(saved.state.as_str(), "submissionUnknown" | "rewinding") {
-                    return Err("Execution migration needs explicit recovery or reconciliation. The original cache and drafts were kept".into());
-                }
-                if cached_meta["shared"]["serverAccountId"].is_string() && cached_meta["shared"]["serverAccountId"] != remote["shared"]["serverAccountId"] {
-                    return Err("Execution migration belongs to a different remote account".into());
+                let remote_generation = remote["shared"]["generation"].as_u64().unwrap_or(0);
+                let unconfirmed = matches!(saved.state.as_str(), "submissionUnknown" | "rewinding");
+                let reason = if cached_meta["shared"]["serverAccountId"].is_string() && cached_meta["shared"]["serverAccountId"] != remote["shared"]["serverAccountId"] { Some(BlockReason::DifferentAccount) }
+                    else if !lineage_proves(&remote, &saved.execution_id, &saved.agent_session_id) { Some(BlockReason::LineageUnproven) }
+                    else if snapshot.agent_session_id != saved.agent_session_id { Some(BlockReason::ProviderSessionChanged) }
+                    else if remote_generation <= cached_meta["shared"]["generation"].as_u64().unwrap_or(0) { Some(BlockReason::GenerationNotNewer) }
+                    else if saved.pending_message_id.is_some() && !explicit { Some(BlockReason::PendingMessage) }
+                    else if saved.recovery_required && !explicit { Some(BlockReason::RecoveryRequired) }
+                    else if unconfirmed && !explicit { Some(BlockReason::UnconfirmedState) }
+                    else { None };
+                if let Some(reason) = reason {
+                    let block = MigrationBlock { reason, remote_execution_id: snapshot.execution_id.clone(), remote_generation };
+                    let previous = &cached_meta["migrationBlocked"];
+                    let same = previous["reason"] == reason.as_str() && previous["remoteExecutionId"] == block.remote_execution_id && previous["remoteGeneration"] == remote_generation;
+                    if !same && cached_meta.is_object() {
+                        let mut meta = cached_meta.clone();
+                        meta["migrationBlocked"] = json!({"reason":reason.as_str(),"remoteExecutionId":block.remote_execution_id,"remoteGeneration":remote_generation,"detectedAt":timestamp() as u64});
+                        append(&path, &Record::Metadata { meta })?;
+                    }
+                    return Ok(ImportOutcome::Blocked(block));
                 }
                 // The header advances, while the complete original journal,
                 // prior-attempt transcript, local drafts and metadata remain.
                 append(&path, &Record::Update { fields: fields(&snapshot) })?;
-                Ok(Some(snapshot))
+                clear_block(&path, &cached_meta)?;
+                Ok(ImportOutcome::Imported(snapshot))
             } else {
                 let identity_changed = refresh_remote_resume_identity(&mut saved, &snapshot)?;
                 if saved.history_capabilities != snapshot.history_capabilities || identity_changed {
@@ -299,7 +368,8 @@ fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> 
                     if saved.history_capabilities != snapshot.history_capabilities { fields["historyCapabilities"] = snapshot.history_capabilities.clone(); saved.history_capabilities = snapshot.history_capabilities.clone(); }
                     append(&path, &Record::Update { fields })?;
                 }
-                Ok(Some(saved))
+                clear_block(&path, &cached_meta)?;
+                Ok(ImportOutcome::Imported(saved))
             }
         } else {
             let now = timestamp();
@@ -307,7 +377,7 @@ fn import_remote_snapshot_at(root: &Path, snapshot: Snapshot, remote: Value) -> 
             row["meta"] = json!({"id":id,"hostKey":snapshot.host_key,"folder":snapshot.cwd,"title":"", "pinned":false,"createdAt":now,"activityAt":now,"order":now,"draft":""});
             row["touchedAt"] = json!(now);
             append(&path, &Record::Create { row })?;
-            Ok(Some(snapshot))
+            Ok(ImportOutcome::Imported(snapshot))
         }
 }
 
@@ -622,6 +692,11 @@ pub async fn still_agent_save_metadata(app: AppHandle, args: MetadataArgs) -> Re
         if !path.exists() || file(root, &args.conversation_id, "deleted")?.exists() { return Err("Conversation is no longer in the local library".into()); }
         let mut meta = args.meta;
         let previous = summary(&path, &mut Vec::new())?;
+        // The migration marker is backend-owned; a stale WebView must neither forge nor resurrect it.
+        match previous["meta"].get("migrationBlocked").filter(|v| v.is_object()) {
+            Some(marker) => meta["migrationBlocked"] = marker.clone(),
+            None => if let Some(object) = meta.as_object_mut() { object.remove("migrationBlocked"); },
+        }
         if previous["meta"]["shared"].is_object() {
             meta["shared"] = previous["meta"]["shared"].clone();
             if previous["meta"]["sharedLocalChanges"].is_object() && meta["sharedAdoptionResolved"] != true {
@@ -877,6 +952,48 @@ mod tests {
         assert!(refresh_remote_resume_identity(&mut saved, &incoming).is_err());
     }
     #[test]
+    fn windows_export_matches_real_native_journal_replay_without_modifying_the_source() {
+        let root = root();
+        let source = root.join("source"); fs::create_dir(&source).unwrap();
+        let id = "windows-export-contract";
+        let account = r#"["home-work.example.test",22,"Darsh"]"#;
+        let mut initial = legacy_row(id, "original-execution");
+        initial["hostKey"] = json!(account); initial["agentName"] = json!("OpenCode");
+        initial["agentSessionId"] = json!("provider-session"); initial["state"] = json!("complete"); initial["resumable"] = json!(true);
+        initial["meta"]["hostKey"] = json!(account); initial["meta"]["title"] = json!("Windows chat title");
+        initial["meta"]["titleSource"] = json!("user"); initial["meta"]["draft"] = json!("DEVICE_ONLY_DRAFT");
+        let path = file(&source, id, "jsonl").unwrap();
+        append(&path, &Record::Create { row: initial }).unwrap();
+        for (sequence, kind, text) in [(1, "userMessage", "Original user message"), (2, "assistantChunk", "First "), (3, "assistantChunk", "second")] {
+            let event: Event = serde_json::from_value(json!({"sequence":sequence,"attemptId":"original-execution","type":kind,"text":text})).unwrap();
+            append(&path, &Record::Event { fields: json!({"executionId":"original-execution","lastSequence":sequence}), event }).unwrap();
+        }
+        let before = fs::read(&path).unwrap();
+        let native = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
+        let exporter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/migration/export-windows-library.mjs");
+        let script = r#"
+            import { readFileSync } from 'node:fs';
+            import { pathToFileURL } from 'node:url';
+            const tool = await import(pathToFileURL(process.argv[2]).href);
+            const inventory = tool.inspectLibrary(process.argv[3]);
+            const result = tool.exportLibrary({ library: process.argv[3], account: inventory.accounts[0].accountId, output: process.argv[4], includeHistory: true });
+            process.stdout.write(readFileSync(result.exportFile));
+        "#;
+        let output = std::process::Command::new("node").args(["--input-type=module", "-e", script, "export-contract"])
+            .arg(exporter).arg(&source).arg(root.join("export")).output().expect("Node.js is required for the Windows export contract test");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let exported: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let conversation = &exported["conversations"][0];
+        assert_eq!(conversation["conversationId"], native["meta"]["id"]);
+        assert_eq!(conversation["organization"]["title"], native["meta"]["title"]);
+        assert_eq!(conversation["history"]["events"][0]["text"], native["transcript"][0]["text"]);
+        assert_eq!(conversation["history"]["events"][1]["text"], native["transcript"][1]["text"]);
+        assert_eq!(conversation["history"]["events"][1]["endSequence"], native["transcript"][1]["endSequence"]);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("DEVICE_ONLY_DRAFT"));
+        assert_eq!(fs::read(path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn library_capabilities_are_scope_validated_and_always_stale() {
         let report = json!({
             "schemaVersion":1,"executionId":"execution-1","agentSessionId":"session-1","cwd":"/srv/project",
@@ -898,6 +1015,89 @@ mod tests {
         stale_library_capabilities(&mut row);
         assert!(row.get("capabilities").is_none(), "invalid optional report is omitted without hiding the conversation");
     }
+    fn remote_snapshot(execution: &str, session: Option<&str>) -> Snapshot {
+        serde_json::from_value(json!({"conversationId":"c","hostKey":"host","executionId":execution,"localSessionId":"agents:host",
+            "agentId":"opencode","agentName":"OpenCode","agentSessionId":session,"cwd":"/project","state":"saved","transcript":[],
+            "pendingPermission":null,"pendingInput":null,"lastError":null,"lastSequence":0,"turnActive":false,"configOptions":[],"commands":[],
+            "persistent":true,"continuity":true,"remoteImported":true,"configGeneration":0,"remoteCursor":0,"resumable":true,
+            "historyCapabilities":{"revert":false,"retry":false}})).unwrap()
+    }
+    fn seed(root: &Path, execution: &str, session: &str, generation: u64, extra: Value) -> PathBuf {
+        let path = file(root, "c", "jsonl").unwrap();
+        let mut row = serde_json::to_value(remote_snapshot(execution, Some(session))).unwrap();
+        row["meta"] = legacy_row("c", execution)["meta"].clone();
+        row["meta"]["draft"] = json!("Unsent draft");
+        row["meta"]["shared"] = json!({"serverAccountId":"11111111-1111-4111-8111-111111111111","generation":generation});
+        if let (Some(target), Some(source)) = (row.as_object_mut(), extra.as_object()) { for (k, v) in source { target.insert(k.clone(), v.clone()); } }
+        append(&path, &Record::Create { row }).unwrap();
+        path
+    }
+    fn remote_row(replaces: Option<&str>, generation: u64, lineage: Value) -> Value {
+        json!({"executionId":"c-run","replacesExecutionId":replaces,"lineage":lineage,
+            "shared":{"serverAccountId":"11111111-1111-4111-8111-111111111111","generation":generation}})
+    }
+    fn journal_len(path: &Path) -> usize { fs::read_to_string(path).unwrap().lines().count() }
+    #[test]
+    fn blocked_migration_is_not_an_error_and_appends_only_a_marker() {
+        let root = root();
+        let path = seed(&root, "a", "s1", 1, json!({"pendingMessageId":"m1"}));
+        let before = fs::read_to_string(&path).unwrap();
+        let outcome = import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("a"), 2, json!([])), false).unwrap();
+        let ImportOutcome::Blocked(block) = outcome else { panic!("expected Blocked") };
+        assert_eq!(block.reason, BlockReason::PendingMessage);
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(&before), "existing journal is only appended to");
+        assert_eq!(after.lines().count(), before.lines().count() + 1);
+        let row = summary(&path, &mut Vec::new()).unwrap();
+        assert_eq!(row["executionId"], "a");
+        assert_eq!(row["meta"]["draft"], "Unsent draft");
+        assert_eq!(row["meta"]["migrationBlocked"]["reason"], "PendingMessage");
+        // An identical re-detection does not grow the journal.
+        let again = journal_len(&path);
+        import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("a"), 2, json!([])), false).unwrap();
+        assert_eq!(journal_len(&path), again);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn multi_hop_lineage_requires_consistent_provider_session_and_clears_marker() {
+        let root = root();
+        let path = seed(&root, "a", "s1", 1, json!({}));
+        let ok = json!([{"executionId":"b","agentSessionId":"s1"},{"executionId":"a","agentSessionId":"s1"}]);
+        let bad = json!([{"executionId":"b","agentSessionId":"other"},{"executionId":"a","agentSessionId":"s1"}]);
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("b"), 3, bad), false).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::LineageUnproven));
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("changed")), remote_row(Some("b"), 3, ok.clone()), false).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::ProviderSessionChanged));
+        assert_eq!(summary(&path, &mut Vec::new()).unwrap()["executionId"], "a");
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("b"), 3, ok), false).unwrap(), ImportOutcome::Imported(_)));
+        let row = summary(&path, &mut Vec::new()).unwrap();
+        assert_eq!(row["executionId"], "c-run");
+        assert!(row["meta"].get("migrationBlocked").is_none());
+        assert_eq!(row["meta"]["draft"], "Unsent draft");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn lineage_is_bounded_and_cycle_safe() {
+        let long: Vec<Value> = (0..65).map(|i| json!({"executionId":format!("x{i}"),"agentSessionId":"s1"})).collect();
+        assert!(!lineage_proves(&json!({"executionId":"z","replacesExecutionId":"x0","lineage":long}), "nope", &Some("s1".into())));
+        let cyc = json!({"executionId":"z","replacesExecutionId":"b","lineage":[{"executionId":"b","agentSessionId":"s1"},{"executionId":"b","agentSessionId":"s1"},{"executionId":"a","agentSessionId":"s1"}]});
+        assert!(!lineage_proves(&cyc, "a", &Some("s1".into())));
+    }
+    #[test]
+    fn explicit_adoption_bypasses_pending_only() {
+        let root = root();
+        let path = seed(&root, "a", "s1", 1, json!({"pendingMessageId":"m1","recoveryRequired":true}));
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("zzz"), 2, json!([])), true).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::LineageUnproven));
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("a"), 1, json!([])), true).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::GenerationNotNewer));
+        let mut other = remote_row(Some("a"), 2, json!([]));
+        other["shared"]["serverAccountId"] = json!("22222222-2222-4222-8222-222222222222");
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), other, true).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::DifferentAccount));
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("a"), 2, json!([])), false).unwrap(), ImportOutcome::Blocked(b) if b.reason == BlockReason::PendingMessage));
+        assert!(matches!(import_at(&root, remote_snapshot("c-run", Some("s1")), remote_row(Some("a"), 2, json!([])), true).unwrap(), ImportOutcome::Imported(_)));
+        let row = summary(&path, &mut Vec::new()).unwrap();
+        assert_eq!(row["executionId"], "c-run");
+        assert_eq!(row["meta"]["draft"], "Unsent draft");
+        assert!(row["pendingMessageId"].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
     fn root() -> PathBuf {
         static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("still-history-{}-{}-{}", std::process::id(), timestamp(), ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
@@ -918,17 +1118,17 @@ mod tests {
         let original = fs::read(&path).unwrap();
         let mut incoming: Snapshot = serde_json::from_value(saved).unwrap();
         incoming.execution_id = "new-execution".into();
-        let error = import_remote_snapshot_at(&root, incoming.clone(), json!({"replacesExecutionId":"different-execution","shared":{"generation":2}})).unwrap_err();
-        assert!(error.contains("explicit recovery"));
-        assert_eq!(fs::read(&path).unwrap(), original);
-        assert!(import_remote_snapshot_at(&root, incoming.clone(), json!({"replacesExecutionId":"old-execution","shared":{"generation":2}})).unwrap().is_some());
+        let outcome = import_at(&root, incoming.clone(), json!({"replacesExecutionId":"different-execution","shared":{"generation":2}}), false).unwrap();
+        assert!(matches!(outcome, ImportOutcome::Blocked(MigrationBlock { reason: BlockReason::LineageUnproven, .. })) );
+        assert!(fs::read(&path).unwrap().starts_with(&original));
+        assert!(matches!(import_at(&root, incoming.clone(), json!({"replacesExecutionId":"old-execution","shared":{"generation":2}}), false).unwrap(), ImportOutcome::Imported(_)));
         let migrated = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
         assert_eq!(migrated["executionId"], "new-execution");
         assert_eq!(migrated["meta"]["draft"], "unsent draft");
         assert_eq!(migrated["meta"]["pendingConfig"]["model"], "b");
         assert_eq!(migrated["transcript"][0]["text"], "Original history");
         incoming.conversation_id = "healthy".into(); incoming.execution_id = "healthy-execution".into();
-        assert!(import_remote_snapshot_at(&root, incoming, json!({})).unwrap().is_some());
+        assert!(matches!(import_at(&root, incoming, json!({}), false).unwrap(), ImportOutcome::Imported(_)));
         let preserved = replay(records(&path, &mut Vec::new()).unwrap()).unwrap();
         assert_eq!(preserved["meta"]["draft"], "unsent draft");
         assert_eq!(preserved["meta"]["draftAttachments"][0]["id"], "attachment");

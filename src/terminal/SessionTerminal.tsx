@@ -26,7 +26,11 @@ import { bindTerminalClipboard } from "./clipboard"
 import { bindTerminalLinks } from "./links"
 import { bindApplicationWheel } from "./wheel"
 import CustomScrollbar from "./CustomScrollbar"
-import { terminalScrollback, type ImageInsertStyle, type TerminalPrefs } from "../types"
+import TerminalFindBar from "./TerminalFindBar"
+import NewOutputButton from "./NewOutputButton"
+import { matchTerminalShortcut, type ShortcutId } from "../ui/shortcuts"
+import { terminalScrollback, type ImageInsertStyle } from "../types"
+import type { ResolvedAppearance } from "./appearance"
 
 const textEncoder = new TextEncoder()
 
@@ -46,19 +50,26 @@ const textEncoder = new TextEncoder()
  */
 export default function SessionTerminal({
   localId,
-  prefs,
+  appearance,
   imageInsertStyle,
   paused = false,
   onClose,
   onZoom,
+  onShortcut,
+  findOpen = false,
+  onFindClose,
 }: {
   localId: string
-  prefs: TerminalPrefs
+  appearance: ResolvedAppearance
   imageInsertStyle: ImageInsertStyle
   /** True while an auth dialog owns focus: input must not reach the PTY. */
   paused?: boolean
   onClose?: () => void
   onZoom?: (delta: number | "reset") => void
+  /** Shortcuts that act above the surface (find, palette, help, controls). */
+  onShortcut?: (id: ShortcutId) => void
+  findOpen?: boolean
+  onFindClose?: () => void
 }) {
   useConnections()
   const transportId = nativeSessionId(localId)
@@ -83,10 +94,19 @@ export default function SessionTerminal({
   const [terminal, setTerminal] = useState<Terminal | null>(null)
   const localRef = useRef(localId)
   localRef.current = localId
+  // The mount effect reads the appearance once; live changes go through the
+  // options effect below.
+  const appearanceRef = useRef(appearance)
+  appearanceRef.current = appearance
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
   const onZoomRef = useRef(onZoom)
   onZoomRef.current = onZoom
+  const onShortcutRef = useRef(onShortcut)
+  onShortcutRef.current = onShortcut
+  // Visual bell: a counter re-keys the flash element so rapid bells restart it.
+  const [bell, setBell] = useState(0)
+  const bellTimer = useRef(0)
   // Live read for the image-insert style: the clipboard binding mounts once,
   // so it reads through this ref to always honor the current Settings value.
   const insertStyleRef = useRef(imageInsertStyle)
@@ -109,15 +129,16 @@ export default function SessionTerminal({
 
     const terminal = terminalForSession(localId)
     const reattaching = Boolean(terminal.element) || needsReattachMarker(localId)
+    const initial = appearanceRef.current
     terminal.options = {
       convertEol: false,
-      cursorBlink: true,
-      cursorStyle: prefs.cursorStyle,
+      cursorBlink: initial.cursorBlink,
+      cursorStyle: initial.cursorStyle,
       fontFamily:
         "'Geist Mono', ui-monospace, Consolas, 'Segoe UI Emoji', 'Noto Color Emoji', 'Apple Color Emoji', monospace",
-      fontSize: prefs.fontSize,
+      fontSize: initial.fontSize,
       lineHeight: TERMINAL_LINE_HEIGHT,
-      scrollback: terminalScrollback(prefs.scrollback),
+      scrollback: terminalScrollback(initial.scrollback),
       // Smooth viewport animation for local scrollback (normal buffer,
       // zero IPC). 160ms is quick enough to stay responsive on a mouse
       // wheel; xterm ignores it for raw trackpad momentum streams
@@ -128,35 +149,9 @@ export default function SessionTerminal({
       // Reserves exactly the custom thumb's 6px lane (instead of the 14px
       // stock scrollbar) so FitAddon reclaims the rest for columns.
       overviewRuler: { width: 6 },
-      theme: {
-        background: "#08080a",
-        foreground: "#ded9dd",
-        cursor: "#ff5a5a",
-        cursorAccent: "#08080a",
-        selectionBackground: "#8f2a2a66",
-        // Stock bars are hidden (theme.css + CustomScrollbar); keep the
-        // built-in slider/ruler permanently unpainted as a backstop.
-        scrollbarSliderBackground: "rgba(0,0,0,0)",
-        scrollbarSliderHoverBackground: "rgba(0,0,0,0)",
-        scrollbarSliderActiveBackground: "rgba(0,0,0,0)",
-        overviewRulerBorder: "#00000000",
-        black: "#08080a",
-        brightBlack: "#777078",
-        red: "#ff5a5a",
-        brightRed: "#ff7777",
-        green: "#91b587",
-        brightGreen: "#acd19f",
-        yellow: "#d5aa82",
-        brightYellow: "#e7bf98",
-        blue: "#9a96b8",
-        brightBlue: "#b3afd0",
-        magenta: "#b89ab8",
-        brightMagenta: "#cdb0cd",
-        cyan: "#8eadb2",
-        brightCyan: "#a5c4c9",
-        white: "#d7d2d6",
-        brightWhite: "#f4f0f2",
-      },
+      minimumContrastRatio: initial.minimumContrastRatio,
+      screenReaderMode: initial.screenReaderMode,
+      theme: initial.xtermTheme,
     }
     const fit = new FitAddon()
     terminal.loadAddon(fit)
@@ -313,24 +308,31 @@ export default function SessionTerminal({
 
     // Backstop only: the overlay's capture-phase gate owns shortcuts and
     // stops them before xterm sees them. This covers the case where the
-    // gate unmounted but the surface lingers.
+    // gate unmounted but the surface lingers. Both go through the shared
+    // registry, so they cannot disagree about what a key means.
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type === "keydown" && event.ctrlKey && !event.metaKey && !event.altKey) {
-        const t = event.target as HTMLElement | null
-        const inXterm = !!t && !!t.classList?.contains("xterm-helper-textarea")
-        const inField = !!t && !inXterm && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)
-        const k = event.key.toLowerCase()
-        const isClose = event.code === "Period" || k === "." || k === ">"
-        const isZoom = ["Minus", "Equal", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0"].includes(event.code) || ["-", "_", "=", "+", "0"].includes(k)
-        if (isClose || (isZoom && !inField)) {
-          event.preventDefault()
-          event.stopPropagation()
-          if (isClose) onCloseRef.current?.()
-          else onZoomRef.current?.(k === "0" ? "reset" : k === "-" || k === "_" ? -1 : 1)
-          return false
-        }
-      }
-      return true
+      if (event.type !== "keydown") return true
+      const id = matchTerminalShortcut(event)
+      if (!id) return true
+      event.preventDefault()
+      event.stopPropagation()
+      if (id === "close") onCloseRef.current?.()
+      else if (id === "zoomReset") onZoomRef.current?.("reset")
+      else if (id === "zoomIn") onZoomRef.current?.(1)
+      else if (id === "zoomOut") onZoomRef.current?.(-1)
+      else onShortcutRef.current?.(id)
+      return false
+    })
+
+    // Visual bell: inset flash (or a static border under reduced motion).
+    const bellDispose = terminal.onBell(() => {
+      const a = appearanceRef.current
+      if (!a.visualBell) return
+      setBell((n) => n + 1)
+      window.clearTimeout(bellTimer.current)
+      bellTimer.current = window.setTimeout(() => setBell(0), 700)
+      // Screen-reader mode: sighted-only flashes are not enough.
+      if (a.screenReaderMode) notify("Bell")
     })
 
     // Do not grab focus while an auth dialog (or any outer modal) owns it.
@@ -351,6 +353,8 @@ export default function SessionTerminal({
       unbindWheel()
       dataDispose.dispose()
       binaryDispose.dispose()
+      bellDispose.dispose()
+      window.clearTimeout(bellTimer.current)
       pushResizeRef.current = () => {}
       // Remember how much transcript this surface rendered, so the next
       // mount can tell growth (marker) from a plain reopen (silent repaint).
@@ -368,23 +372,24 @@ export default function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Apply preference changes live: the mount effect above reads prefs once,
-  // so without this, font/cursor/scrollback edits only take effect after
-  // closing + reopening the overlay.
+  // Apply appearance changes live: the mount effect above reads them once,
+  // so without this, theme/font/cursor edits only take effect after closing
+  // and reopening the overlay. The xterm instance is never recreated.
   useEffect(() => {
     const terminal = terminalRef.current
-    noteSurfaceFontSize(prefs.fontSize)
+    noteSurfaceFontSize(localRef.current, appearance.fontSize)
     if (!terminal) return
     try {
-      if (terminal.options.fontSize !== prefs.fontSize) {
-        terminal.options.fontSize = prefs.fontSize
-      }
-      if (terminal.options.cursorStyle !== prefs.cursorStyle) {
-        terminal.options.cursorStyle = prefs.cursorStyle
-      }
-      if (terminal.options.scrollback !== terminalScrollback(prefs.scrollback)) {
-        terminal.options.scrollback = terminalScrollback(prefs.scrollback)
-      }
+      const o = terminal.options
+      if (o.fontSize !== appearance.fontSize) o.fontSize = appearance.fontSize
+      if (o.cursorStyle !== appearance.cursorStyle) o.cursorStyle = appearance.cursorStyle
+      if (o.cursorBlink !== appearance.cursorBlink) o.cursorBlink = appearance.cursorBlink
+      if (o.scrollback !== terminalScrollback(appearance.scrollback)) o.scrollback = terminalScrollback(appearance.scrollback)
+      if (o.minimumContrastRatio !== appearance.minimumContrastRatio) o.minimumContrastRatio = appearance.minimumContrastRatio
+      if (o.screenReaderMode !== appearance.screenReaderMode) o.screenReaderMode = appearance.screenReaderMode
+      if (o.theme !== appearance.xtermTheme) o.theme = appearance.xtermTheme
+      // The WebGL atlas can keep stale glyph colours after a palette change.
+      terminal.refresh(0, terminal.rows - 1)
       // Re-fit AND re-push (next frame, after xterm lays out the new
       // font): smaller font fits more cols/rows, so the server must be
       // told or tmux keeps drawing the old grid.
@@ -393,7 +398,7 @@ export default function SessionTerminal({
     } catch {
       // Option applies best-effort only; never break the live session.
     }
-  }, [prefs.fontSize, prefs.cursorStyle, prefs.scrollback, transportId])
+  }, [appearance, transportId])
 
   // Auth un-pause: when the dialog closes, return focus to the terminal.
   // (Pausing never blurs an already-blurred terminal; un-pausing must give
@@ -417,6 +422,17 @@ export default function SessionTerminal({
           padding here would make it overfit and push the grid off-center. */}
       <div ref={fitHostRef} id={`still-term-${localRef.current}`} className="h-full w-full" />
       <CustomScrollbar terminal={terminal} />
+      {bell > 0 ? <div key={bell} data-testid="visual-bell" aria-hidden className="term-bell" /> : null}
+      {terminal ? <NewOutputButton terminal={terminal} /> : null}
+      {terminal && findOpen ? (
+        <TerminalFindBar
+          terminal={terminal}
+          onClose={() => {
+            onFindClose?.()
+            terminal.focus()
+          }}
+        />
+      ) : null}
       <div
         role="status"
         aria-live="polite"

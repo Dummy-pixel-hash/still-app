@@ -463,17 +463,24 @@ imported historic results do not generate fresh completion notifications.
 
 ## AG-16 Mobile access
 
-**Current:** there is no production mobile controller or shared conversation service.
-A responsive synthetic browser fixture does not provide remote mobile control.
+**Current:** the Android shell and native APK exist; an ARM64 debug build installed
+and started on the A142 on 2026-11-10. Initial remote discovery and bidirectional
+conversation commands are implemented and tested; updated desktop/Android debug
+clients are built. The new APK is not installed (ADB has no connected device).
+Real-provider two-device proof, full shared organization and background alerts
+remain open; see the continuity checkpoint for exact evidence and limitations.
 
-**Planning update (2026-11-09):** the complete specification is
+**Planning update (2026-11-11):** the complete specification is
 [Android phone application](android-mobile.md). The user selected an **Android-first,
 agents-first APK**, continuation of the same **remote-server** desktop conversations
 and tmux sessions from day one, and background notifications for attention/results.
 The phone must not depend on the desktop remaining online. Local-desktop work, iOS,
 and store publication are outside the first release. The reviewed standalone mockup
-sets visual direction only; Android work has begun with a cross-compile/build spike,
-but the feature remains TODO and has no runtime/device validation yet.
+sets visual direction only. The user selected **act from either device**, shared
+organization/read state, and a **user-hosted FCM relay first**. The
+[continuity plan](android-continuity.md) records the initial S1/S2 implementation
+and defines the remaining server/native/client slices.
+Install/start evidence does not yet establish the central sync journey.
 
 The [full Android implementation todo list](android-mobile-tasks.md) owns the
 detailed MOB task checkboxes, dependency/verification notes and release sign-off.
@@ -481,7 +488,7 @@ The AG-16 tasks below summarize feature scope, not a parallel detailed progress 
 
 ### Tasks
 
-- [ ] **AG-16a — Decide controller architecture.** Document where the authoritative
+- [ ] **AG-16a — Finalize continuity architecture.** Document where the authoritative
   remote conversation catalog/history run, authenticated transport, device-native
   cache/credentials, pairing/revocation, history migration and worker compatibility.
   The target is a desktop-independent remote client; the recommended Tauri/SSH,
@@ -491,11 +498,11 @@ The AG-16 tasks below summarize feature scope, not a parallel detailed progress 
   approval/question responses, and diff review with reconnect/catch-up behavior.
   Implement the accepted low-cognitive-load Threads/navigation/composer direction;
   reuse stable conversation/event IDs and actual provider capabilities. See MOB-05–08.
-- [ ] **AG-16c — Ownership and recovery.** Serialize writes and prevent a second
-  client from unknowingly replacing the first controller. Separate readers from a
-  fenced mutating owner; preserve drafts and execution identity across transfer,
-  process recreation and network changes. Handle revoked pairing, stale approvals,
-  uncertain acknowledgements and duplicate submissions explicitly. See MOB-02–04/09.
+- [ ] **AG-16c — Multi-client commands and recovery.** Either authorized, caught-up
+  client can act; the server serializes conflicting commands. Fence generation/
+  revision/request targets, preserve drafts, and prevent destructive reattachment.
+  Handle process/network loss, revoked registration, stale approvals, unknown
+  acknowledgements and duplicate submissions. See MOB-02–04/09.
 - [ ] **AG-16d — Native Android and terminals.** Prove a real APK, platform adapters,
   secure credentials, insets/IME/Back, picker/clipboard flows, accessibility and the
   touch terminal against an existing remote tmux session. See MOB-01/05/08/13.
@@ -508,8 +515,8 @@ The AG-16 tasks below summarize feature scope, not a parallel detailed progress 
   See MOB-14/15; browser/mockup tests alone cannot close this task.
 
 **Done when:** a fresh authenticated phone discovers and continues the same real
-remote conversation while the desktop is off; two-device reading/explicit control
-transfer does not duplicate or steal actions; a real background alert opens the
+remote conversation while the desktop is off; both devices can read and act without
+disconnecting each other or duplicating commands; a real background alert opens the
 current request/result; the phone UI and remote terminal survive Android lifecycle,
 input and connectivity changes; and the signed APK passes
 [AND-A01–A18](android-mobile.md#10-acceptance-matrix). Resolve AG-16a's deployment

@@ -3,10 +3,15 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import "@xterm/xterm/css/xterm.css"
-import { type ConnState, type Session } from "../types"
+import { type Project, type Session } from "../types"
+import StatusBadge, { type CardConn } from "./StatusBadge"
+import Menu, { useMenuButton, type MenuItemDef } from "../ui/Menu"
+import type { ResolvedAppearance } from "../terminal/appearance"
+import { terminalCssVars } from "../terminal/useTerminalAppearance"
 import {
   frozenPreview,
   openPreview,
@@ -17,7 +22,7 @@ import {
   type FrozenScreen,
 } from "../session/connections"
 
-export type CardConn = ConnState | "never"
+export type { CardConn }
 
 /** Fit the rendered screen to this card, without changing its terminal grid. */
 function fitPreview(host: HTMLElement) {
@@ -77,36 +82,6 @@ function usePreviewFit(prepare?: (host: HTMLElement) => void) {
   })
   return hostRef
 }
-const statusMeta: Record<CardConn,
-  { label: string; dot: string; pulse: boolean }
-> = {
-  connected: {
-    label: "Running",
-    dot: "bg-[#ff4a4a] shadow-[0_0_8px_1px_rgba(255,74,74,0.7)]",
-    pulse: true,
-  },
-  connecting: {
-    label: "Connecting",
-    dot: "bg-[#c9c4c0]",
-    pulse: true,
-  },
-  error: {
-    label: "Error",
-    dot: "bg-[#ff4a4a]",
-    pulse: false,
-  },
-  disconnected: {
-    label: "Detached",
-    dot: "border border-[#6b6764] bg-transparent",
-    pulse: false,
-  },
-  never: {
-    label: "Idle",
-    dot: "bg-[#a9a4a0]",
-    pulse: false,
-  },
-}
-
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)"
 
 /**
@@ -123,16 +98,18 @@ type PreviewState =
 
 function usePreview(
   sessionId: string,
-  fontSize: number,
+  appearance: ResolvedAppearance,
   live: boolean,
 ): PreviewState {
+  const fontSize = appearance.fontSize
+  const theme = appearance.xtermTheme
   // Hook order must stay stable: always subscribe, even when only the
   // persisted snapshot exists.
   const version = useTranscriptVersion(sessionId)
   return useMemo(() => {
     // Read the parsed xterm buffer first. This is the faithful path for both
     // ordinary shell output and fullscreen alternate-screen applications.
-    const screen = snapshotPreviewScreen(sessionId, fontSize)
+    const screen = snapshotPreviewScreen(sessionId, fontSize, theme)
     // A parsed but blank screen is still a valid terminal screen. Do not
     // fall back to stream fragments for a cleared/TUI screen.
     if (screen !== null) return { kind: "screen", lines: screen }
@@ -154,7 +131,7 @@ function usePreview(
     if (tail.length > 0) return { kind: "lines", lines: tail }
     return { kind: "none" }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, fontSize, live, version])
+  }, [sessionId, fontSize, theme, live, version])
 }
 
 /**
@@ -167,13 +144,13 @@ function usePreview(
  */
 function LiveScreen({
   sessionId,
-  fontSize,
+  appearance,
 }: {
   sessionId: string
-  fontSize: number
+  appearance: ResolvedAppearance
 }) {
   useTranscriptVersion(sessionId)
-  const hostRef = usePreviewFit((host) => openPreview(sessionId, host, fontSize))
+  const hostRef = usePreviewFit((host) => openPreview(sessionId, host, appearance.fontSize, appearance.xtermTheme))
   return (
     <div
       ref={hostRef}
@@ -191,7 +168,7 @@ function SavedScreen({ screen, fontSize }: { screen: FrozenScreen; fontSize: num
         data-frozen-screen
         data-cols={screen.cols}
         data-rows={screen.rows}
-        className="card-mini card-frozen-screen text-[#b0aab8]"
+        className="card-mini card-frozen-screen text-[color:var(--term-preview-fg,#b0aab8)]"
         style={{
           width: `${screen.cols}ch`,
           height: `${screen.rows * TERMINAL_LINE_HEIGHT}em`,
@@ -210,10 +187,9 @@ function IdlePreview({ session }: { session: Session }) {
   rows.push(`$ ${session.workingDirectory}`)
   if (session.host) rows.push(`${session.username}@${session.host}:${session.port}`)
   else rows.push("no host configured yet")
-  rows.push(`tmux ${session.tmuxSession}`)
   rows.push("$ _")
   return (
-    <div className="card-mini text-[#b0aab8]">
+    <div className="card-mini text-[color:var(--term-preview-fg,#b0aab8)]">
       {rows.map((line, i) => (
         <div key={i} className="truncate whitespace-pre">
           {line}
@@ -223,32 +199,53 @@ function IdlePreview({ session }: { session: Session }) {
   )
 }
 
+/**
+ * One session card. Markup: an <article> (the [data-card] wrapper) holding
+ * the visual shell, a full-card "Open" button, and — as SIBLINGS of that
+ * button, never nested in it — the actions menu button and the (decorative)
+ * drag grip. Keyboard users reorder through the menu instead of the grip.
+ */
 function SessionCard({
   session,
   conn,
   index,
-  fontSize,
+  appearance,
   dragging,
   dropHighlight,
   menuOpen,
+  tabStop = true,
+  errorText,
+  projects = [],
+  canReorder = false,
+  isFirst = true,
+  isLast = true,
   onOpen,
   onOpenAgent,
-
   onEdit,
   onRemove,
   onToggleMenu,
   onCardPointerDown,
+  onMove,
+  onMoveToProject,
+  onCardFocus,
 }: {
   session: Session
   conn: CardConn
   index: number
-  fontSize: number
+  appearance: ResolvedAppearance
   dragging: boolean
   dropHighlight: boolean
   menuOpen: boolean
+  /** Roving tabindex: only one card in the workspace is a Tab stop. */
+  tabStop?: boolean
+  /** Connection error text, exposed as the Open button's description. */
+  errorText?: string
+  projects?: Project[]
+  canReorder?: boolean
+  isFirst?: boolean
+  isLast?: boolean
   onOpen: (session: Session, el: HTMLElement) => void
   onOpenAgent?: (session: Session) => void
-
   onEdit: (session: Session) => void
   onRemove: (session: Session) => void
   onToggleMenu: (id: string | null) => void
@@ -257,27 +254,59 @@ function SessionCard({
     session: Session,
     el: HTMLElement,
   ) => void
+  onMove?: (session: Session, direction: -1 | 1) => void
+  onMoveToProject?: (session: Session, projectId: string) => void
+  onCardFocus?: (id: string) => void
 }) {
-  const meta = statusMeta[conn]
   const live = conn === "connected"
+  const shellRef = useRef<HTMLDivElement>(null)
+  const [menuView, setMenuView] = useState<"main" | "move">("main")
+  const menu = useMenuButton({
+    open: menuOpen,
+    onOpenChange: (next) => {
+      setMenuView("main")
+      onToggleMenu(next ? session.id : null)
+    },
+  })
+  const errId = `${session.id}-err`
+  const titleId = `${session.id}-title`
+
+  const mainItems: MenuItemDef[] = [
+    ...(onOpenAgent ? [{ id: "agent", label: "Start agent", onSelect: () => onOpenAgent(session) }] : []),
+    { id: "open", label: "Open", onSelect: () => onOpen(session, shellRef.current ?? (document.querySelector(`[data-card="${session.id}"]`) as HTMLElement)) },
+    { id: "edit", label: "Edit", onSelect: () => onEdit(session) },
+    ...(onMove && canReorder
+      ? [
+          { id: "earlier", label: "Move earlier", disabled: isFirst, restoreFocus: true, onSelect: () => onMove(session, -1) },
+          { id: "later", label: "Move later", disabled: isLast, restoreFocus: true, onSelect: () => onMove(session, 1) },
+        ]
+      : []),
+    ...(onMoveToProject && projects.length > 1
+      ? [{ id: "move-project", label: "Move to project…", keepOpen: true, onSelect: () => setMenuView("move") }]
+      : []),
+    { id: "remove", label: "Remove", danger: true, onSelect: () => onRemove(session) },
+  ]
+  const moveItems: MenuItemDef[] = [
+    { id: "back", label: "‹ Back", keepOpen: true, onSelect: () => setMenuView("main") },
+    ...projects
+      .filter((p) => p.id !== session.projectId)
+      .map((p) => ({ id: `to-${p.id}`, label: p.name, restoreFocus: true, onSelect: () => onMoveToProject?.(session, p.id) })),
+  ]
 
   return (
-    <div
+    <article
       style={{ perspective: 900 }}
-      className="rise"
+      className="rise relative"
       data-card={session.id}
+      aria-labelledby={titleId}
     >
       <div
-        role="button"
-        tabIndex={0}
+        ref={shellRef}
         onPointerDown={(e) => {
-          // Menu / form controls keep native behaviour (click, scroll).
+          // The actions menu and form controls keep native behaviour (click,
+          // scroll). The full-card Open button and the grip start a drag.
           const t = e.target as HTMLElement
-          if (t.closest("[data-menu],button,a,input,select,textarea")) {
-            // The grip itself is a span (not a button) so it falls
-            // through to drag even though it lives in the header.
-            if (!t.closest("[data-drag-handle]")) return
-          }
+          if (t.closest("[data-menu],[data-menu-button],a,input,select,textarea")) return
           onCardPointerDown(e, session, e.currentTarget)
         }}
         onMouseMove={(e) => {
@@ -295,19 +324,6 @@ function SessionCard({
           el.style.setProperty("--ry", "0deg")
           el.style.setProperty("--rx", "0deg")
         }}
-        onClick={(e) => {
-          if ((e.target as HTMLElement).closest("[data-menu]")) return
-          onOpen(session, e.currentTarget)
-        }}
-        onKeyDown={(e) => {
-          // This div advertises role="button": honour both keys a button
-          // responds to. (Space used to scroll the grid instead of opening.)
-          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
-            e.preventDefault()
-            onOpen(session, e.currentTarget)
-          }
-        }}
-        aria-label={`Open ${session.name} on ${session.host || "no host"}`}
         style={{
           animationDelay: `${index * 55}ms`,
           transform: "rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg))",
@@ -317,11 +333,23 @@ function SessionCard({
           cursor: dragging ? "grabbing" : undefined,
           opacity: dragging ? 0.35 : undefined,
           boxShadow: dropHighlight
-            ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,74,74,0.65), 0 24px 40px -18px rgba(0,0,0,0.9), 0 0 32px -8px rgba(255,74,74,0.45)"
-            : "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 24px 40px -18px rgba(0,0,0,0.9), 0 2px 6px rgba(0,0,0,0.5)",
+            ? "0 1px 0 rgba(255,255,255,0.07) inset, 0 0 0 2px rgba(255,255,255,0.5), 0 18px 32px -18px rgba(0,0,0,0.8), 0 0 28px -8px rgba(255,255,255,0.15)"
+            : "0 1px 0 rgba(255,255,255,0.06) inset, 0 0 0 1px rgba(255,255,255,0.06), 0 14px 28px -18px rgba(0,0,0,0.75), 0 2px 5px rgba(0,0,0,0.4)",
         }}
-        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,90,90,0.18),0_30px_50px_-16px_rgba(0,0,0,1),0_0_60px_-20px_rgba(255,60,60,0.35)]"
+        className="group relative flex h-[286px] w-full cursor-pointer flex-col overflow-hidden rounded-[20px] bg-gradient-to-b from-[#141416] to-[#0b0b0c] p-4 text-left hover:shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_0_0_1px_rgba(255,255,255,0.14),0_20px_36px_-16px_rgba(0,0,0,0.9),0_0_40px_-20px_rgba(255,255,255,0.12)] focus-within:shadow-[0_0_0_2px_rgba(255,255,255,0.4)] forced-colors:border forced-colors:border-[CanvasText]"
       >
+        {/* Full-card Open button. Its accessible name is the contract
+            tests-terminal/reopen.spec.ts relies on. */}
+        <button
+          type="button"
+          data-card-open
+          tabIndex={tabStop ? 0 : -1}
+          aria-label={`Open ${session.name} on ${session.host || "no host"}`}
+          aria-describedby={errorText ? errId : undefined}
+          onFocus={() => onCardFocus?.(session.id)}
+          onClick={(e) => onOpen(session, e.currentTarget.closest<HTMLElement>("[data-card]") ?? e.currentTarget)}
+          className="absolute inset-0 z-10 cursor-pointer rounded-[20px]"
+        />
         <span
           className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-500 group-hover:opacity-100"
           style={{
@@ -329,86 +357,69 @@ function SessionCard({
               "radial-gradient(260px circle at var(--mx,50%) var(--my,0%), rgba(255,255,255,0.07), transparent 60%)",
           }}
         />
-        <div className="flex items-center justify-between gap-2">
+        <div className="pointer-events-none flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
+            {/* Decorative: pointer/touch drag only. Keyboard users reorder
+                through the actions menu ("Move earlier/later", "Move to project…"). */}
             <span
               data-drag-handle
-              role="separator"
-              aria-label={`Drag ${session.name}`}
+              aria-hidden
               title="Drag to move"
-              className="shrink-0 cursor-grab touch-none select-none rounded px-1 font-mono text-[13px] leading-none text-faint transition hover:bg-white/[0.07] hover:text-fg active:cursor-grabbing"
+              className="pointer-events-auto relative z-20 shrink-0 cursor-grab touch-none select-none rounded px-1 font-mono text-[13px] leading-none text-faint opacity-0 transition hover:bg-white/[0.07] hover:text-fg active:cursor-grabbing group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
             >
               ⠿
             </span>
-            <span className="truncate text-[15px] font-medium tracking-[-0.01em] text-fg">
+            <h3 id={titleId} className="truncate text-[15px] font-medium tracking-[-0.01em] text-fg">
               {session.name}
-            </span>
+            </h3>
           </span>
-          <span className="flex shrink-0 items-center gap-2 text-[11px] text-dim">
-            {meta.label}
-            <span
-              className={`h-[7px] w-[7px] rounded-full ${meta.dot} ${
-                meta.pulse ? "animate-[breathe_2.4s_ease-in-out_infinite]" : ""
-              }`}
-            />
-          </span>
+          <StatusBadge conn={conn} />
         </div>
-        <div className="mt-0.5 flex items-center justify-between font-mono text-[11px] text-faint">
+        <div className="pointer-events-none mt-0.5 flex items-center justify-between gap-2 font-mono text-xs text-faint">
           <span className="truncate">{session.host || "—"}</span>
+          <span className="sr-only">Theme {appearance.theme.name}</span>
         </div>
+        {errorText ? <span id={errId} className="sr-only">Error: {errorText}</span> : null}
 
-        <CardPreview session={session} live={live} fontSize={fontSize} />
+        <CardPreview session={session} live={live} appearance={appearance} />
 
-        <div className="mt-3 flex items-center justify-between text-[11px] text-faint">
-          <span className="truncate font-mono text-[10px]">
+        <div className="pointer-events-none mt-3 flex items-center justify-between text-xs text-faint">
+          <span className="truncate font-mono">
             {session.username ? `${session.username}@` : ""}
-            {session.workingDirectory} · {session.tmuxSession}
+            {session.workingDirectory}
           </span>
-          <span className="relative ml-2 shrink-0" data-menu>
-            <button
-              type="button"
-              aria-label={`Actions for ${session.name}`}
-              aria-expanded={menuOpen}
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleMenu(menuOpen ? null : session.id)
-              }}
-              className="rounded-md px-2 py-1 font-mono text-[13px] leading-none text-faint transition hover:bg-white/[0.07] hover:text-fg"
-            >
-              •••
-            </button>
-            {menuOpen ? (
-              <span className="absolute bottom-7 right-0 z-20 flex w-36 flex-col overflow-hidden rounded-xl border border-white/10 bg-[#121214]/95 py-1 text-[12px] shadow-[0_16px_40px_rgba(0,0,0,0.7)] backdrop-blur-xl">
-                {(
-                  [
-                    ...(onOpenAgent ? [["Start agent", () => onOpenAgent(session)] as const] : []),
-
-                    ["Open", () => onOpen(session, document.querySelector(`[data-card="${session.id}"]`) as HTMLElement)],
-                    ["Edit", () => onEdit(session)],
-                    ["Remove", () => onRemove(session)],
-                  ] as const
-                ).map(([label, fn]) => (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onToggleMenu(null)
-                      fn()
-                    }}
-                    className={`px-3 py-1.5 text-left transition hover:bg-white/[0.07] hover:text-fg ${
-                      label === "Remove" ? "text-[#ff8080]" : "text-dim"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </span>
-            ) : null}
-          </span>
+          {/* spacer: the real menu button sits above it, outside the Open button */}
+          <span className="ml-2 h-6 w-9 shrink-0" aria-hidden />
         </div>
       </div>
-    </div>
+
+      <div className="absolute bottom-3 right-3 z-20" data-menu-wrap>
+        <button
+          ref={menu.ref}
+          type="button"
+          data-menu-button
+          tabIndex={tabStop ? 0 : -1}
+          aria-label={`Actions for ${session.name}`}
+          {...menu.props}
+          className="rounded-md px-2 py-1 font-mono text-[13px] leading-none text-faint transition hover:bg-white/[0.07] hover:text-fg"
+        >
+          •••
+        </button>
+        {menuOpen ? (
+          <Menu
+            id={menu.menuId}
+            label={`${session.name} actions`}
+            anchorRef={menu.ref}
+            items={menuView === "main" ? mainItems : moveItems}
+            onClose={() => {
+              setMenuView("main")
+              onToggleMenu(null)
+            }}
+            className="bottom-8 right-0 w-44"
+          />
+        ) : null}
+      </div>
+    </article>
   )
 }
 
@@ -422,46 +433,40 @@ function SessionCard({
 function CardPreview({
   session,
   live,
-  fontSize,
+  appearance,
 }: {
   session: Session
   live: boolean
-  fontSize: number
+  appearance: ResolvedAppearance
 }) {
+  const fontSize = appearance.fontSize
   // Live DOM screen: the real emulator DOM at the session's laid-out grid,
   // always mounted when bytes exist. Frozen/plain snapshots only when the
   // emulator is unavailable (never ran, cleared, dispose) and the idle
   // placeholder when nothing ever rendered.
-  const preview = usePreview(session.id, fontSize, live)
+  const preview = usePreview(session.id, appearance, live)
   return (
-    <div className="relative mt-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[12px] bg-[#08080a] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
+    <div style={terminalCssVars(appearance)} className="relative mt-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[12px] bg-[var(--term-bg,#08080a)] font-mono shadow-[inset_0_1px_6px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.04)]">
       {/* Miniature window chrome: traffic dots + session title. */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
-        <span className="h-[7px] w-[7px] rounded-full bg-[#ff5f57]/80" />
-        <span className="h-[7px] w-[7px] rounded-full bg-[#febc2e]/70" />
-        <span className="h-[7px] w-[7px] rounded-full bg-[#28c840]/70" />
-        <span className="ml-1.5 truncate text-[9px] tracking-wide text-faint">
-          {session.tmuxSession}
-          {!live ? " — snapshot" : ""}
-        </span>
-        {!live ? (
-          <span className="ml-auto shrink-0 rounded border border-white/10 px-1 py-px text-[8px] uppercase tracking-[0.08em] text-faint">
-            frozen
-          </span>
-        ) : null}
+      {/* a11y-exempt: decorative mini-chrome, hidden from assistive tech */}
+      <div aria-hidden className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-white/[0.02] px-3 py-1.5">
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
+        <span className="h-[7px] w-[7px] rounded-full bg-white/20" />
+        <span className="ml-1.5 truncate text-[9px] tracking-wide text-faint">{session.tmuxSession}</span>
       </div>
       <div className="card-preview-body relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
         {preview.kind === "screen" ? (
-          <LiveScreen sessionId={session.id} fontSize={fontSize} />
+          <LiveScreen sessionId={session.id} appearance={appearance} />
         ) : preview.kind === "frozen" ? (
           <SavedScreen screen={preview} fontSize={fontSize} />
         ) : preview.kind === "lines" ? (
-          <div className="card-mini text-[#b0aab8]" aria-hidden>
+          <div className="card-mini text-[color:var(--term-preview-fg,#b0aab8)]" aria-hidden>
             {preview.lines.map((line, i) => (
               <div key={i} className="truncate whitespace-pre">
                 {line}
                 {live && i === preview.lines.length - 1 ? (
-                  <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[#ff5a5a]" />
+                  <span className="ml-1 inline-block h-[9px] w-[5px] translate-y-[1px] animate-[breathe_2.4s_ease-in-out_infinite] bg-[var(--term-cursor,#ff5a5a)]" />
                 ) : null}
               </div>
             ))}
@@ -472,7 +477,7 @@ function CardPreview({
       </div>
       {/* Fade only the last few pixels: the newest lines are the reason to
           read the card, and the old top-7 gradient washed them out. */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-[#08080a] to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-[var(--term-bg,#08080a)] to-transparent" />
       {/* Scanline sheen so the miniature reads as a screen, not text. */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.5]"

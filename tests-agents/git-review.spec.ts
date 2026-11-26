@@ -1,4 +1,5 @@
 import { test, expect, type Locator, type Page } from "@playwright/test"
+import { projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__impeccable/**", route => route.abort())
@@ -7,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 async function addFolder(page: Page, path: string) {
-  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await page.getByRole("button", { name: "Toggle projects" }).click()
+  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await projectSidebarToggle(page).click()
   await page.getByRole("button", { name: "Add project folder", exact: true }).click()
   await page.getByLabel("Remote project folder").fill(path)
   await page.getByRole("button", { name: "Open folder", exact: true }).click()
@@ -258,6 +259,7 @@ test("a tool result cannot remove a conversation edit, including after offline r
   await page.getByRole("button", { name: "Back to chat" }).click()
   await page.reload()
   await page.locator(".agent-thread-open").first().click()
+  await page.locator(".agent-chat").hover()
   await page.getByRole("button", { name: "Review 1 changed file", exact: true }).click()
   await expect(page.locator('.agent-review-tabpanel[aria-labelledby="agent-review-tab-conversation"] .diff-add code')).toContainText("after")
 })

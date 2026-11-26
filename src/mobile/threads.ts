@@ -6,12 +6,13 @@ export function needsAttention(row: AgentThreadRow): boolean {
   return conversation(row.transcript).some(item => item.kind === "request" && !item.requestOutcome)
 }
 export function visibleThreads(rows: AgentThreadRow[]) {
-  return rows.filter(row => !row.meta.archivedAt && (!row.meta.prepared || row.state === "saved" || !!row.meta.draft || row.transcript.some(event => event.type === "userMessage")))
+  return rows.filter(row => (!row.meta.archivedAt || needsAttention(row) || row.meta.sharedDeleted && !!row.meta.draft.trim()) && (!row.meta.prepared || row.state === "saved" || !!row.meta.draft || row.transcript.some(event => event.type === "userMessage")))
     .sort((a, b) => b.meta.activityAt - a.meta.activityAt)
 }
-export function mobileThreadStatus(row: AgentThreadRow) {
+export function mobileThreadStatus(row: AgentThreadRow, attention = needsAttention(row)) {
+  if (row.meta.sharedDeleted) return "Deleted remotely"
   if (row.state === "submissionUnknown" || row.meta.submissionUnknown) return "Check status"
-  if (needsAttention(row)) return "Needs you"
+  if (attention) return "Needs you"
   if (row.state === "error") return "Connection issue"
   if (row.turnActive) return "Working"
   if (row.state === "connecting") return "Connecting"

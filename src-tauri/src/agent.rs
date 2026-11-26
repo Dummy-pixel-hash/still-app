@@ -359,6 +359,32 @@ pub struct StartArgs {
     conversation_id: Option<String>,
     custom_agent: Option<CustomAgent>,
     parent_conversation_id: Option<String>,
+    /// The app's verified discovery for this host, used by a root conversation's
+    /// worker to decide which agents it may delegate to and how to launch them.
+    #[serde(default)]
+    subagent_agents: Option<Vec<SubagentAgent>>,
+}
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentAgent {
+    agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable: Option<String>,
+    available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+const SUBAGENT_PROVIDERS: [&str; 5] = ["opencode", "pi", "codex", "claude", "gemini"];
+/// Keeps only built-in providers with a launchable executable; a bad entry is dropped,
+/// never trusted, so the worker falls back to reporting that agent as unverified.
+fn subagent_agents_payload(agents: &[SubagentAgent]) -> Value {
+    let valid = agents.iter().filter(|agent| SUBAGENT_PROVIDERS.contains(&agent.agent_id.as_str()))
+        .filter(|agent| agent.executable.as_deref().is_none_or(|path| !path.is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control)
+            && (path.starts_with('/') || path.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte)))))
+        .take(SUBAGENT_PROVIDERS.len())
+        .map(|agent| SubagentAgent { reason: agent.reason.as_ref().map(|reason| reason.chars().filter(|c| !c.is_control()).take(300).collect()), ..agent.clone() })
+        .collect::<Vec<_>>();
+    json!(valid)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1305,6 +1331,9 @@ pub async fn still_agent_resolve_folder(args: FolderArgs) -> Result<String, Stil
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteLibraryArgs { native_session_id: String, after: Option<String> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptRemoteArgs { native_session_id: String, conversation_id: String }
 
 async fn shared_library_call(native_session_id: &str, request: Value) -> Result<Value, StillError> {
     let input = serde_json::to_vec(&request).map_err(|e| StillError::friendly("agent_shared_library", e.to_string()))?;
@@ -1351,6 +1380,30 @@ pub async fn still_agent_shared_operation(app: AppHandle, state: State<'_, AppSt
 /// changing their processes. Legacy workers are visible but never taken over.
 #[tauri::command]
 pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppState>, args: RemoteLibraryArgs) -> Result<Value, StillError> {
+    remote_library_page(app, state, args, None).await
+}
+
+/// Explicit, user-confirmed adoption of the server's execution for one blocked
+/// conversation. It re-lists the library for a fresh row, refuses while the local
+/// execution is live, and bypasses only pending/recovery/unconfirmed state. The
+/// unconfirmed prompt stays in the transcript and is never resent.
+#[tauri::command]
+pub async fn still_agent_adopt_remote_execution(app: AppHandle, state: State<'_, AppState>, args: AdoptRemoteArgs) -> Result<Value, StillError> {
+    let mut after: Option<String> = None;
+    for _ in 0..64 {
+        let page = remote_library_page(app.clone(), state.clone(), RemoteLibraryArgs { native_session_id: args.native_session_id.clone(), after: after.clone() }, Some(args.conversation_id.clone())).await?;
+        if page["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["conversationId"] == args.conversation_id.as_str())) { return Ok(page); }
+        if let Some(blocked) = page["blocked"].as_array().and_then(|items| items.iter().find(|item| item["conversationId"] == args.conversation_id.as_str())) {
+            return Err(StillError::friendly("agent_shared_migration", format!("The server's version cannot be used automatically: {}. This device's copy was kept.", blocked["detail"].as_str().unwrap_or("it could not be verified"))));
+        }
+        after = page["next"].as_str().filter(|next| !next.is_empty()).map(str::to_owned);
+        if after.is_none() { break; }
+    }
+    Err(StillError::friendly("agent_shared_migration", "The server no longer lists this conversation. This device's copy was kept."))
+}
+
+async fn remote_library_page(app: AppHandle, state: State<'_, AppState>, args: RemoteLibraryArgs, adopt: Option<String>) -> Result<Value, StillError> {
+    let explicit = adopt.is_some();
     let owner = state.sessions.lock().await.get(&args.native_session_id).cloned().ok_or_else(|| StillError::friendly("agent_session", "Connect and verify this server first."))?;
     let server = owner.lock().await;
     if server.status != SessionStatus::Live { return Err(StillError::friendly("agent_session", "Wait for the SSH connection.")); }
@@ -1365,8 +1418,10 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
     agent_store::bind_shared_account(&app, host_key.clone(), page["serverAccountId"].as_str().unwrap_or_default().to_owned(), page["revision"].clone(), page["projects"].clone()).await?;
     let remote_rows = page["rows"].as_array().ok_or_else(|| StillError::friendly("agent_library_remote", "Invalid remote conversation page."))?.clone();
     let mut imported = Vec::new();
-    let mut blocked = Vec::new();
+    let mut warnings: Vec<String> = page["warnings"].as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    let mut blocked_rows = Vec::new();
     for remote in remote_rows {
+        if adopt.as_deref().is_some_and(|only| remote["conversationId"].as_str() != Some(only)) { continue; }
         let id = remote["conversationId"].as_str().ok_or_else(|| StillError::friendly("agent_library_remote", "Missing conversation ID"))?;
         if remote["conversationId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 100 || id.chars().any(char::is_control))
             || remote["executionId"].as_str().is_none_or(|id| id.is_empty() || id.len() > 160 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
@@ -1384,41 +1439,51 @@ pub async fn still_agent_remote_library(app: AppHandle, state: State<'_, AppStat
             "persistent":true,"continuity":remote["protocolVersion"]==4,"remoteImported":true,"configGeneration":0,"remoteCursor":0,
             "resumable":remote["resumable"],"historyCapabilities":remote["historyCapabilities"].is_object().then_some(remote["historyCapabilities"].clone()).unwrap_or_else(|| json!({"revert":false,"retry":false}))
         })).map_err(|e| StillError::friendly("agent_library_remote", e.to_string()))?;
-        let previous = remote["replacesExecutionId"].as_str().map(str::to_owned);
-        let retired = if let Some(previous) = previous.as_ref() { registry().lock().await.get(previous).cloned() } else { None };
-        let mut old = if let Some(retired) = retired.as_ref() { Some(retired.lock().await) } else { None };
-        if let Some(old) = old.as_mut() {
-            if old.transport_active || old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required {
-                blocked.push(json!({"conversationId":id,"executionId":remote["executionId"],"reason":"The previous execution still needs catch-up or reconciliation. Your saved history and draft were kept."}));
-                continue;
+        // Every local execution this row supersedes: the direct predecessor and
+        // any server-proven ancestors. The check is non-destructive.
+        let mut ancestors: Vec<String> = remote["replacesExecutionId"].as_str().into_iter().map(str::to_owned).collect();
+        ancestors.extend(remote["lineage"].as_array().into_iter().flatten().take(64).filter_map(|entry| entry["executionId"].as_str().map(str::to_owned)));
+        let mut retired_threads = Vec::new();
+        let mut live_block: Option<&str> = None;
+        for previous in &ancestors {
+            let retired = registry().lock().await.get(previous).cloned();
+            if let Some(retired) = retired {
+                let mut old = retired.lock().await;
+                if old.transport_active { live_block = Some("the previous local execution is still active"); }
+                else if !explicit && (old.snapshot.pending_message_id.is_some() || old.snapshot.recovery_required) { live_block = Some("the previous local execution still needs catch-up or reconciliation"); }
+                if live_block.is_some() { break; }
+                flush_history(&mut old).await?;
+                retired_threads.push((previous.clone(), retired.clone()));
             }
-            flush_history(old).await?;
         }
-        let saved = match agent_store::import_remote_snapshot(&app, snapshot, remote.clone()).await {
-            Ok(saved) => saved,
-            Err(error) if error.message.contains("Execution migration needs explicit recovery or reconciliation.") => {
-                blocked.push(json!({"conversationId":id,"executionId":remote["executionId"],"reason":"The server execution could not be safely matched to this saved conversation. Your original history and draft were kept."}));
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Some(saved) = saved {
-            if previous.as_deref().is_some_and(|previous| previous != saved.execution_id) {
-                if let Some(old) = old.as_mut() { old.history_lease.take(); }
-                drop(old);
-                if let (Some(previous), Some(retired)) = (previous.as_ref(), retired.as_ref()) {
-                    let mut entries = registry().lock().await;
-                    if entries.get(previous).is_some_and(|entry| Arc::ptr_eq(entry, retired)) { entries.remove(previous); }
+        if let Some(reason) = live_block {
+            if explicit { return Err(StillError::friendly("agent_shared_migration", format!("Wait for the local run to stop first: {reason}. Nothing was replaced."))); }
+            warnings.push(format!("A shared conversation was not updated on this device because {reason}. It was not replaced."));
+            blocked_rows.push(json!({"conversationId":id,"detail":reason}));
+            continue;
+        }
+        match agent_store::import_remote_snapshot(&app, snapshot, remote.clone(), explicit).await? {
+            agent_store::ImportOutcome::Imported(saved) => {
+                for (previous, retired) in retired_threads {
+                    retired.lock().await.history_lease.take();
+                    registry().lock().await.remove(&previous);
                 }
+                if remote["shared"].is_object() {
+                    agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
+                }
+                imported.push(json!({"conversationId":id,"executionId":saved.execution_id,"cwd":saved.cwd,"protocolVersion":if saved.continuity {4} else {3},"shared":remote["shared"],"activityAt":remote["activityAt"]}));
             }
-            if remote["shared"].is_object() {
-                agent_store::apply_shared_metadata(&app, id.to_owned(), host_key.clone(), remote["shared"].clone()).await?;
+            agent_store::ImportOutcome::Skipped => {}
+            agent_store::ImportOutcome::Blocked(block) => {
+                let detail = block.reason.label();
+                warnings.push(format!("A shared conversation could not be updated on this device: {detail}. This device's copy and draft were kept."));
+                blocked_rows.push(json!({"conversationId":id,"reason":block.reason.as_str(),"detail":detail,"remoteExecutionId":block.remote_execution_id,"remoteGeneration":block.remote_generation}));
             }
-            imported.push(json!({"conversationId":id,"executionId":saved.execution_id,"cwd":saved.cwd,"protocolVersion":if saved.continuity {4} else {3},"shared":remote["shared"],"activityAt":remote["activityAt"]}));
         }
     }
+    if !warnings.is_empty() { page["warnings"] = json!(warnings); }
+    if !blocked_rows.is_empty() { page["blocked"] = json!(blocked_rows); }
     page["rows"] = json!(imported);
-    page["blockedConversations"] = json!(blocked);
     page["hostKey"] = json!(host_key);
     if let Some(deleted) = page["tombstones"].as_array() {
         if deleted.len() > 4096 { return Err(StillError::friendly("agent_shared_library", "Too many shared tombstones.")); }
@@ -1462,6 +1527,10 @@ pub async fn still_agent_catalog(args: CatalogArgs) -> Result<Value, StillError>
 }
 
 fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>, parent_conversation_id: Option<&str>) -> Result<(String, String), StillError> {
+    persistent_command_with(execution, conversation_id, cwd, agent_id, executable, create, cursor, runtime, todo_seed, recover_from, custom, parent_conversation_id, None)
+}
+
+fn persistent_command_with(execution: &str, conversation_id: &str, cwd: &str, agent_id: &str, executable: &str, create: bool, cursor: u64, runtime: Option<&ProviderRuntime>, todo_seed: Option<&Value>, recover_from: Option<&Value>, custom: Option<&CustomAgent>, parent_conversation_id: Option<&str>, subagent_agents: Option<&[SubagentAgent]>) -> Result<(String, String), StillError> {
     if execution.is_empty() || execution.len() > 160 || !execution.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         return Err(StillError::friendly("agent_identity", "Invalid persistent execution identity."));
     }
@@ -1484,6 +1553,8 @@ fn persistent_command(execution: &str, conversation_id: &str, cwd: &str, agent_i
         payload["recoverySource"] = json!(include_str!("../agent-host/recovery.mjs"));
         payload["sharedLibrarySource"] = json!(include_str!("../agent-host/shared-library.mjs"));
         payload["subagentsSource"] = json!(include_str!("../agent-host/subagents.mjs"));
+        // Only a root conversation delegates; a child never receives eligibility data.
+        if let Some(agents) = subagent_agents.filter(|_| parent_conversation_id.is_none()) { payload["subagentAgents"] = subagent_agents_payload(agents); }
         payload["bridgeSource"] = json!(include_str!("../agent-host/bridge.mjs"));
         if let Some(previous) = recover_from { payload["recoverFrom"] = previous.clone(); }
         if let Some(seed) = todo_seed { payload["todoSeed"] = seed.clone(); }
@@ -1666,7 +1737,7 @@ pub async fn still_agent_start(
         seed
     });
     let runtime = probe_runtime(&args.native_session_id, &args.agent_id, &path).await;
-    let (remote, bootstrap_payload) = persistent_command(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref(), parent_conversation_id.as_deref())?;
+    let (remote, bootstrap_payload) = persistent_command_with(&execution_id, &conversation_id, &cwd, &args.agent_id, &path, true, 0, runtime.as_ref(), todo_seed.as_ref(), recover_from.as_ref(), args.custom_agent.as_ref(), parent_conversation_id.as_deref(), args.subagent_agents.as_deref())?;
     let mut channel=ssh_worker::open_agent_exec(&args.native_session_id,&remote).await.map_err(|_|StillError::friendly("agent_launch",format!("Could not launch {} on the remote host. Verify that {} is already installed there.",def.name,def.install)))?;
     let bootstrap_data = match bootstrap_remote(&mut channel, &bootstrap_payload).await {
         Ok(data) => data,
@@ -3362,6 +3433,7 @@ async fn send_agent_message(row: &Arc<Mutex<Thread>>, args: SendArgs, batch_owne
 pub async fn still_agent_revert(args: RevertArgs) -> Result<Snapshot, StillError> {
     let row = find_thread(&args.execution_id).await?;
     let mut thread = row.lock().await;
+    if thread.snapshot.continuity { return Err(StillError::friendly("agent_history_unsupported", "Shared-session rewind is not enabled yet. Its history remains intact.")); }
     if thread.snapshot.history_capabilities["revert"] != true { return Err(StillError::friendly("agent_history_unsupported", "This agent does not support reverting conversation messages.")); }
     if thread.snapshot.last_sequence != args.expected_sequence || thread.snapshot.turn_active || thread.prompt.is_some() || thread.permission.is_some() || thread.pending_input_id.is_some() || !thread.config_requests.is_empty() || thread.history_request.is_some() || !matches!(thread.snapshot.state.as_str(), "working" | "complete" | "cancelled" | "error") {
         return Err(StillError::friendly("agent_history_busy", "The conversation changed or is busy. Wait until it is idle before reverting."));
@@ -3852,6 +3924,26 @@ mod tests {
     }
 
     #[test]
+    fn root_workers_receive_verified_subagent_eligibility_and_children_do_not() {
+        let agents = vec![
+            SubagentAgent { agent_id: "codex".into(), executable: Some("/opt/codex/bin/codex".into()), available: true, reason: None },
+            SubagentAgent { agent_id: "claude".into(), executable: None, available: false, reason: Some("Needs sign-in\nrun claude".into()) },
+            SubagentAgent { agent_id: "custom-x".into(), executable: Some("/bin/x".into()), available: true, reason: None },
+            SubagentAgent { agent_id: "pi".into(), executable: Some("pi; rm -rf /".into()), available: true, reason: None },
+        ];
+        let decode = |raw: String| -> Value { serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(raw).unwrap()).unwrap() };
+        let (_, root) = persistent_command_with("agent-root", "root", "/srv/project", "opencode", "opencode", true, 0, None, None, None, None, None, Some(&agents)).unwrap();
+        let root = decode(root);
+        assert_eq!(root["subagentAgents"], json!([
+            {"agentId":"codex","executable":"/opt/codex/bin/codex","available":true},
+            {"agentId":"claude","available":false,"reason":"Needs sign-inrun claude"},
+        ]));
+        let (_, child) = persistent_command_with("agent-child", "child", "/srv/project", "opencode", "opencode", true, 0, None, None, None, None, Some("root"), Some(&agents)).unwrap();
+        assert!(decode(child).get("subagentAgents").is_none());
+        let (_, attach) = persistent_command_with("agent-root", "root", "/srv/project", "opencode", "", false, 3, None, None, None, None, None, Some(&agents)).unwrap();
+        assert!(decode(attach).get("subagentAgents").is_none(), "an attach never relaunches the worker, so it carries no eligibility");
+    }
+    #[test]
     fn persistent_agent_bootstrap_streams_large_sources_over_stdin() {
         let runtime = ProviderRuntime {
             transport: "codex-app-server".into(),
@@ -4274,7 +4366,7 @@ else if(m.method==='session/prompt'){const racing=m.params.prompt[0].text==='clo
             let custom = CustomAgent { id:"custom-continuity-test".into(),host_key:host,name:"Continuity test peer".into(),executable:peer.to_string_lossy().into(),args:vec![],transport:"acp-v1".into() };
             let start = still_agent_start(handle.clone(),state.clone(),StartArgs {
                 native_session_id:connected.session_id.clone(),local_session_id:id.clone(),agent_id:custom.id.clone(),cwd:Some(project.to_string_lossy().into()),executable:None,
-                resume_session_id:None,conversation_id:Some(id.clone()),custom_agent:Some(custom),parent_conversation_id:None,
+                resume_session_id:None,conversation_id:Some(id.clone()),custom_agent:Some(custom),parent_conversation_id:None,subagent_agents:None,
             }).await.unwrap();
             tokio::time::timeout(Duration::from_secs(20),async {
                 loop { let snapshot=still_agent_snapshot(IdArgs{execution_id:start.execution_id.clone()}).await.unwrap();

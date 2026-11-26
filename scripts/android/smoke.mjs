@@ -97,6 +97,24 @@ try {
   check(ping.app === 'still-app', 'Native IPC is unavailable.'); report('real native IPC');
   await screenshot('threads');
 
+  if (argv.includes('--server-setup')) {
+    await click('.mobile-navigation [aria-label="Settings"]');
+    await waitFor(`document.querySelector('.mobile-heading h1')?.textContent === 'Settings'`);
+    await click('.mobile-settings-row button, .mobile-settings-row');
+    // The settings row opens the saved-server sheet; Add a server opens the
+    // native-sized form. Do not submit, so the smoke test leaves no fake profile.
+    await waitFor(`!!document.querySelector('.mobile-sheet[role="dialog"]')`);
+    await click('.mobile-sheet [aria-label="Close projects"]');
+    await click('.mobile-settings-row:nth-of-type(2)');
+    await waitFor(`document.querySelector('.mobile-terminal.mobile-form-page h1')?.textContent === 'Add a remote server'`);
+    const serverForm = await evaluate(`({host:!!document.querySelector('input[name="host"]'),user:!!document.querySelector('input[name="username"]'),port:!!document.querySelector('input[name="port"]'),auth:!!document.querySelector('select[name="authMethod"]'),submit:!!document.querySelector('button.mobile-primary'),safeCopy:document.querySelector('.mobile-form')?.innerText.includes('fingerprint')})`);
+    check(Object.values(serverForm).every(Boolean), 'Android server setup form is incomplete or obscures host-trust behavior.');
+    report('native Add server form is reachable and explains host trust', serverForm);
+    await screenshot('add-server');
+    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK');
+    await waitFor(`!document.querySelector('.mobile-terminal.mobile-form-page')`);
+  }
+
   for (const destination of ['terminals', 'settings', 'agents']) {
     await click(`.mobile-navigation [aria-label="${destination === 'agents' ? 'Agents' : destination === 'terminals' ? 'Terminals' : 'Settings'}"]`);
     await waitFor(`document.querySelector('.mobile-heading h1')?.textContent === ${JSON.stringify(destination === 'agents' ? 'Threads' : destination === 'terminals' ? 'Terminals' : 'Settings')}`);

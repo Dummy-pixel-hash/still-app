@@ -286,9 +286,7 @@
 .agent-workspace .agent-work-group-body { border-color: rgba(255, 255, 255, .12); }
 .agent-workspace .agent-tool-label code { color: #b9aeb6; }
 .agent-workspace .agent-tool-body { background: rgba(10, 9, 10, .65); border-radius: 10px; color: #c7bdc4; }
-.agent-workspace :is(.agent-working, .agent-preparation) { color: #d3b6c2; }
-.agent-workspace .agent-preparation button { background: var(--ag-control-fill); color: #e8dce3; border-radius: 7px; }
-.agent-workspace .agent-preparation button:hover { background: var(--ag-control-hover); }
+.agent-workspace .agent-working { color: #d3b6c2; }
 .agent-workspace .agent-saved-notice { color: #ada5aa; }
 .agent-workspace .agent-jump { border: 1px solid var(--ag-edge-strong); background: rgba(24, 20, 23, .94); color: #e3d7df; }
 .agent-workspace .agent-composer-provider { color: #c6bdc3; }
@@ -687,9 +685,7 @@
   --ag-frost-fill: var(--ag-sheet-deep);
 }
 
-.agent-workspace :is(.agent-error, .agent-model-error) { background: rgba(70, 27, 42, .6); border-color: rgba(237, 119, 133, .35); color: #efc8d2; }
-.agent-workspace :is(.agent-storage-notice, .agent-command-error) { background: rgba(47, 36, 20, .9); border-color: rgba(211, 174, 116, .23); color: #e6d0ab; }
-.agent-workspace .agent-storage-notice { border-bottom: 1px solid rgba(211, 174, 116, .23); }
+.agent-workspace .agent-command-error { background: rgba(255, 255, 255, .04); color: var(--ag-dim); }
 
 /* Project navigation: the accepted readable hierarchy keeps full titles
    to two lines, with quieter, tabular timestamps and distinct project labels. */

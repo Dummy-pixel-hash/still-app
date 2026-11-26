@@ -51,7 +51,7 @@ body.still-resizing-temp * {
 }
 
 ::selection {
-  background: rgba(255, 74, 74, 0.35);
+  background: rgba(226, 220, 229, 0.28);
 }
 
 .scroll-quiet {
@@ -90,7 +90,7 @@ body.still-resizing-temp * {
 .xterm .xterm-viewport {
   /* !important: theme.css loads before xterm.css, so only importance
      beats the stock #000 fallback at equal specificity. */
-  background-color: #08080a !important;
+  background-color: var(--term-bg, #08080a) !important;
 }
 /* No decorations are registered in this app; the ruler canvas would only
    sit invisibly under the custom thumb lane. */
@@ -171,6 +171,10 @@ body.still-resizing-temp * {
 }
 @keyframes rise {
   from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
 @keyframes pill {
@@ -318,7 +322,7 @@ body.still-resizing-temp * {
 }
 .temp-dock-peek__list li button:focus-visible,
 .temp-dock-peek__add:focus-visible {
-  outline: 1px solid rgba(255, 74, 74, 0.5);
+  outline: 1px solid rgba(255, 255, 255, 0.4);
   outline-offset: 1px;
 }
 @media (hover: none) {
@@ -337,4 +341,29 @@ body.still-resizing-temp * {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+}
+
+/* Visual bell: a brief inset flash on the terminal surface. Under reduced
+   motion it is a static border instead (the surface removes it after 700ms). */
+.term-bell {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 3px rgba(255, 74, 74, 0.8), inset 0 0 48px rgba(255, 74, 74, 0.25);
+  animation: term-bell 260ms ease-out forwards;
+}
+@keyframes term-bell {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-bell { animation: none; box-shadow: inset 0 0 0 3px rgba(255, 74, 74, 0.9); }
+}
+
+/* Global keyboard focus ring. Zero specificity (:where) so any component can
+   still style its own; xterm's hidden helper textarea never gets a ring. */
+:where(button, a, input, select, textarea, summary, [tabindex]):not(.xterm-helper-textarea):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }

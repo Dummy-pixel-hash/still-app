@@ -143,3 +143,41 @@ export function toolLabel(item: TranscriptItem) {
   if (command) return { action: "Run", detail: command, kind: "execute" }
   return { action: item.title || "Tool call", detail: "", kind }
 }
+
+const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
+const basename = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path
+const WRAPPERS = new Set(["sudo", "env", "npx", "exec", "time", "nohup", "command"])
+
+/** The program and its first couple of subcommands, without cd prefixes, env vars, flags or pipes. */
+export function shortCommand(command: string) {
+  const segments = command.split(/&&|\|\||;|\||\n/).map(part => part.trim()).filter(Boolean)
+  const segment = segments.find(part => !/^(?:cd|pushd|export|set|source|\.)\s/.test(part) && !/^cd$/.test(part)) || segments[0] || ""
+  const words = segment.split(/\s+/).filter(Boolean)
+  while (words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]) || WRAPPERS.has(words[0]))) words.shift()
+  if (!words.length) return clip(command.trim(), 32)
+  const kept = [basename(words[0].replace(/^["']|["']$/g, ""))]
+  for (const word of words.slice(1)) {
+    if (kept.length >= 3 || word.startsWith("-") || /[\\/]/.test(word) || /^["'`$<>]/.test(word)) break
+    kept.push(word)
+  }
+  return clip(kept.join(" "), 32)
+}
+
+/** A short, human sentence for one tool call, used where the full call would be noise. */
+export function toolSummary(item: TranscriptItem) {
+  const running = item.status === "pending" || item.status === "in_progress" || item.status === "running"
+  const input = item.input || {}
+  const label = toolLabel(item)
+  const path = String(input.path || input.file_path || input.filePath || item.locations?.[0]?.path || "")
+  if (label.action === "Read") return `${running ? "Reading" : "Read"} ${basename(label.detail)}`
+  if (label.action === "Edit") return `${running ? "Editing" : "Edited"} ${basename(label.detail)}`
+  if (label.action === "Search") {
+    const pattern = String(input.pattern || input.query || "").replace(/\s+/g, " ").trim()
+    if (pattern) return `${running ? "Searching for" : "Searched for"} “${clip(pattern, 28)}”`
+    return path ? `${running ? "Searching" : "Searched"} ${basename(path)}` : running ? "Searching files" : "Searched files"
+  }
+  if (label.action === "Run") return `${running ? "Running" : "Ran"} ${shortCommand(label.detail)}`
+  const title = (item.title || "").replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim()
+  if (!title) return running ? "Using a tool" : "Used a tool"
+  return clip(title.charAt(0).toUpperCase() + title.slice(1), 40)
+}

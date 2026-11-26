@@ -1,6 +1,18 @@
 import type { AgentLibrarySyncStatus } from "../session/agentThreads"
+import type { LegacyAgentRecord } from "../agents/types"
 import "../styles/agent-library-sync.css"
 
+export function LegacyRecordsDisclosure({ records }: { records: LegacyAgentRecord[] }) {
+  return <details className="agent-library-sync-details">
+    <summary>{records.length} older {records.length === 1 ? "record was" : "records were"} not imported</summary>
+    <div className="agent-library-sync-records" role="region" aria-label="Older record details" tabIndex={0}>
+      <p>These older files do not identify their conversation, project or provider well enough to import safely. They are unchanged on the server and do not block your synced conversations.</p>
+      <ul>{records.map(record => <li key={record.executionId}><strong>{record.executionId}</strong><span>{record.reason}</span></li>)}</ul>
+    </div>
+  </details>
+}
+
+/** Mobile sync status. Desktop shows the same facts in the top notice bar and in Agent settings. No red. */
 /** Successful discovery and historical limitations are not conversation errors. */
 export default function AgentLibrarySyncNotice({ status, compact = false }: { status: AgentLibrarySyncStatus | null; compact?: boolean }) {
   if (!status || compact && !status.failed && !status.warnings.length && !status.legacyRecords.length && !status.blockedConversations?.length) return null

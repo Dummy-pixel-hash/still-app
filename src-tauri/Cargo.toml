@@ -29,6 +29,7 @@ android-native-keyring-store = "1.0.0"
 keyring-core = "1.0.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+tauri-plugin-updater = "2.14.1"
 windows-sys = { version = "0.60", features = [
   "Win32_Graphics_Dwm",
   "Win32_Foundation",

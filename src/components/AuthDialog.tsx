@@ -26,12 +26,10 @@ export default function AuthDialog({
 
   useEffect(() => {
     fieldRef.current?.focus()
-    if (mode === "password") {
-      void nativeBridge
-        .hasCredential(session.host, session.port, session.username)
-        .then(setStored)
-        .catch(() => setStored(false))
-    }
+    void nativeBridge
+      .hasCredential(session.host, session.port, session.username)
+      .then(setStored)
+      .catch(() => setStored(false))
   }, [session, mode])
 
   // Portalled to document.body: the workspace container underneath gets
@@ -50,7 +48,7 @@ export default function AuthDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-serif text-2xl text-fg">Connect</h2>
-        <p className="mt-1 font-mono text-[11px] text-faint">
+        <p className="mt-1 font-mono text-xs text-faint">
           {session.username}@{session.host}:{session.port}{purpose !== "agent" && <> · tmux {session.tmuxSession}</>}
         </p>
         {stored ? (
@@ -70,7 +68,7 @@ export default function AuthDialog({
               stored ? "Password (blank = use remembered)" : "Password"
             }
             aria-label="Password"
-            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg outline-none focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[13px] text-fg focus:border-white/30"
             onKeyDown={(e) => {
               if (e.key === "Enter")
                 onResolve({ secret: secret || undefined, remember })
@@ -81,12 +79,12 @@ export default function AuthDialog({
             ref={fieldRef as React.RefObject<HTMLTextAreaElement>}
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
-            placeholder="Paste private key (single connect only)"
+            placeholder={stored ? "Private key (blank = use remembered)" : "Paste private key"}
             aria-label="Private key"
             rows={4}
             spellCheck={false}
             autoComplete="off"
-            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg outline-none focus:border-[#ff4a4a]/50"
+            className="mt-3 w-full resize-y rounded-lg border border-white/10 bg-black/50 px-3 py-2 font-mono text-[12px] text-fg focus:border-white/30"
           />
         )}
         <label className="mt-3 flex items-center gap-2 text-[12px] text-dim">
@@ -94,10 +92,10 @@ export default function AuthDialog({
             type="checkbox"
             checked={remember}
             onChange={(e) => setRemember(e.target.checked)}
-            className="accent-[#ff4a4a]"
+            className="accent-[#d8d2dc]"
           />
           Remember on this device{" "}
-          <span className="font-mono text-[10px] text-faint">
+          <span className="font-mono text-xs text-faint">
             (OS keyring, native only)
           </span>
         </label>

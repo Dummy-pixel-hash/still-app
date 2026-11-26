@@ -2,7 +2,7 @@ import { useState } from "react"
 import { createProject } from "../session/store"
 
 const inputClass =
-  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg outline-none transition placeholder:text-faint/70 focus:border-[#ff4a4a]/50"
+  "w-full rounded-lg border border-white/10 bg-black/50 px-3 py-2 text-[13px] text-fg transition placeholder:text-faint/70 focus:border-white/30"
 
 /** Small dialog for creating a project from the main screen. */
 export default function NewProjectDialog({ onClose }: { onClose: () => void }) {
@@ -38,7 +38,7 @@ export default function NewProjectDialog({ onClose }: { onClose: () => void }) {
             </p>
           </div>
           <label className="block">
-            <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+            <span className="mb-1 block font-mono text-xs uppercase tracking-[0.18em] text-faint">
               Name
             </span>
             <input
@@ -51,13 +51,13 @@ export default function NewProjectDialog({ onClose }: { onClose: () => void }) {
               className={inputClass}
             />
             {tried && !name.trim() ? (
-              <span className="mt-1 block text-[11px] text-[#ff8080]">
+              <span className="mt-1 block text-xs text-[#ff8080]">
                 Name is required
               </span>
             ) : null}
           </label>
           <label className="block">
-            <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.18em] text-faint">
+            <span className="mb-1 block font-mono text-xs uppercase tracking-[0.18em] text-faint">
               Note <span className="normal-case tracking-normal">(optional)</span>
             </span>
             <input

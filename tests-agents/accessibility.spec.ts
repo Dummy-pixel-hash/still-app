@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test"
+import { projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__impeccable/**", route => route.abort())
@@ -8,7 +9,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 async function connect(page: Page) {
-  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await page.getByRole("button", { name: "Toggle projects" }).click()
+  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await projectSidebarToggle(page).click()
   await page.getByRole("button", { name: "Add project folder", exact: true }).click()
   await page.getByLabel("Remote project folder").fill("/srv/still")
   await page.getByRole("button", { name: "Open folder", exact: true }).click()
@@ -161,7 +162,7 @@ test("failed conversations retain an explicit sidebar state on compact screens",
   await connect(page)
   await page.evaluate(() => { const h = (window as any).agentFixture; h.emit(h.current, { type: "threadError", state: "error", text: "Agent disconnected." }) })
   await page.setViewportSize({ width: 620, height: 700 })
-  await page.getByRole("button", { name: "Toggle projects", exact: true }).click()
+  await projectSidebarToggle(page).click()
   await expect(page.locator(".agent-thread-indicator.error")).toBeVisible()
   await expect(page.locator(".agent-attention-label.is-error")).toHaveText("Turn failed")
   await expect(page.locator(".agent-thread-open")).toHaveAccessibleName(/Turn failed/)

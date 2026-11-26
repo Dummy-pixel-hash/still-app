@@ -6,6 +6,12 @@ const effort = (names: string[], currentValue = names[0]): AgentConfigOption => 
   options: names.map(name => ({ name, value: name })),
 })
 const control = (page: Page) => page.getByRole("button", { name: /^Reasoning effort:/ })
+const configs = (page: Page) => page.evaluate(() => (window as any).agentFixture.configs)
+const send = async (page: Page, text: string) => {
+  await page.getByLabel("Message agent").fill(text)
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText(text)
+}
 async function report(page: Page, option: AgentConfigOption | null) {
   await page.evaluate(option => {
     const h = (window as any).agentFixture
@@ -45,7 +51,9 @@ test("reasoning is capped at four model-derived presets and Ultra is optional", 
       await control(page).click()
       await expect(control(page)).toHaveAccessibleName(`Reasoning effort: ${names[(index + 1) % names.length]}`)
     }
-    expect((await page.evaluate(() => (window as any).agentFixture.configs)).at(-1)).toEqual({ configId: "effort", value: names[0] })
+    // A full cycle lands back on the reported value, so nothing is staged for the next send.
+    await expect(page.locator(".agent-composer-status")).toHaveCount(0)
+    expect(await configs(page)).toEqual([])
   }
 })
 
@@ -57,32 +65,42 @@ test("grouped choices and an empty-string default are preserved exactly", async 
   await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(3)
   await control(page).locator('[data-reasoning-label="Default"]').click()
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: Default")
-  expect((await page.evaluate(() => (window as any).agentFixture.configs)).at(-1)).toEqual({ configId: "effort", value: "" })
+  await expect(page.locator(".agent-composer-status")).toContainText("1 setting on next send")
+  expect(await configs(page)).toEqual([])
+  await send(page, "Use the default reasoning")
+  expect(await configs(page)).toEqual([{ configId: "effort", value: "" }])
 })
 
-test("switching models replaces the bars and selection with that model's acknowledged choices", async ({ page }) => {
-  await page.evaluate(options => { (window as any).agentFixture.reasoningByModel = options }, {
-    "anthropic/claude-opus-4": effort(["Standard", "Extended"], "Extended"),
-    "openai/gpt-5": effort(["Minimal", "Low", "Medium", "High", "Max", "Ultra"], "Max"),
-    "google/gemini-2.5-pro": null,
+test("switching models replaces the bars with that model's choices and keeps the user's reasoning", async ({ page }) => {
+  const choices = (pairs: string[][], currentValue: string): AgentConfigOption => ({
+    id: "effort", name: "Reasoning", category: "thought_level", type: "select", currentValue,
+    options: pairs.map(([name, value]) => ({ name, value })),
   })
+  await page.evaluate(options => { (window as any).agentFixture.reasoningByModel = options }, {
+    "anthropic/claude-opus-4": choices([["Standard", "low"], ["Extended", "medium"]], "low"),
+    "openai/gpt-5": choices([["Minimal", "minimal"], ["Low", "low"], ["Medium", "medium"], ["High", "high"], ["Max", "max"], ["Ultra", "ultra"]], "max"),
+  })
+  await expect(control(page)).toHaveAccessibleName("Reasoning effort: Medium")
   for (const [model, names, selected] of [
     ["Claude Opus 4", ["Standard", "Extended"], "Extended"],
-    ["GPT-5", ["Low", "High", "Max", "Ultra"], "Max"],
-    ["Gemini 2.5 Pro", [], ""],
+    ["GPT-5", ["Low", "High", "Max", "Ultra"], "Medium"],
   ] as const) {
     await page.getByRole("button", { name: /^Model:/ }).click()
     await page.getByRole("option", { name: model, exact: true }).click()
-    await expect(page.getByRole("button", { name: `Model: ${model}`, exact: true })).toBeEnabled()
     await expect(page.getByRole("dialog", { name: "Models", exact: true })).toHaveCount(0)
+    // Nothing reaches the provider until the prompt is sent; the earlier choice rides along with the model.
+    await expect(page.locator(".agent-composer-status")).toContainText("2 settings on next send")
+    await send(page, `Use ${model}`)
+    await page.evaluate(() => (window as any).agentFixture.finish())
+    await expect(page.getByRole("button", { name: `Model: ${model}`, exact: true })).toBeEnabled()
     await page.getByLabel("Message agent").focus()
-    if (!names.length) await expect(control(page)).toHaveCount(0)
-    else {
-      await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(names.length)
-      expect(await control(page).locator(".agent-reasoning-level").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-reasoning-label")))).toEqual(names)
-      await expect(control(page)).toHaveAccessibleName(`Reasoning effort: ${selected}`)
-    }
+    await expect(control(page).locator(".agent-reasoning-level")).toHaveCount(names.length)
+    expect(await control(page).locator(".agent-reasoning-level").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-reasoning-label")))).toEqual(names)
+    await expect(control(page)).toHaveAccessibleName(`Reasoning effort: ${selected}`)
   }
+  expect((await configs(page)).map((item: any) => item.configId)).toEqual(["model", "effort", "model", "effort"])
+  await report(page, null)
+  await expect(control(page)).toHaveCount(0)
 })
 
 test("provider updates change the filled bars without sending a configuration request", async ({ page }) => {
@@ -105,25 +123,26 @@ test("Medium and High share the middle band when a higher Max tier exists", asyn
   expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([])
 })
 
-test("pending and rejected changes never invent a selected level or submit the draft", async ({ page }) => {
+test("a staged level is never submitted early and a rejected send keeps the draft and the choice", async ({ page }) => {
   await page.getByLabel("Message agent").fill("Keep this unsent draft")
-  await page.evaluate(() => { (window as any).agentFixture.deferConfig = true })
-  const high = control(page).locator('[data-reasoning-label="High"]')
-  await high.click()
-  await expect(page.locator(".agent-reasoning-control")).toHaveAttribute("aria-busy", "true")
-  await expect(control(page)).toBeFocused()
-  await expect(control(page)).toHaveAccessibleName("Reasoning effort: Medium")
-  await control(page).press("Enter")
-  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toHaveLength(1)
-  await page.evaluate(() => { const h = (window as any).agentFixture; h.deferConfig = false; h.releaseConfig() })
+  await control(page).locator('[data-reasoning-label="High"]').click()
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: High")
   await expect(page.locator(".agent-reasoning-control")).toHaveAttribute("aria-busy", "false")
+  await expect(page.locator(".agent-composer-status")).toContainText("1 setting on next send")
+  await expect(control(page)).toBeFocused()
+  expect(await configs(page)).toEqual([])
   await page.evaluate(() => { (window as any).agentFixture.rejectConfig = true })
-  await control(page).locator('[data-reasoning-label="Low"]').click()
-  await expect(page.locator(".agent-reasoning-control").getByRole("alert")).toContainText("The agent rejected that setting")
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("The agent rejected the staged settings")
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: High")
+  await expect(page.locator(".agent-composer-status")).toContainText("1 setting on next send")
   await expect(page.getByLabel("Message agent")).toHaveValue("Keep this unsent draft")
   expect(await page.evaluate(() => (window as any).agentFixture.sends)).toEqual([])
+  expect(await configs(page)).toEqual([])
+  await page.evaluate(() => { (window as any).agentFixture.rejectConfig = false })
+  await page.getByRole("button", { name: "Send message", exact: true }).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText("Keep this unsent draft")
+  expect(await configs(page)).toEqual([{ configId: "effort", value: "high" }])
 })
 
 test("keyboard selection uses one focus target and preserves focus during updates", async ({ page }) => {
@@ -150,9 +169,12 @@ test("every bar and the surrounding hit area cycle forward once with no box", as
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: Low")
   await control(page).click({ position: { x: 2, y: 2 } })
   await expect(control(page)).toHaveAccessibleName("Reasoning effort: Medium")
-  expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([
-    { configId: "effort", value: "high" }, { configId: "effort", value: "low" }, { configId: "effort", value: "medium" },
-  ])
+  // Back on the reported value, so no setting stays staged and none was sent while cycling.
+  await expect(page.locator(".agent-composer-status")).toHaveCount(0)
+  expect(await configs(page)).toEqual([])
+  await control(page).locator('[data-reasoning-label="High"]').click()
+  await send(page, "Apply the last choice")
+  expect(await configs(page)).toEqual([{ configId: "effort", value: "high" }])
 })
 
 test("effort changes animate the bars and respect reduced motion", async ({ page }) => {
@@ -189,7 +211,8 @@ test("touch selection uses the same advertised values", async ({ browser }) => {
     const high = (await control(page).locator('[data-reasoning-label="High"]').boundingBox())!
     await page.touchscreen.tap(high.x + high.width / 2, high.y + high.height / 2)
     await expect(control(page)).toHaveAccessibleName("Reasoning effort: High")
-    expect(await page.evaluate(() => (window as any).agentFixture.configs)).toEqual([{ configId: "effort", value: "high" }])
+    await send(page, "Apply the touched choice")
+    expect(await configs(page)).toEqual([{ configId: "effort", value: "high" }])
   } finally { await context.close() }
 })
 

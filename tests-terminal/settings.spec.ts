@@ -1,0 +1,101 @@
+import { test, expect, type Page } from "@playwright/test"
+
+const store = (page: Page) => page.evaluate(() => JSON.parse(localStorage.getItem("still.m2.store.v1")!))
+const settingsButton = (page: Page) => page.getByRole("button", { name: "Settings", exact: true })
+const dialogOf = (page: Page) => page.getByRole("dialog", { name: "Settings", exact: true })
+
+test.beforeEach(async ({ page }) => {
+  await page.goto("/tests-terminal/fixture.html?workspace")
+})
+
+test("focus moves into settings and returns to the opener on close; Escape clears search first", async ({ page }) => {
+  await settingsButton(page).focus()
+  await page.keyboard.press("Enter")
+  const dialog = dialogOf(page)
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole("tab", { name: "General" })).toBeFocused()
+  await dialog.getByRole("searchbox", { name: "Search settings" }).fill("font")
+  await page.keyboard.press("Escape")
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole("searchbox")).toHaveValue("")
+  await page.keyboard.press("Escape")
+  await expect(dialog).toHaveCount(0)
+  await expect(settingsButton(page)).toBeFocused()
+})
+
+test("arrow keys, Home and End move between categories", async ({ page }) => {
+  await settingsButton(page).click()
+  const dialog = dialogOf(page)
+  const tab = (name: string) => dialog.getByRole("tab", { name })
+  await expect(tab("General")).toBeFocused()
+  await page.keyboard.press("ArrowDown")
+  await expect(tab("Terminal")).toBeFocused()
+  await expect(tab("Terminal")).toHaveAttribute("aria-selected", "true")
+  await expect(dialog.getByRole("tabpanel")).toContainText("Default theme")
+  await page.keyboard.press("End")
+  await expect(tab("Updates")).toBeFocused()
+  await page.keyboard.press("ArrowDown")
+  await expect(tab("General")).toBeFocused()
+  await page.keyboard.press("ArrowUp")
+  await expect(tab("Updates")).toBeFocused()
+  await page.keyboard.press("Home")
+  await expect(tab("General")).toBeFocused()
+})
+
+test("searching 'contrast' finds the setting and counts matches per tab", async ({ page }) => {
+  await settingsButton(page).click()
+  const dialog = dialogOf(page)
+  await dialog.getByRole("searchbox", { name: "Search settings" }).fill("contrast")
+  await expect(dialog.getByRole("heading", { name: "Accessibility", level: 2 })).toBeVisible()
+  await expect(dialog.getByLabel("Minimum contrast ratio")).toBeVisible()
+  await expect(dialog.getByTestId("count-accessibility")).toContainText("2")
+  await expect(dialog.getByTestId("count-general")).toContainText("0")
+  // Theme editor also mentions contrast warnings.
+  await expect(dialog.getByTestId("count-themes")).toContainText("1")
+})
+
+test("duplicating and editing a theme shows on a card; deleting reverts the sessions that used it", async ({ page }) => {
+  await settingsButton(page).click()
+  const dialog = dialogOf(page)
+  await dialog.getByRole("tab", { name: "Themes" }).click()
+  await dialog.getByRole("button", { name: /^Tide/ }).click()
+  await dialog.getByRole("button", { name: "Duplicate" }).click()
+  await expect(dialog.getByRole("heading", { name: "Tide copy" })).toBeVisible()
+  // Presets are read-only; the copy is editable.
+  await dialog.getByRole("textbox", { name: /Background hex value/ }).fill("#102030")
+  await expect(dialog.getByRole("textbox", { name: /Background hex value/ })).toHaveValue("#102030")
+  const s = await store(page)
+  const custom = s.settings.customThemes[0]
+  expect(custom.colors.background).toBe("#102030")
+  expect(custom.id.startsWith("custom-")).toBe(true)
+  await dialog.getByRole("button", { name: "Set as default" }).click()
+  await dialog.getByRole("button", { name: "Close", exact: true }).click()
+  const well = page.locator("[data-card] .card-preview-body").locator("xpath=..").first()
+  await expect(well).toHaveCSS("background-color", "rgb(16, 32, 48)")
+
+  // Apply it to one session as an override, then delete the theme.
+  await page.evaluate(id => (window as any).harness.setSessionAppearance("terminal-b", { terminalTheme: id }), custom.id)
+  await settingsButton(page).click()
+  await dialog.getByRole("tab", { name: "Themes" }).click()
+  await dialog.getByRole("button", { name: /^Tide copy/ }).click()
+  await dialog.getByRole("button", { name: "Delete" }).click()
+  await expect(dialog.getByRole("alertdialog")).toContainText("1 session uses it")
+  await dialog.getByRole("button", { name: "Delete theme" }).click()
+  const after = await store(page)
+  expect(after.settings.customThemes).toEqual([])
+  expect(after.settings.terminal.themeId).toBe("still")
+  expect(after.sessions.find((x: any) => x.id === "terminal-b").terminalTheme).toBeUndefined()
+  await dialog.getByRole("button", { name: "Close", exact: true }).click()
+  await expect(well).toHaveCSS("background-color", "rgb(8, 8, 10)")
+})
+
+test("contrast warnings are announced in a status region", async ({ page }) => {
+  await settingsButton(page).click()
+  const dialog = dialogOf(page)
+  await dialog.getByRole("tab", { name: "Themes" }).click()
+  await dialog.getByRole("button", { name: /^Still\b/ }).first().click()
+  await dialog.getByRole("button", { name: "Duplicate" }).click()
+  await dialog.getByRole("textbox", { name: /Foreground hex value/ }).fill("#101012")
+  await expect(dialog.getByTestId("contrast-status")).toContainText("Foreground")
+  await expect(dialog.getByTestId("contrast-status")).toHaveAttribute("role", "status")
+})

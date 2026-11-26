@@ -18,8 +18,8 @@ ok("overlay auto-connects unconnected session on open",
 for (const [n, src] of [["AuthDialog", auth]]) {
   ok(`${n} portalled to body`, src.includes("createPortal(") && src.includes("document.body"));
 }
-const settings = readFileSync("src/components/SettingsSheet.tsx", "utf8");
-ok("SettingsSheet portalled to body", settings.includes("createPortal(") && settings.includes("document.body"));
+const settings = readFileSync("src/settings/SettingsPage.tsx", "utf8");
+ok("SettingsPage portalled to body", settings.includes("createPortal(") && settings.includes("document.body"));
 const remove = readFileSync("src/components/RemoveDialog.tsx", "utf8");
 ok("RemoveDialog portalled to body", remove.includes("createPortal(") && remove.includes("document.body"));
 

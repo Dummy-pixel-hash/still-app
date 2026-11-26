@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test"
+import { openAgentSettings, projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__impeccable/**", route => route.abort())
@@ -7,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 async function addFolder(page: Page) {
-  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await page.getByRole("button", { name: "Toggle projects" }).click()
+  if (!await page.getByRole("button", { name: "Add project folder", exact: true }).isVisible()) await projectSidebarToggle(page).click()
   await page.getByRole("button", { name: "Add project folder", exact: true }).click()
   await page.getByLabel("Remote project folder").fill("/srv/still")
   await page.getByRole("button", { name: "Open folder", exact: true }).click()
@@ -185,8 +186,7 @@ test("capability updates stay metadata, reject old scopes/generations, and resto
 
 test("discovery is stale immediately on selection changes, refreshes on demand, and ignores late old results", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => (window as any).agentFixture.checks.length)).toBe(1)
-  await page.getByRole("button", { name: "Workspace options" }).click()
-  await page.getByRole("menuitem", { name: "Agent settings", exact: true }).click()
+  await openAgentSettings(page)
   const piSettings = page.locator(".agent-provider-setting").filter({ hasText: "Pi" })
   await piSettings.locator("summary").click()
   await expect(piSettings.getByText("Pi fixture", { exact: true })).toBeVisible()

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from "react"
 import { diagRecord } from "./session/diag"
 import { isMobileClient } from "./mobile/platform"
+import UpdateNotice from "./updates/UpdateNotice"
 
 const MobileApp = lazy(() => import("./mobile/MobileApp"))
 const Workspace = lazy(() => import("./screens/Workspace"))
@@ -41,5 +42,5 @@ export default function App() {
     })()
   }, [])
   const Surface = isMobileClient() ? MobileApp : Workspace
-  return <Suspense fallback={<div style={{ height: "100%", background: "#080809" }} />}><Surface /></Suspense>
+  return <><Suspense fallback={<div style={{ height: "100%", background: "#080809" }} />}><Surface /></Suspense><UpdateNotice /></>
 }

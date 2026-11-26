@@ -43,11 +43,7 @@ test("hierarchy spacing and conversation rows fit the panel at desktop and compa
   for (const [width, height] of [[1440, 900], [1024, 768], [800, 900], [620, 700], [390, 844]]) {
     await page.setViewportSize({ width, height })
     const panel = page.locator("#agent-project-navigation")
-    if (width <= 800) {
-      if (await page.getByRole("button", { name: "Show projects", exact: true }).isVisible()) {
-        await page.getByRole("button", { name: "Show projects", exact: true }).click()
-      }
-    }
+    if (width <= 800 && !await page.locator(".agent-sidebar").isVisible()) await page.getByRole("button", { name: "Show projects", exact: true }).click()
     const bounds = await panel.evaluate(el => {
       const outer = el.getBoundingClientRect()
       const rows = [...el.querySelectorAll<HTMLElement>(".agent-folder-heading, .agent-thread")].filter(row => row.getClientRects().length).map(row => {

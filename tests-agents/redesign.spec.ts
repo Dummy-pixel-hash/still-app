@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test"
+import { projectSidebarToggle } from "./navigation"
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/live.js?*", route => route.abort())
@@ -6,7 +7,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/tests-agents/fixture.html")
 })
 async function connect(page: Page) {
-  if (!await page.getByRole("button", { name:"Add project folder",exact:true }).isVisible()) await page.getByRole("button", { name:"Toggle projects" }).click()
+  if (!await page.getByRole("button", { name:"Add project folder",exact:true }).isVisible()) await projectSidebarToggle(page).click()
   await page.getByRole("button", {name:"Add project folder",exact:true}).click()
   await page.getByLabel("Remote project folder").fill("/srv/still")
   await page.getByRole("button", {name:"Open folder",exact:true}).click()
@@ -24,22 +25,26 @@ async function ask(page: Page, properties: Record<string,unknown>, required: str
   },{properties,required})
 }
 
-test("model updates are serialized and the independent effort control waits for acknowledgement",async({page})=>{
+test("model and effort choices stay staged with the draft and reach the agent in order on send",async({page})=>{
   await connect(page)
   await page.getByLabel("Message agent").fill("Keep this draft")
-  await page.evaluate(()=>{(window as any).agentFixture.deferConfig=true})
   await page.getByRole("button",{name:"Model: Model A",exact:true}).click()
   await page.getByRole("option",{name:"Model B",exact:true}).click()
-  await expect(page.getByRole("listbox",{name:"Models",exact:true})).toHaveAttribute("aria-busy","true")
-  await page.getByRole("option",{name:"Model A",exact:true}).dispatchEvent("click")
-  expect(await page.evaluate(()=>(window as any).agentFixture.configs)).toEqual([{configId:"model",value:"b"}])
-  await page.evaluate(()=>{const h=(window as any).agentFixture;h.deferConfig=false;h.releaseConfig()})
   await expect(page.getByRole("dialog",{name:"Models",exact:true})).toHaveCount(0)
   await expect(page.getByRole("button",{name:"Model: Model B",exact:true})).toBeFocused()
   await page.getByRole("button",{name:"Reasoning effort: Medium",exact:true}).click()
   await expect(page.getByRole("button",{name:"Reasoning effort: High",exact:true})).toBeVisible()
+  await expect(page.locator(".agent-composer-status")).toContainText("2 settings on next send")
   await expect(page.getByLabel("Message agent")).toHaveValue("Keep this draft")
   await expect(page.getByRole("button",{name:"Conversation settings",exact:true})).toHaveCount(0)
+  expect(await page.evaluate(()=>(window as any).agentFixture.configs)).toEqual([])
+  await page.getByRole("button",{name:"Send message",exact:true}).click()
+  await expect(page.locator(".agent-message-user").last()).toContainText("Keep this draft")
+  expect(await page.evaluate(()=>(window as any).agentFixture.order.slice(-3))).toEqual([
+    {type:"config",value:{configId:"model",value:"b"}},
+    {type:"config",value:{configId:"effort",value:"high"}},
+    {type:"prompt",value:"Keep this draft"},
+  ])
 })
 
 test("reasoning commands focus the cycle button and model commands open a model-only menu",async({page})=>{
@@ -239,7 +244,8 @@ test("tool-only activity stays grouped and collapsed failures remain obvious", a
   await expect(activity).toHaveCount(1)
   await expect(activity).toHaveClass(/is-failed/)
   await activity.locator(".agent-activity-rail").click()
-  await expect(activity.locator(".agent-activity-summary")).toContainText("Failed")
+  await expect(activity.locator(".agent-activity-fail-dot")).toBeVisible()
+  await expect(activity.locator(".agent-activity-summary")).toContainText("1 failed")
   await expect(activity.locator(".agent-activity-summary")).toContainText("npm test")
   await activity.locator(".agent-activity-summary").click()
   await expect(activity.locator(".agent-activity-reasoning")).toHaveCount(0)

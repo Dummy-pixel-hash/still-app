@@ -687,7 +687,8 @@ test("Gemini ACP session setup receives Still's private stdio todo server",{time
   const server=session.result.receivedMcpServers.find(value=>value.name==="still-todos")
   assert.equal(server.command,process.execPath)
   assert.equal(server.args.at(-1),"mcp")
-  assert.deepEqual(server.env.map(({name})=>name),["STILL_TODO_SOCKET","STILL_TODO_TOKEN"])
+  assert.deepEqual(server.env.map(({name})=>name),["STILL_TODO_SOCKET","STILL_TODO_TOKEN","STILL_SUBAGENTS"])
+  assert.equal(server.env.find(({name})=>name==="STILL_SUBAGENTS").value,"1","a root conversation keeps the delegation tool")
 }))
 
 test("capabilities publish at session setup, after a real Todo call, and replay on reattach",{timeout:15000},()=>fixture(async({make})=>{

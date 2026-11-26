@@ -1,6 +1,7 @@
 import { mockBridge } from "../bridge/mockBridge"
 import { registerNativeBridge, type ConnectArgs, type NativeBridge, type NativeSessionEvent } from "../bridge/nativeBridge"
 import { DEFAULT_ORB_PREFERENCES } from "../orb/state"
+import { DEFAULT_TERMINAL_PREFS } from "../terminal/appearance"
 import { connectSession, disconnectSession } from "../session/connections"
 import type { AppSettings, Project, Session } from "../types"
 import { isTerminalPreview, TERMINAL_PREVIEW_STORE_KEY } from "./mode"
@@ -137,8 +138,8 @@ function seedPreviewStore(): Session[] {
     updatedAt: now - index * 300000, lastOpenedAt: now - (index + 1) * 300000,
   }))
   const settings: AppSettings = {
-    confirmRemove: true, terminal: { fontSize: 14, cursorStyle: "block", scrollback: 5000 },
-    imageInsertStyle: "path", orb: { ...DEFAULT_ORB_PREFERENCES },
+    confirmRemove: true, terminal: { ...DEFAULT_TERMINAL_PREFS },
+    imageInsertStyle: "path", orb: { ...DEFAULT_ORB_PREFERENCES }, customThemes: [],
   }
   localStorage.setItem(TERMINAL_PREVIEW_STORE_KEY, JSON.stringify({
     projects, sessions, keys: [], settings,

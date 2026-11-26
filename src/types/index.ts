@@ -1,6 +1,7 @@
 // Still M2 — product session/project model.
 
 import type { OrbPreferences } from "../orb/types"
+import type { ContrastPref, CursorBlinkPref, TerminalTheme } from "../terminal/appearance"
 
 export type ConnectionStatus =
   | "disconnected"
@@ -51,6 +52,10 @@ export interface Session {
   createdAt: number
   updatedAt: number
   lastOpenedAt?: number
+  /** Per-session terminal theme override (a preset or custom-theme id). */
+  terminalTheme?: string
+  /** Per-session font size override (zoom); clamped to FONT_MIN..FONT_MAX. */
+  fontSize?: number
 }
 
 export interface Project {
@@ -64,6 +69,14 @@ export interface TerminalPrefs {
   fontSize: number
   cursorStyle: "block" | "underline" | "bar"
   scrollback: number
+  /** Default theme id (preset or custom); sessions may override it. */
+  themeId: string
+  /** "auto" disables blinking under prefers-reduced-motion. */
+  cursorBlink: CursorBlinkPref
+  /** "auto" is 1 (off) unless the OS asks for more contrast (then 4.5). */
+  minimumContrastRatio: ContrastPref
+  screenReaderMode: boolean
+  visualBell: boolean
 }
 
 // Enforce the settings UI's existing range at the persisted/native boundary too.
@@ -81,6 +94,7 @@ export interface AppSettings {
   terminal: TerminalPrefs
   imageInsertStyle: ImageInsertStyle
   orb: OrbPreferences
+  customThemes: TerminalTheme[]
 }
 
 /** Key-library entry: metadata only. Secret text lives in the OS keyring. */

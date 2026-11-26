@@ -45,8 +45,10 @@ test("the accepted hierarchy uses the chosen typography without Live preview sca
 test("side lines are visible only while their activity group is expanded", async ({ page }) => {
   const rail = page.locator(".agent-activity-rail").first()
   const line = rail.locator(":scope > span")
+  // A collapsed group has no rail at all: no line, no extra tab stop.
+  await expect(rail).toBeHidden()
   await expect(line).toBeHidden()
-  await rail.hover()
+  await page.locator(".agent-activity-summary").first().hover()
   await expect(line).toBeHidden()
 
   await page.locator(".agent-activity-summary").first().click()
@@ -107,7 +109,8 @@ test("activity groups bundle recursively and expand to a flat list of collapsed 
   await expect(page.locator(".agent-activity-block")).toHaveCount(2)
   await page.evaluate(() => (window as any).agentFixture.finish())
   const summary = root.locator(".agent-activity-summary")
-  await expect(summary).toContainText("25 activity groups")
+  await expect(summary).toContainText("Edited file-124.ts and 99 more")
+  await expect(summary).toHaveAttribute("title", /25 activity groups/)
   await summary.click()
   const eventList = root.locator(".agent-activity-event-list")
   await expect(eventList.locator(":scope > details")).toHaveCount(125)
@@ -138,6 +141,10 @@ test("failed or unfinished tool output is not hidden by auto-collapse", async ({
     fixture.emit(fixture.current, { type: "toolStart", toolCallId: "failed-build", title: "Run build", status: "failed", content: [{ type: "content", content: { type: "text", text: "Build failed: missing export" } }] })
     fixture.finish()
   })
+  // A failed group stays collapsed; its summary says how many failed.
+  await expect(page.locator(".agent-activity-rail").last()).toHaveAttribute("aria-expanded", "false")
+  await expect(page.locator(".agent-activity-summary").last()).toContainText("1 failed")
+  await page.locator(".agent-activity-summary").last().click()
   await expect(page.locator(".agent-activity-rail").last()).toHaveAttribute("aria-expanded", "true")
   await page.locator(".agent-tool--inline > summary").last().click()
   await expect(page.locator(".agent-tool-body").last()).toContainText("Build failed: missing export")
@@ -166,7 +173,7 @@ for (const layout of ["chapters", "timeline", "split"]) {
       const rails = page.locator(".agent-activity-rail")
       for (let index = 0; index < await rails.count(); index++) {
         const rail = rails.nth(index)
-        if (await rail.getAttribute("aria-expanded") !== "true") await rail.click()
+        if (await rail.getAttribute("aria-expanded") !== "true") await page.locator(".agent-activity-block").nth(index).locator(".agent-activity-summary").click()
         await expect(rail).toHaveAttribute("aria-expanded", "true")
         for (let other = 0; other < await rails.count(); other++) if (other !== index) await expect(rails.nth(other)).toHaveAttribute("aria-expanded", "false")
         const geometry = await rail.evaluate(railElement => {
@@ -202,7 +209,7 @@ for (const layout of ["chapters", "timeline", "split"]) {
     await expect(page.locator(".agent-activity-summary")).toHaveCount(1)
     const collapsed = await page.locator(".agent-activity-block").evaluateAll(blocks => blocks.map(el => {
       const rect = el.getBoundingClientRect()
-      return { top: rect.top, bottom: rect.bottom, height: rect.height, railBottom: el.querySelector(".agent-activity-rail")!.getBoundingClientRect().bottom }
+      return { top: rect.top, bottom: rect.bottom, height: rect.height, railBottom: (el.querySelector(".agent-activity-summary") || el.querySelector(".agent-activity-rail"))!.getBoundingClientRect().bottom }
     }))
     for (let index = 0; index < collapsed.length; index++) {
       expect(collapsed[index].height).toBeGreaterThanOrEqual(34)
@@ -213,8 +220,7 @@ for (const layout of ["chapters", "timeline", "split"]) {
 }
 
 test("split view uses two columns only when the conversation itself has enough space", async ({ page }) => {
-  const rail = page.locator(".agent-activity-rail").last()
-  await rail.click()
+  await page.locator(".agent-activity-summary").last().click()
   const events = page.locator(".agent-activity-event-list").last()
   await expect(events).toHaveCSS("grid-template-columns", /^\d+(?:\.\d+)?px \d+(?:\.\d+)?px$/)
   await page.setViewportSize({ width: 960, height: 768 })
@@ -257,4 +263,12 @@ test("long tool names, commands, and unbroken output stay inside their split col
     expect(overflows).toEqual([])
     expect(await page.locator(".agent-conversation").evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   }
+})
+
+test("a collapsed activity summary lines up with the assistant message text", async ({ page }) => {
+  const summary = page.locator(".agent-activity-summary").first()
+  await expect(summary).toBeVisible()
+  const prose = page.locator(".agent-message-assistant .agent-prose").first()
+  const [left, proseLeft] = await Promise.all([summary.boundingBox(), prose.boundingBox()])
+  expect(Math.abs(left!.x - proseLeft!.x)).toBeLessThanOrEqual(2)
 })

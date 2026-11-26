@@ -1,11 +1,69 @@
 # AG-16 — Full Android implementation todo list
 
-Updated: **2026-11-09**. Status: **TODO — checklist recorded; implementation not started**.
+Updated: **2026-11-16**. Status: **IN PROGRESS — shared catalog/organization/read
+state, durable native intents, remote child coordination and opt-in relay outbox
+implemented; identity/legacy migration, native acceptance and FCM delivery remain open**.
 
 Scope and product decisions live in the [Android phone plan](android-mobile.md).
 Feature scheduling/status remains in the [master tracker](README.md#master-tracker).
 This file owns the detailed Android task checkboxes; the plan's MOB-01–15 table is
 the milestone/dependency summary, not a second completion tracker.
+
+The [desktop ↔ Android continuity plan](android-continuity.md) records the
+2026-11-11 user decisions, implementation checkpoint and proposed full
+wire/durability contract. Initial S1/S2 code discovers the same remote work and
+acts from either device; it still needs compatible desktop/Android device
+acceptance. Task IDs below are retained, with the former device-takeover
+requirements replaced by server-serialized multi-client commands. Passing the
+temporary-peer native test or browser fixtures does not complete that acceptance.
+
+### Software continuation evidence — 2026-11-13
+
+Code-complete boxes below refer to the current **uncommitted worktree**, not a
+published release or physical-device sign-off. The implementation and remaining
+limitations are recorded in [the continuity checkpoint](android-continuity.md#software-continuation--2026-11-13).
+Core files are `shared-library.mjs`, `subagents.mjs`, native `agent.rs`/`agent_store.rs`
+and the shared `agentThreads.ts` store. New tests cover independent-process catalog
+races, scoped receipts, field conflicts, read watermarks, native projection/local
+draft preservation, server coordination without attached UI, human/model child
+capacity, parent retirement, opt-in opaque notifications and relay retry leases.
+Temporary ACP peers and fake relay callbacks make **no model or real push calls**.
+
+### Project-based phone library — 2026-11-16
+
+- Implemented project sections and a native All projects/project picker, with
+  Recent project activity and natural A–Z ordering. Identity remains the exact
+  server/account plus remote folder; equally named projects do not merge.
+- Pinned threads lead within each section, then newest activity. Section collapse,
+  project selection and sort persist in a device-owned native workspace record;
+  these view operations do not start a provider, resend a prompt or mutate shared
+  project/conversation order.
+- Search matches project names/paths, server/accounts, titles and providers.
+  Search, Needs you and explicitly choosing one project expose matching rows
+  regardless of saved collapses. Attention counts follow the active scope; the
+  navigation indicator still covers all projects. New task inherits an explicitly
+  selected active project, while All projects leaves it unassigned.
+- Kept the approved black/rose phone shell and floating navigation. Native pickers
+  have 48px minimum targets, focus states and narrow-phone coverage. Short screens
+  tighten the index so the first conversation remains visible. Multi-server Sync
+  uses one disclosure instead of a repeated block of links; system Back dismisses
+  that disclosure. Scoped empty states offer Show all projects.
+- Validation: **27 mobile Playwright tests** (including eight project-library
+  cases), **236 Node tests**, **three desktop sidebar regression tests** and all
+  **12 updater checks** (six unit, six browser) passed. Production frontend build
+  and an optimized ARM64 Android build also passed. Screenshots use synthetic
+  fixture accounts, not the user's provider transcripts. Native on-device picker/installation
+  acceptance remains open: the A142 was not connected to ADB during this check.
+- Local validation APK:
+  `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-dev-signed.apk`,
+  version `0.1.1` / code `1001`, ARM64, SHA-256
+  `5ad13179d0809f558d78c0fc8921ef60f013fbff3b20ea8b725dda943d74e710`.
+  Its verified development certificate matches the previously installed phone
+  certificate (`7381bd12…89b8b38`). This is not a published production release,
+  signing migration or a claim of a completed in-place installation.
+- This UI indexes history already in Still's library. It does **not** complete the
+  separate Linux OpenCode/Pi provider-history import in
+  [the continuity checkpoint](android-continuity.md).
 
 ## How to use this checklist
 
@@ -44,12 +102,15 @@ override currently active desktop work in the master tracker.
 
 - [ ] **MOB-D1** — Client stack. Record the React/Tauri/native-SSH choice after the
   feasibility spike, including Android-specific modules and any proven blocker.
-- [ ] **MOB-D2** — Data authority. Approve remote catalog/history ownership, local
-  cache/draft boundaries, history-sharing consent, migration and retention policy.
-- [ ] **MOB-D3** — Control ownership. Approve observer/controller roles, per-thread
-  lease/epoch rules, mutation fencing, recovery and legacy-worker compatibility.
-- [ ] **MOB-D4** — Push deployment. Select relay hosting/operator, FCM credentials,
-  security model, retention, operating cost, registration/revocation and non-GMS policy.
+- [ ] **MOB-D2** — Data authority. Shared work plus organization/read state selected
+  2026-11-11; finalize remote catalog/history, local cache/drafts, migration and
+  retention contract. Proposed contract: [continuity plan](android-continuity.md).
+- [ ] **MOB-D3** — Command concurrency. **Act from either device** selected
+  2026-11-11; finalize server serialization, execution generations, operation
+  receipts, revision preconditions, recovery and legacy-worker compatibility.
+- [ ] **MOB-D4** — Push deployment. **User-hosted relay + FCM first** selected
+  2026-11-11; configure actual hosting/TLS, FCM project/credentials, retention,
+  registration/revocation and non-GMS support policy.
 - [ ] **MOB-D5** — Pairing. Select metadata-only QR/config transfer versus an approved
   code-rendezvous design; document authentication, host trust, expiry and replay limits.
 - [ ] **MOB-D6** — Android support. Set minimum/target SDK, ARM64 release and emulator
@@ -76,10 +137,22 @@ Acceptance: [AND-A01/A08/A13/A18](android-mobile.md#10-acceptance-matrix).
   drag APIs are now desktop-gated. Android credential storage selects the
   Android-native Keystore-backed keyring provider rather than keyring's unsupported
   default v1 provider.
-- **Not proved:** no emulator system image is installed and no physical device is
-  attached. Install/start, JNI setup, Keystore persistence, credential round-trip,
-  native SSH, IME, lifecycle, SSH host trust, agent exchange and terminal behavior
-  remain untested on a running Android device. The AVD profiles alone are not evidence.
+- **Initial limit (2026-11-09):** compile evidence did not include an attached
+  physical device. The following later evidence supersedes that install/start limit.
+
+### Follow-up evidence — 2026-11-10
+
+- The ARM64 debug APK was rebuilt after the mobile UI changes. SHA-256 of that
+  artifact: `ed6721bf3e789c5db9a7422e35cb669d1d07ab9ecb38992e129ecb5d693c2c26`.
+- ADB identified model **A142**, product `PacmanIND`. `adb install -r` returned
+  `Success`; after launch, `dev.still.app/.MainActivity` was the resumed activity
+  and `pidof dev.still.app` returned `20762`. No AndroidRuntime error appeared in
+  the sampled error log.
+- This records **installation/start only**. MOB-01.05 also requires verified
+  WebView/native IPC, so it stays open. Real SSH/provider exchange, trust races,
+  IME/lifecycle, secure-storage restart and desktop/phone continuity need their
+  individual evidence. `scripts/android/smoke.mjs` supplies native probe tooling;
+  its presence is not a recorded successful run.
 
 - [ ] **MOB-01.01** Inventory JDK, SDK, NDK, Rust targets, Tauri CLI/plugin versions
   and build dependencies; record a repeatable local setup.
@@ -106,7 +179,7 @@ Acceptance: [AND-A01/A08/A13/A18](android-mobile.md#10-acceptance-matrix).
 - [ ] **MOB-01.12** Record a go/no-go report for the client stack and supported-device
   baseline, with logs/screenshots and unresolved native blockers.
 
-## MOB-02 — Shared identity, catalog, history and ownership contract
+## MOB-02 — Shared identity, catalog, history and command contract
 
 Dependencies: MOB-D2/D3; MOB-01 evidence where native behavior affects the contract.
 Coordinate with AG-10 and AG-12; do not create competing discovery/control protocols.
@@ -126,12 +199,14 @@ Acceptance: AND-A02–06/A16/A17.
   request kind and request ID; specify already-answered/expired behavior.
 - [ ] **MOB-02.07** Define operation IDs, durable receipts, acknowledgement boundaries
   and reconciliation for prompt/answer/cancel/config/history mutations.
-- [ ] **MOB-02.08** Define read-only observation versus mutating ownership and the
-  per-conversation lease/epoch transfer protocol.
+- [ ] **MOB-02.08** Define non-destructive subscriptions and server-serialized
+  commands from either authorized device; execution generations, mutation/config
+  revisions, busy/stale responses and durable deduplication replace device takeover.
 - [ ] **MOB-02.09** Define atomic catalog/metadata updates, expected revisions,
   conflict responses and deletion/tombstone handling.
-- [ ] **MOB-02.10** Define remote/shared versus local-only fields: drafts, unfinished
-  answers, pins/archive/read preferences, cache and uploaded/unuploaded files.
+- [ ] **MOB-02.10** Define remote/shared versus local-only fields: projects/titles/
+  pins/archive/read state are shared; drafts, unfinished answers, scroll positions,
+  appearance, cache and unuploaded files remain local initially.
 - [ ] **MOB-02.11** Define schema/protocol negotiation, unsupported feature responses
   and safe behavior for old workers and clients.
 - [ ] **MOB-02.12** Specify migration consent, restart checkpoints, backups, validation,
@@ -140,22 +215,23 @@ Acceptance: AND-A02–06/A16/A17.
   worker lifecycle, active turn, pending request and confirmed outcome.
 - [ ] **MOB-02.14** Define device registration, notification routing identifiers,
   revocation boundaries and minimal push envelope fields.
-- [ ] **MOB-02.15** Define interaction with parent/child chats: a phone reader must
-  not replace the parent coordinator or add another submission authority.
+- [ ] **MOB-02.15** Define server-owned parent/child coordination and a shared child
+  command lane; attached clients must not become duplicate coordinators or be
+  required for a parent tool/guidance queue to progress.
 - [ ] **MOB-02.16** Review the contract with example payloads, error cases and tests
-  for duplicate delivery, conflicting owners and account/project isolation.
+  for duplicate delivery, concurrent commands and account/project isolation.
 
 ## MOB-03 — Remote catalog, complete replay, native cache and migration
 
 Dependencies: MOB-02; approved data-sharing policy. Acceptance: AND-A02/A03/A07/A16.
 
-- [ ] **MOB-03.01** Implement account-private catalog storage with permissions,
+- [x] **MOB-03.01** Implement account-private catalog storage with permissions,
   schema versioning, atomic writes and crash-safe concurrent updates.
-- [ ] **MOB-03.02** Register projects and conversations by stable identity, preserving
+- [x] **MOB-03.02** Register projects and conversations by stable identity, preserving
   current canonical folder and account associations.
-- [ ] **MOB-03.03** Register existing/new executions and confirmed provider-session
+- [x] **MOB-03.03** Register existing/new executions and confirmed provider-session
   IDs; keep saved/ended conversations discoverable after a worker exits.
-- [ ] **MOB-03.04** Expose bounded authenticated SSH discovery without needing the
+- [x] **MOB-03.04** Expose bounded authenticated SSH discovery without needing the
   phone to know execution IDs or enumerate arbitrary socket files first.
 - [ ] **MOB-03.05** Persist complete required transcript history, including user
   messages and normalized request outcomes, rather than assuming replay is complete.
@@ -169,8 +245,8 @@ Dependencies: MOB-02; approved data-sharing policy. Acceptance: AND-A02/A03/A07/
   drafts/preferences/reading positions separate from remote updates.
 - [ ] **MOB-03.10** Display cached/stale/current/sync-failure states and offline history
   without claiming the remote execution ended.
-- [ ] **MOB-03.11** Add revision-aware metadata mutations and explain conflicts;
-  do not silently clobber a newer title/project association from another device.
+- [x] **MOB-03.11** Add field-revision-aware shared titles/projects/pins/archive/order
+  and monotonic shared read watermarks; retain conflicting edits and local drafts.
 - [ ] **MOB-03.12** Implement explicit desktop continuity opt-in for selected remote
   accounts/projects and explain the destination/retention of shared history.
 - [ ] **MOB-03.13** Back up current native history and build a versioned migration
@@ -186,7 +262,7 @@ Dependencies: MOB-02; approved data-sharing policy. Acceptance: AND-A02/A03/A07/
 - [ ] **MOB-03.18** Verify fresh-phone discovery, desktop-offline replay, migration
   rerun/interruption, corrupted partial data and multiple-account isolation.
 
-## MOB-04 — Observation, controller transfer and mutation fencing
+## MOB-04 — Multi-client observation, commands and mutation fencing
 
 Dependencies: MOB-02; coordinate protocol adoption with MOB-03. Acceptance:
 AND-A03–06/A16/A17.
@@ -195,30 +271,30 @@ AND-A03–06/A16/A17.
   phone must not invoke the legacy replace-owner attach behavior.
 - [ ] **MOB-04.02** Support multiple readers with bounded fan-out/replay and explicit
   access checks per account/project/conversation.
-- [ ] **MOB-04.03** Implement a server-authoritative controller lease and monotonically
-  changing epoch for each conversation, not one global phone/desktop controller.
-- [ ] **MOB-04.04** Implement explicit acquisition/transfer with expected owner/epoch
-  and a deterministic result for simultaneous requests.
-- [ ] **MOB-04.05** Fence prompt, answer, cancel, model/mode, revert/retry and close
-  operations; reject stale/unauthorized controllers before provider side effects.
+- [ ] **MOB-04.03** Implement one server-owned command lane per conversation and
+  persistent execution generations; no device-level controller lease is required.
+- [ ] **MOB-04.04** Implement first-valid-commit arbitration with revision checks
+  for simultaneous sends, answers, config changes and recovery requests.
+- [ ] **MOB-04.05** Fence prompt, answer, cancel, model/mode, revert/retry, resume
+  and close by scope, target identity and relevant generation/revision before effects.
 - [ ] **MOB-04.06** Persist operation receipts and reconcile acknowledgement loss so
   retries cannot duplicate a paid turn or apply a request twice.
-- [ ] **MOB-04.07** Publish ownership changes to both devices and preserve unsent text
-  when the former controller becomes a reader.
-- [ ] **MOB-04.08** Reconnect as an observer and catch up before mutation; do not let
-  an old desktop or phone reconnect automatically steal the lease back.
-- [ ] **MOB-04.09** Define lease renewal/expiry during backgrounding, process death
-  and network loss without cancelling remote execution.
+- [ ] **MOB-04.07** Publish accepted commands/outcomes to both devices; preserve
+  the losing client's unsent text when a concurrent action returns busy/stale.
+- [ ] **MOB-04.08** Reconnect as a subscriber and catch up before mutation; no
+  reconnect may replace another client's observation or reset command authority.
+- [ ] **MOB-04.09** Recover subscriptions and pending receipts across backgrounding,
+  process death and network loss without cancelling remote execution.
 - [ ] **MOB-04.10** Separate transport detach, stop-turn request and execution close;
   leaving a screen is never an implicit remote stop.
-- [ ] **MOB-04.11** Revalidate pending requests on transfer and handle another device
+- [ ] **MOB-04.11** Revalidate pending requests on catch-up and handle another device
   answering first, superseded requests and changed execution attempts.
-- [ ] **MOB-04.12** Integrate parent/child queue/controller rules where present;
-  parent supervision must survive a direct phone view of the child.
+- [x] **MOB-04.12** Integrate parent/child queues with the server-owned command lane;
+  parent supervision must survive a phone view or both clients disconnecting.
 - [ ] **MOB-04.13** Negotiate legacy-worker behavior and prevent unsafe mixed-version
   takeover loops or unrequested restarts.
-- [ ] **MOB-04.14** Verify observer coexistence, takeover races, stale writes, lost
-  receipts, lease expiry and per-conversation/account boundaries with two clients.
+- [ ] **MOB-04.14** Verify observer coexistence, concurrent-action races, stale writes,
+  lost receipts, hub/worker restart and account boundaries with two clients.
 
 ## MOB-05 — Phone shell, routes, insets, Back and lifecycle
 
@@ -298,12 +374,12 @@ AND-A02/A03/A07/A14/A18.
 
 Dependencies: MOB-04/05/06. Acceptance: AND-A03–09/A14/A16/A18.
 
-- [ ] **MOB-07.01** Implement the accepted quiet transcript and editorial typography:
-  clear title/speakers, unboxed user prompt, readable response and compact context.
-- [ ] **MOB-07.02** Keep execution, connectivity and controller status distinct; place
+- [ ] **MOB-07.01** Verify the accepted compact-header/message-card transcript and
+  readable hierarchy with real shared history, expanded-only lines and sync state.
+- [ ] **MOB-07.02** Keep execution, connectivity, sync freshness and send state distinct; place
   server/project info in a reachable detail surface rather than repeated title rows.
-- [ ] **MOB-07.03** Implement Continue here and reader/controller/submitting/unknown
-  states using acknowledged ownership, not local visual toggles.
+- [ ] **MOB-07.03** Implement act-from-either-device with catching-up/sending/
+  accepted/unknown/conflict states using authoritative receipts and current snapshots.
 - [ ] **MOB-07.04** Reuse bounded Markdown/code/tool/message-parts rendering with safe
   links, useful code copy and sensible long-content expansion.
 - [ ] **MOB-07.05** Preserve reading position during streaming/replay and implement
@@ -311,7 +387,7 @@ Dependencies: MOB-04/05/06. Acceptance: AND-A03–09/A14/A16/A18.
 - [ ] **MOB-07.06** Make soft-keyboard Enter insert a newline and Send submit; support
   composition, dictation, emoji and external-keyboard behavior without accidental sends.
 - [ ] **MOB-07.07** Persist composer drafts incrementally; keep text/attachments after
-  auth failures, rejected sends, ownership changes and unknown acknowledgements.
+  auth failures, concurrent rejected sends and unknown acknowledgements.
 - [ ] **MOB-07.08** Implement touch model/mode/effort/command sheets with provider
   acknowledged values and serialized updates that never submit the draft.
 - [ ] **MOB-07.09** Show pending-request attention inline/near the composer and open
@@ -334,7 +410,7 @@ Dependencies: MOB-04/05/06. Acceptance: AND-A03–09/A14/A16/A18.
   using the same fenced mutation path; do not add implicit file rollback.
 - [ ] **MOB-07.18** Preserve supported parent/child navigation and return context;
   unavailable direct child chat must be explained rather than simulated.
-- [ ] **MOB-07.19** Verify real streaming, requests, config changes, stale ownership,
+- [ ] **MOB-07.19** Verify real streaming, requests, config changes, stale generations,
   unknown submission, offline reading and large-history interaction on a phone.
 
 ## MOB-08 — Changed-file review and native attachments
@@ -392,7 +468,7 @@ Dependencies: MOB-01/02; MOB-D5. Acceptance: AND-A02/A03/A16/A17.
   rendezvous/confirmation, rate limits and single-use expiry; otherwise omit it.
 - [ ] **MOB-09.09** Register an independently authorized device identity and its
   notification/control scope; preference for separate SSH keys remains explicit.
-- [ ] **MOB-09.10** Implement device unlink/revocation across controller grants and
+- [ ] **MOB-09.10** Implement device unlink/revocation across Still registrations and
   push registrations without claiming to revoke an unrelated SSH credential.
 - [ ] **MOB-09.11** Explain cached-data removal and SSH-key revocation separately;
   offer safe local forget/unlink actions without deleting remote history implicitly.
@@ -412,17 +488,17 @@ Acceptance: AND-A10/A11/A16.
   failure events independently of desktop/phone transport connections.
 - [ ] **MOB-10.03** Keep active worker, active turn, completed Todo, terminal output
   and verified success distinct; unsupported outcomes remain unknown/unverified.
-- [ ] **MOB-10.04** Define notification event IDs and a deduplication key scoped to
+- [x] **MOB-10.04** Define notification event IDs and a deduplication key scoped to
   conversation/execution/request or confirmed outcome.
-- [ ] **MOB-10.05** Persist dispatch intent in an account-private crash-safe outbox;
+- [x] **MOB-10.05** Persist dispatch intent in an account-private crash-safe outbox;
   sending push must not block agent execution or provider response acknowledgements.
-- [ ] **MOB-10.06** Implement bounded retry/backoff/expiry, duplicate suppression and
+- [x] **MOB-10.06** Implement bounded retry/backoff/expiry, duplicate suppression and
   recovery after notifier restart or relay unavailability.
 - [ ] **MOB-10.07** Respect registered devices, notification categories and per-thread
   mute; do not send every token, tool change or parent-summary duplicate.
 - [ ] **MOB-10.08** Mark obsolete/resolved requests and prevent stale outbox entries
   from presenting an answered question as a new permission request.
-- [ ] **MOB-10.09** Suppress historical/migration/replay notifications and distinguish
+- [x] **MOB-10.09** Suppress historical/migration/replay notifications and distinguish
   resume/recovery from a newly completed task.
 - [ ] **MOB-10.10** Verify request/outcome emission with no connected client, relay
   outage/restart, duplicate dispatch and old-worker compatibility.
@@ -455,7 +531,7 @@ Dependencies: MOB-09/10 and an approved MOB-D4 deployment. Acceptance: AND-A10/A
 - [ ] **MOB-11.10** Default to discreet lock-screen copy and expose an explicit
   preview preference; honor OS/channel privacy settings.
 - [ ] **MOB-11.11** Ensure notification actions only open/reconcile state; never
-  auto-approve, retry a prompt or transfer control from an unvalidated intent.
+  auto-approve or retry/submit a command from an unvalidated intent.
 - [ ] **MOB-11.12** Separate dispatch/receipt/open evidence from provider action
   acknowledgement and outcome; do not call an alert delivered merely because queued.
 - [ ] **MOB-11.13** Document Google Play services coverage/non-GMS limitations and
@@ -540,7 +616,7 @@ must have evidence, not only tests selected below.
   damaged cache and native persistence failures with drafts/history present.
 - [ ] **MOB-14.10** Test migration interruption/retry, old-worker negotiation,
   missing provider sessions and server/provider restarts without silent replacement.
-- [ ] **MOB-14.11** Test stale epochs, simultaneous takeovers, duplicate receipts,
+- [ ] **MOB-14.11** Test stale execution generations, concurrent actions, duplicate receipts,
   already-answered permissions and cross-account/project identifiers adversarially.
 - [ ] **MOB-14.12** Test untrusted IPC/intent/URL/attachment metadata, revoked grants,
   path traversal and sensitive data in errors, logs, backups and clipboard output.
@@ -601,7 +677,7 @@ them with the shorter labels below.
 - [ ] **AND-A01** Clean signed build, installation and data-preserving upgrade.
 - [ ] **AND-A02** Fresh-phone discovery of existing authenticated remote work.
 - [ ] **AND-A03** Same conversation/provider session while desktop is powered off.
-- [ ] **AND-A04** Coexisting readers and safe per-conversation explicit control transfer.
+- [ ] **AND-A04** Coexisting readers; either device can act through one authoritative command lane.
 - [ ] **AND-A05** Lost acknowledgements/reconnect without duplicate paid turns.
 - [ ] **AND-A06** Stale/already-answered request reconciliation across devices.
 - [ ] **AND-A07** Draft/attachment/scroll preservation across Android lifecycle changes.
@@ -614,7 +690,7 @@ them with the shorter labels below.
 - [ ] **AND-A14** Compact/adaptive layouts, large text, TalkBack and accessible controls.
 - [ ] **AND-A15** Responsive long-history/streaming and acceptable background resource use.
 - [ ] **AND-A16** Migration/version/cache/server failure without lost or replaced work.
-- [ ] **AND-A17** Trust, auth, ownership and untrusted-intent/path security boundaries.
+- [ ] **AND-A17** Trust, auth, execution scope and untrusted-intent/path security boundaries.
 - [ ] **AND-A18** Existing desktop behavior and agent/terminal regressions preserved.
 
 ## Evidence record format

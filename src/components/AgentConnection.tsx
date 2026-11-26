@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { nativeBridge } from "../bridge/nativeBridge"
+import { nativeErrorMessage } from "../bridge/errors"
+import AgentNotice from "./AgentNotice"
 import { agentConnectionId } from "../agents/workspace"
 import { buildConnectRequest, type AskSessionAuth } from "../session/connectRequest"
 import { clearHostKeyPrompt, connectionError, connectionState, disconnectSession, forgetStoredHostKey, hostKeyPromptFor, isConnectPending, nativeSessionId, reconnectSession, useConnections } from "../session/connections"
@@ -28,7 +30,7 @@ export function useAgentConnection(session: Session | null, askAuth: AskSessionA
       if (!target) return
       const req = await buildConnectRequest(target, ask, key, { localId, sshOnly: true })
       if (req && mounted.current && callbacks.current.session && agentConnectionId(callbacks.current.session) === localId) await reconnectSession(req)
-    } catch (e) { if (mounted.current && connecting.current === localId) setError(e instanceof Error ? e.message : "Could not connect to the server.") }
+    } catch (e) { if (mounted.current && connecting.current === localId) setError(nativeErrorMessage(e, "Could not connect to the server.")) }
     finally { if (connectGeneration.current === generation && connecting.current === localId) { connecting.current = ""; if (mounted.current) setBusy(false) } }
   }, [localId])
   useEffect(() => {
@@ -92,7 +94,7 @@ export function useAgentConnection(session: Session | null, askAuth: AskSessionA
 export function AgentConnectionNotice({ connection }: { connection: ReturnType<typeof useAgentConnection> }) {
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false)
   const prompt = connection.hostPrompt
-  const act = async (fn: () => Promise<unknown>) => { setBusy(true); setError(null); try { await fn() } catch (e) { setError(e instanceof Error ? e.message : "Connection action failed") } finally { setBusy(false) } }
+  const act = async (fn: () => Promise<unknown>) => { setBusy(true); setError(null); try { await fn() } catch (e) { setError(nativeErrorMessage(e, "Connection action failed. Try again.")) } finally { setBusy(false) } }
   if (connection.state === "connected") return null
   if (prompt) return <section className="agent-connection-notice" role="region" aria-label="Verify server identity">
     <strong>{prompt.changed ? "Server identity has changed" : "Verify this server"}</strong><p>{prompt.host}:{prompt.port}</p><code>{prompt.fingerprint}</code>
@@ -101,6 +103,10 @@ export function AgentConnectionNotice({ connection }: { connection: ReturnType<t
       : <button className="agent-primary" disabled={busy} onClick={() => void act(async () => { await nativeBridge.trustHost(prompt.host, prompt.port, prompt.opensshKey); clearHostKeyPrompt(connection.localId); await connection.connect() })}>Trust and connect</button>}
       <button className="agent-button" disabled={busy} onClick={() => void act(async () => { clearHostKeyPrompt(connection.localId); await disconnectSession(connection.localId) })}>Cancel</button></div>{error && <p role="alert">{error}</p>}
   </section>
-  return <div className="agent-connection-notice" role="status"><strong>{connection.busy || connection.state === "connecting" ? "Connecting to your server…" : "Connect to use your agents"}</strong>
-    {connection.error && <p>{connection.error}</p>}{!connection.busy && connection.state !== "connecting" && <button className="agent-button" onClick={() => void connection.connect()}>Connect server</button>}</div>
+  if (connection.busy || connection.state === "connecting") return <AgentNotice className="agent-connection-notice" role="status" tone="working" text="Connecting to your server…" />
+  if (connection.error) {
+    return <AgentNotice className="agent-connection-notice" role="status" tone="attention" text="Can't reach your server" detail={connection.error}
+      actions={<button className="agent-button" onClick={() => void connection.connect()}>Retry</button>} />
+  }
+  return <AgentNotice className="agent-connection-notice" role="status" tone="info" text="Connect to use your agents" actions={<button className="agent-button" onClick={() => void connection.connect()}>Connect server</button>} />
 }
